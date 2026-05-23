@@ -17,7 +17,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | Name | Intended use | Current status | Production runtime? | Notes |
 |---|---|---:|---:|---|
 | DINO-family visual model | dense features / teacher | UNVERIFIED | No | Verify exact repo + weight license. |
-| Depth Anything family | geometry/depth teacher | UNVERIFIED | No | Verify exact version and checkpoint license. |
+| Depth Anything family | geometry/depth teacher | UNVERIFIED / pending_human_review | No | DA3-SMALL setup added for offline teacher use; verify exact code/model card/license before product use. |
 | Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
 | MoGe / point-map model | geometry teacher | UNVERIFIED | No | Verify official license. |
 | VGGT-family | offline multi-view geometry teacher | UNVERIFIED | No | Some checkpoints may differ in license. Verify exact checkpoint. |
@@ -62,3 +62,16 @@ Goal 3 added an optional Depth Pro teacher wrapper.
 - Required for normal tests: no.
 - Mock/fallback status: a fake Depth Pro backend exists only when explicitly selected with `--backend fake`; those artifacts are marked `mock: true`, `synthetic: true`, and `real_perception: false`.
 - Risk: real Depth Pro outputs are monocular estimates and are not control-safe. Use them only as teacher artifacts until calibrated evaluation and legal review are complete.
+
+## Goal 6A dependency update
+
+Goal 6A added explicit setup and a real/fake wrapper for Depth Anything 3.
+
+- Source URL: https://github.com/ByteDance-Seed/depth-anything-3
+- Model/checkpoint source: https://huggingface.co/depth-anything/DA3-SMALL
+- License name/status in HomeBrain: `pending_human_review`; do not mark as runtime-safe, product-safe, or training-approved beyond local review artifacts yet.
+- Intended use: offline geometry/self-calibration teacher producing pseudo-label artifacts.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Mock/fallback status: a fake DA3 backend exists only when explicitly selected with `--backend fake`; those artifacts are marked `mock: true`, `synthetic: true`, and `real_perception: false`.
+- Risk: DA3-SMALL outputs are relative teacher geometry and camera estimates, not robot-frame metric truth or control-safe labels. Weak BEV promotion is gated by self-calibration QA.

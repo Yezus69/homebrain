@@ -64,7 +64,7 @@ def imported_route_metrics(log_dir: str | Path, ordered_events: list[Event]) -> 
             "missing_sensor_notice_count": 0,
             "imported_route_metadata_error": str(exc),
         }
-    if metadata is None or metadata.get("source_type") != "image_sequence":
+    if metadata is None or metadata.get("source_type") not in {"image_sequence", "video"}:
         return {}
 
     frames = [event for event in ordered_events if isinstance(event, FrameEvent)]

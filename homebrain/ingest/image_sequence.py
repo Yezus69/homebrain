@@ -386,6 +386,12 @@ def _build_route_metadata(
         "has_wheel_odometry": False,
         "has_commands": False,
         "has_intrinsics": False,
+        "calibration_class": "uncalibrated_visual",
+        "intrinsics_source": "missing_not_supplied",
+        "extrinsics_source": "missing_not_supplied",
+        "pose_source": "missing_not_supplied",
+        "scale_source": "unknown_image_only",
+        "gravity_floor_source": "missing_not_supplied",
         "user_owned_or_license_unknown": True,
         "image_load_error_count": len(image_load_errors),
         "image_load_errors": image_load_errors,
@@ -435,4 +441,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

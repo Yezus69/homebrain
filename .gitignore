@@ -2,7 +2,7 @@
 runs/
 artifacts/
 checkpoints/
-external/ml-depth-pro/
+external/
 *.pt
 *.pth
 *.onnx

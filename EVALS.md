@@ -284,6 +284,81 @@ Gate interpretation:
 - Full-grid unknown ratio alone is not sufficient evidence for either acceptance or quarantine.
 - Contact sheets are review aids only and are not ground-truth overlays.
 
+## Gate 1.8: DA3 teacher and self-calibration QA
+
+Depth Anything 3 can be used as an offline geometry/self-calibration teacher for real indoor routes or phone video. This gate does not train SpatialMemoryNet, does not mark phone video as robot-frame metric truth, and does not produce control-safe labels.
+
+Setup command:
+```bash
+python -m homebrain.tools.setup_da3_teacher --external-dir external/depth-anything-3 --venv external/venvs/da3 --model-id depth-anything/DA3-SMALL --download
+```
+
+Fake backend verification:
+```bash
+python -m homebrain.teachers.run_teacher --teacher da3 --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/da3_fake
+python -m homebrain.geometry.qa_self_calibration --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/da3_fake --out runs/dummy_da3_self_calib_qa.json
+```
+
+Real backend example:
+```bash
+python -m homebrain.teachers.run_teacher --teacher da3 --backend real --device cpu --model-id depth-anything/DA3-SMALL --max-frames 60 --window-size 10 --stride 1 --log runs/room_walk_001_route_short60 --out runs/room_walk_001_route_short60/teacher_artifacts/da3
+python -m homebrain.geometry.qa_self_calibration --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_da3_self_calib_qa_short60.json
+```
+
+DA3 per-frame artifacts when available:
+```text
+depth.npy
+confidence.npy
+intrinsics.npy
+extrinsics.npy
+metadata.json
+teacher_manifest.json
+```
+
+Manifest and metadata requirements:
+```text
+license_review_status=pending_human_review
+calibration_class=teacher_estimated
+intrinsics_source=teacher_estimated
+extrinsics_source=teacher_estimated
+pose_source=teacher_estimated_camera_pose
+scale_source=teacher_relative_not_metric
+not_robot_frame_truth=true
+control_safe=false
+```
+
+Self-calibration QA metrics:
+```text
+frame_count
+depth_valid_ratio
+confidence_mean
+intrinsics_valid_ratio
+pose_valid_ratio
+pose_jump_outlier_count
+temporal_depth_consistency
+floor_plane_found_ratio
+floor_plane_stability
+scale_source
+promotable_to_weak_bev
+quarantine_reasons
+```
+
+Optional weak BEV command:
+```bash
+python -m homebrain.geometry.da3_to_weak_bev --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --qa runs/room_walk_001_da3_self_calib_qa_short60.json --out runs/room_walk_001_route_short60/geometry/da3_weak_bev
+```
+
+Weak BEV is written only when QA passes, unless `--force-review` is supplied. Any DA3-derived weak BEV must remain:
+```text
+weak_label=true
+control_safe=false
+calibration_class=teacher_estimated
+not_robot_frame_truth=true
+trainable_for=geometry_pretrain_only
+```
+
+Current short60 DA3 QA outcome: structurally valid real DA3 artifacts exist, but weak BEV promotion is quarantined because `pose_jump_outlier_count=1`.
+
 ## Gate 1.5: image-sequence imported routes
 
 Real indoor image folders can be imported into ordinary HomeBrain segment logs with frame artifacts and explicit missing-sensor metadata.

@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 5 BEV QA and SpatialTrainPack v0 completed; next objective is calibration/human review before any SpatialMemoryNet training.
+Goal 6A DA3 teacher setup/run and self-calibration QA completed; DA3 weak BEV promotion is quarantined pending pose-outlier review.
 
 ## Last completed goal
 
-Goal 5: Existing DepthPro-to-BEV outputs packed into deterministic SpatialTrainPack v0 examples, QA reviewed, visualized with contact sheets, and quarantined as low-quality for training.
+Goal 6A: Depth Anything 3 cloned/installed/downloaded as an offline teacher, fake and real DA3 artifacts produced, self-calibration QA added, and weak BEV promotion gated/quarantined.
 
 ## Current implementation status
 
@@ -43,6 +43,16 @@ Goal 5: Existing DepthPro-to-BEV outputs packed into deterministic SpatialTrainP
 - SpatialTrainPack v0 writes deterministic `.npz` examples with BEV labels, confidence, optional height/floor candidate arrays, RGB references, provenance, split, camera-config hash, teacher-manifest hash, `weak_label=true`, and `control_safe=false`.
 - Spatial QA emits structural counts, label/confidence/visibility density metrics, temporal jitter/flicker metrics, `trainable_candidate`, and `quarantine_reasons`.
 - Current short60 SpatialTrainPack is structurally clean but quarantined as low-quality: confidence, label density, and observed/visible coverage are too low for training.
+- `homebrain.tools.setup_da3_teacher` exists and explicitly clones DA3 to `external/depth-anything-3`, creates `external/venvs/da3`, installs dependencies, downloads/caches `depth-anything/DA3-SMALL`, and writes ignored `external/da3_setup_status.json`.
+- `homebrain.teachers.da3_teacher` exists with fake and real backends; fake is test-only and marked `mock=true`, `synthetic=true`, `real_perception=false`.
+- DA3 teacher artifacts write `depth.npy`, `confidence.npy`, `intrinsics.npy`, `extrinsics.npy`, and `metadata.json` per frame when available.
+- DA3 manifests include model id/path, repo commit, dependency status, `license_review_status=pending_human_review`, `calibration_class=teacher_estimated`, `scale_source=teacher_relative_not_metric`, `not_robot_frame_truth=true`, and `control_safety=not_control_safe_training_teacher_only`.
+- `homebrain.ingest.video` exists and imports video frames via cv2 or ffmpeg without faking IMU, wheel odometry, commands, intrinsics, pose, scale, or gravity/floor truth.
+- Imported image/video routes now include calibration metadata fields: `calibration_class`, `intrinsics_source`, `extrinsics_source`, `pose_source`, `scale_source`, and `gravity_floor_source`.
+- `homebrain.geometry.qa_self_calibration` exists and writes DA3/self-calibration QA metrics plus contact sheets.
+- `homebrain.geometry.da3_to_weak_bev` exists and refuses weak BEV promotion unless QA passes or `--force-review` is supplied.
+- Real DA3 ran on `runs/room_walk_001_route_short60` using the ignored external DA3 venv on CPU.
+- Real DA3 artifacts are structurally valid, but self-calibration QA quarantined weak BEV promotion due one pose jump outlier.
 - No student ML yet.
 
 ## Commands that should work
@@ -197,7 +207,7 @@ Latest Goal 5 short60 SpatialTrainPack QA from `runs/room_walk_001_spatial_pack_
 
 ## Known blockers
 
-None yet.
+No external setup blockers. DA3 weak BEV promotion for `runs/room_walk_001_route_short60` is intentionally blocked by QA until `pose_jump_outliers_present` is reviewed; see `BLOCKERS.md`.
 
 ## Rules for future updates
 
@@ -316,3 +326,15 @@ Metrics: QA reported `example_count=60`, `missing_count=0`, `shape_error_count=0
 Blockers: none. `BLOCKERS.md` was not created or updated.
 Risks: the current short60 package is structurally usable for review but not a training candidate; camera intrinsics/extrinsics remain assumed, labels are weak DepthPro-derived geometry rather than ground truth traversability, confidence and visible coverage are low, temporal visible jitter/flicker is notable in reviewed cells, and all examples remain `weak_label=true` and `control_safe=false`.
 Next recommended goal: perform camera calibration or collect a calibrated RGB-D/pose reference sequence, then rerun BEV projection and SpatialTrainPack QA before any SpatialMemoryNet training; optionally add a small human review notes file for the quarantined short60 contact sheets.
+
+### 008 - Goal 6A DA3 teacher + self-calibration QA
+
+Goal attempted: clone/install/download Depth Anything 3 as an offline geometry teacher, add DA3 fake/real teacher support, add video ingest, add calibration metadata, run self-calibration QA, and gate optional weak BEV without training SpatialMemoryNet.
+Files changed: `.gitignore`; `homebrain/teachers/artifacts.py`, `homebrain/teachers/da3_teacher.py`, `homebrain/teachers/registry.py`, `homebrain/teachers/run_teacher.py`, `homebrain/teachers/__init__.py`; `homebrain/tools/__init__.py`, `homebrain/tools/setup_da3_teacher.py`; `homebrain/ingest/image_sequence.py`, `homebrain/ingest/video.py`; `homebrain/geometry/qa_self_calibration.py`, `homebrain/geometry/da3_to_weak_bev.py`; `homebrain/eval/run_eval.py`; `tests/test_da3_teacher_qa.py`; `docs/TEACHER_SETUP.md`; `EVALS.md`; `LICENSE_AUDIT.md`; `BLOCKERS.md`; `CURRENT_STATUS.md`.
+Commands run: `python -m pytest -q`; `python -m homebrain.replay.generate_dummy_log --out runs/dummy_route`; `python -m homebrain.teachers.run_teacher --teacher da3 --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/da3_fake`; `python -m homebrain.geometry.qa_self_calibration --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/da3_fake --out runs/dummy_da3_self_calib_qa.json`; `python -m homebrain.tools.setup_da3_teacher --external-dir external/depth-anything-3 --venv external/venvs/da3 --model-id depth-anything/DA3-SMALL --download`; `.\external\venvs\da3\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher da3 --backend real --device cpu --model-id depth-anything/DA3-SMALL --max-frames 60 --window-size 10 --stride 1 --log runs\room_walk_001_route_short60 --out runs\room_walk_001_route_short60\teacher_artifacts\da3`; `python -m homebrain.teachers.run_teacher --teacher da3 --backend real --device cpu --model-id depth-anything/DA3-SMALL --max-frames 1 --window-size 1 --stride 1 --log runs/room_walk_001_route_short60 --out runs/room_walk_001_route_short60/teacher_artifacts/da3_auto_smoke`; `python -m homebrain.geometry.qa_self_calibration --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_da3_self_calib_qa_short60.json`; `python -m homebrain.eval.run_eval --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_eval_with_da3_short60.json`; `python -m homebrain.geometry.da3_to_weak_bev --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --qa runs/room_walk_001_da3_self_calib_qa_short60.json --out runs/room_walk_001_route_short60/geometry/da3_weak_bev`.
+Test result: pass, 32 tests passed. DA3 setup command exited successfully and wrote `external/da3_setup_status.json`. Real DA3 inference completed on 60 frames with CPU Torch; xFormers emitted a CUDA-extension warning but inference still succeeded. Weak BEV command correctly refused promotion because QA did not pass.
+Artifacts created: ignored DA3 clone at `external/depth-anything-3`; ignored DA3 venv at `external/venvs/da3`; ignored model cache at `external/models/da3/depth-anything__DA3-SMALL`; ignored setup status `external/da3_setup_status.json`; fake DA3 artifacts under `runs/dummy_route/teacher_artifacts/da3_fake/`; fake QA report `runs/dummy_da3_self_calib_qa.json` and contact sheets; real DA3 artifacts under `runs/room_walk_001_route_short60/teacher_artifacts/da3/`; auto-reexec smoke artifacts under `runs/room_walk_001_route_short60/teacher_artifacts/da3_auto_smoke/`; real DA3 eval `runs/room_walk_001_eval_with_da3_short60.json`; real QA report `runs/room_walk_001_da3_self_calib_qa_short60.json` and contact sheets. No DA3 weak BEV or SpatialTrainPack was created because QA blocked promotion.
+Metrics: DA3 setup status reported `success=true`, repo commit `41736238f5bced4debf3f2a12375d2466874866d`, model `download_status=downloaded_or_cached`, `depth_anything_3_api=ok`, `torch_version=2.12.0+cpu`, and `torch_cuda_available=false`. Fake DA3 QA reported `frame_count=6`, `depth_valid_ratio=1.0`, `confidence_mean=0.8299999435742696`, `intrinsics_valid_ratio=1.0`, `pose_valid_ratio=1.0`, `temporal_depth_consistency=0.9873461872339249`, `floor_plane_found_ratio=1.0`, `floor_plane_stability=0.9783915989100933`, `promotable_to_weak_bev=false`, and quarantine reasons `mock_or_synthetic_teacher`, `real_perception_false`. Real DA3 eval reported `frame_count=60`, `teacher_artifact_count=240`, `frames_with_teacher_artifacts=60`, `artifact_load_success=true`, `depth_frame_count=60`, `depth_missing_count=0`, `depth_nan_count=0`, `depth_nonpositive_count=0`, `depth_shape_error_count=0`, and `teacher_mock_used=false`. Real self-calibration QA reported `depth_valid_ratio=1.0`, `confidence_mean=1.0`, `intrinsics_valid_ratio=1.0`, `pose_valid_ratio=1.0`, `pose_jump_outlier_count=1`, `temporal_depth_consistency=0.9791352233683722`, `floor_plane_found_ratio=1.0`, `floor_plane_stability=0.9764022380113602`, `scale_source=teacher_relative_not_metric`, `promotable_to_weak_bev=false`, and quarantine reason `pose_jump_outliers_present`.
+Blockers: real DA3 setup/run is not blocked. DA3 weak BEV promotion is blocked by QA due one pose jump outlier; recorded in `BLOCKERS.md`.
+Risks: DA3 license/model use remains `pending_human_review`; DA3-SMALL outputs are relative teacher geometry, not robot-frame metric truth; the route is image-only with no robot IMU/wheel/command/intrinsics truth; xFormers CUDA extensions are unavailable in the CPU venv; weak BEV was intentionally not generated, so there is no DA3 SpatialTrainPack to train on.
+Next recommended goal: inspect the DA3 pose outlier and either collect a smoother calibrated route or add a pose-window review/repair step before rerunning QA and attempting weak BEV promotion.
