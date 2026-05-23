@@ -42,6 +42,11 @@ frames_with_teacher_artifacts
 missing_artifact_count
 artifact_shape_error_count
 artifact_determinism_pass
+depth_frame_count
+depth_missing_count
+depth_nan_count
+depth_nonpositive_count
+depth_shape_error_count
 ```
 
 ## Gate 2: SpatialMemoryNet v0
@@ -111,6 +116,9 @@ python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.j
 python -m homebrain.teachers.run_teacher --teacher mock --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/mock_teacher
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/mock_teacher_viz
 python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/dummy_eval_with_teacher.json
+python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/depth_pro_fake
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz
+python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json
 ```
 
 As new features are added, Codex must update this file with exact current commands.
@@ -130,6 +138,35 @@ teacher_manifest.json
 ```
 
 All mock teacher manifests and metadata must include `mock: true`, `synthetic: true`, and `real_perception: false`. These metrics validate artifact availability and format only; they are not perception/model performance metrics.
+
+## Current Depth Pro teacher validation
+
+The Depth Pro teacher is optional and defaults to `--backend real`. Real Depth Pro requires the external Apple `ml-depth-pro` package and local checkpoints installed by the operator. HomeBrain does not download weights automatically, and the normal test suite uses only `--backend fake`.
+
+Real Depth Pro per-frame artifacts:
+
+```text
+depth_m.npy
+depth_confidence.npy
+focallength_px.npy
+bev_preview.npy
+metadata.json
+teacher_manifest.json
+```
+
+Real Depth Pro manifests must include `teacher_name=depth_pro`, `mock=false`, `synthetic=false`, `real_perception=true`, `license_review_status=pending_human_review`, and `dependency_status`. Fake Depth Pro backend artifacts are for tests only and must be explicitly marked `mock: true`, `synthetic: true`, and `real_perception: false`.
+
+Depth-specific eval metrics:
+
+```text
+depth_frame_count
+depth_missing_count
+depth_nan_count
+depth_nonpositive_count
+depth_shape_error_count
+```
+
+Depth Pro outputs are offline teacher artifacts for training/evaluation. They are not control-safe runtime dependencies or direct navigation labels.
 
 ## Gate 1.5: image-sequence imported routes
 
@@ -162,4 +199,7 @@ python -m homebrain.replay.replayd --log runs/room_walk_route --out runs/room_wa
 python -m homebrain.teachers.run_teacher --teacher mock --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/mock_teacher
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_mock_teacher_viz
 python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_eval_with_teacher.json
+python -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/depth_pro
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_depth_pro_viz
+python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_eval_with_depth_pro.json
 ```

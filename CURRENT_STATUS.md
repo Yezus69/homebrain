@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 2 real indoor image-sequence ingestion into route logs implemented and verified.
+Goal 3 optional real Depth Pro geometry teacher implemented and verified with a fake test backend.
 
 ## Last completed goal
 
-Goal 2: real indoor image-sequence ingestion into HomeBrain route logs.
+Goal 3: optional Depth Pro teacher wrapper, artifact validation, visualization, setup docs, and tests.
 
 ## Current implementation status
 
@@ -21,7 +21,14 @@ Goal 2: real indoor image-sequence ingestion into HomeBrain route logs.
 - `homebrain.ingest` exists with an image-sequence CLI that imports `.jpg`, `.jpeg`, `.png`, `.pgm`, and `.ppm` frames into normal route logs.
 - Imported image routes write copied frame artifacts, `FrameEvent` records, and `route_metadata.json` with source provenance, fps, frame count, dimensions when consistent, explicit missing sensor notices, and `user_owned_or_license_unknown=true`.
 - Eval emits imported-route metrics when `route_metadata.json` has `source_type=image_sequence`.
-- No ML yet.
+- Optional `homebrain.teachers.depth_pro_teacher` exists for Depth Pro geometry teacher artifacts.
+- Teacher registry supports `--teacher mock` and `--teacher depth_pro`.
+- Real Depth Pro is optional and fails clearly if dependencies/checkpoints are unavailable; HomeBrain does not download weights.
+- Fake Depth Pro backend is explicitly test-only and marked `mock: true`, `synthetic: true`, and `real_perception: false`.
+- Depth Pro artifacts write `depth_m.npy`, `depth_confidence.npy`, `focallength_px.npy`, `bev_preview.npy`, and `metadata.json` per frame.
+- Eval emits Depth Pro validation metrics: `depth_frame_count`, `depth_missing_count`, `depth_nan_count`, `depth_nonpositive_count`, and `depth_shape_error_count`.
+- Depth Pro visualization writes previews for depth/confidence/BEV artifacts and records focal length as scalar metadata.
+- No student ML yet.
 
 ## Commands that should work
 
@@ -38,33 +45,38 @@ python -m homebrain.replay.replayd --log runs/room_walk_route --out runs/room_wa
 python -m homebrain.teachers.run_teacher --teacher mock --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/mock_teacher
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_mock_teacher_viz
 python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_eval_with_teacher.json
+python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/depth_pro_fake
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz
+python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json
+python -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/depth_pro
 ```
 
 ## Metrics snapshot
 
-Latest Goal 2 imported-route eval from `runs/goal2_room_walk_eval_with_teacher.json`:
+Latest Goal 3 fake Depth Pro eval from `runs/dummy_eval_with_depth_pro_fake.json`:
 
 ```json
 {
   "artifact_determinism_pass": true,
   "artifact_load_success": true,
   "artifact_shape_error_count": 0,
-  "brain_output_count": 3,
+  "brain_output_count": 6,
+  "depth_frame_count": 6,
+  "depth_missing_count": 0,
+  "depth_nan_count": 0,
+  "depth_nonpositive_count": 0,
+  "depth_shape_error_count": 0,
   "dropped_frame_count": 0,
-  "eval_runtime_sec": 0.001932,
-  "event_count": 3,
+  "eval_runtime_sec": 0.004258,
+  "event_count": 24,
   "event_ordering_error_count": 0,
-  "frame_count": 3,
-  "frames_with_teacher_artifacts": 3,
-  "image_load_error_count": 0,
-  "imported_frame_count": 3,
+  "frame_count": 6,
+  "frames_with_teacher_artifacts": 6,
   "missing_artifact_count": 0,
-  "missing_sensor_notice_count": 3,
   "replay_determinism_pass": true,
-  "teacher_artifact_count": 15,
-  "teacher_manifest_frame_count": 3,
-  "teacher_mock_used": true,
-  "timestamp_interval_error_count": 0
+  "teacher_artifact_count": 24,
+  "teacher_manifest_frame_count": 6,
+  "teacher_mock_used": true
 }
 ```
 
@@ -141,3 +153,15 @@ Metrics: imported route eval reported `event_count=3`, `frame_count=3`, `importe
 Blockers: none.
 Risks: image dimensions are parsed with lean standard-library header readers, not full image decoding; this avoids OpenCV/Pillow but catches header-level load errors only. Imported image routes still have no real odometry, IMU, command, or calibration data, by design.
 Next recommended goal: run a real self-collected room walk through the importer and mock teacher, then decide whether Goal 3 should begin with teacher-backed dataset loading or a small Goal 2.1 around richer route-source metadata/provenance.
+
+### 004 - Goal 3 optional Depth Pro geometry teacher
+
+Goal attempted: add optional Depth Pro geometry teacher support that can run real Depth Pro when dependencies/checkpoints are installed, while keeping tests dependency-light through an explicit fake backend.
+Files changed: added `homebrain/teachers/depth_pro_teacher.py`, `homebrain/teachers/registry.py`, `tests/test_depth_pro_teacher.py`, and `docs/TEACHER_SETUP.md`; updated `homebrain/teachers/__init__.py`, `homebrain/teachers/artifacts.py`, `homebrain/teachers/run_teacher.py`, `homebrain/teachers/visualize_artifacts.py`, `EVALS.md`, `LICENSE_AUDIT.md`, and `CURRENT_STATUS.md`.
+Commands run: `python -m pytest tests\test_depth_pro_teacher.py -q`; `python -m pytest -q`; `python -m homebrain.replay.generate_dummy_log --out runs/dummy_route`; `python -m homebrain.replay.replayd --log runs/dummy_route --out runs/replayed_route`; `python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.json`; `python -m homebrain.teachers.run_teacher --teacher mock --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/mock_teacher`; `python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/mock_teacher_viz`; `python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/dummy_eval_with_teacher.json`; `python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/depth_pro_fake`; `python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz`; `python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json`.
+Test result: pass, 18 tests passed. Targeted Depth Pro tests also passed, 4 tests passed.
+Artifacts created: refreshed `runs/dummy_route/`, `runs/replayed_route/`, and `runs/dummy_eval.json`; refreshed mock artifacts under `runs/dummy_route/teacher_artifacts/mock_teacher/`, visualization under `runs/mock_teacher_viz/`, and eval at `runs/dummy_eval_with_teacher.json`; fake Depth Pro artifacts under `runs/dummy_route/teacher_artifacts/depth_pro_fake/`, visualization under `runs/depth_pro_fake_viz/`, and eval at `runs/dummy_eval_with_depth_pro_fake.json`.
+Metrics: fake Depth Pro eval reported `event_count=24`, `frame_count=6`, `brain_output_count=6`, `teacher_artifact_count=24`, `teacher_mock_used=true`, `artifact_load_success=true`, `frames_with_teacher_artifacts=6`, `missing_artifact_count=0`, `artifact_shape_error_count=0`, `artifact_determinism_pass=true`, `teacher_manifest_frame_count=6`, `depth_frame_count=6`, `depth_missing_count=0`, `depth_nan_count=0`, `depth_nonpositive_count=0`, `depth_shape_error_count=0`. Mock teacher eval still reported `teacher_artifact_count=30`, `artifact_load_success=true`, and `frames_with_teacher_artifacts=6`.
+Blockers: none.
+Risks: real Depth Pro was not executed because this environment has no confirmed local Depth Pro dependency/checkpoint setup; Apple Depth Pro license status remains `pending_human_review`; fake backend output is test-only and not real perception; Depth Pro depth is an offline teacher signal and not control-safe.
+Next recommended goal: after human license review and local checkpoint setup, run real Depth Pro on a short imported room route and compare artifact/eval summaries against the fake backend before using depth artifacts for student-training data.

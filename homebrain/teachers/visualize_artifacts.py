@@ -48,11 +48,19 @@ def _write_manifest(path: Path, manifest: JsonDict) -> None:
         handle.write("\n")
 
 
+def _artifact_kinds(manifest: JsonDict) -> tuple[str, ...]:
+    kinds = manifest.get("artifact_kinds")
+    if not isinstance(kinds, list) or not all(isinstance(kind, str) for kind in kinds):
+        return EXPECTED_ARTIFACT_KINDS
+    return tuple(kinds)
+
+
 def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
     root = Path(artifacts_dir)
     output = Path(out_dir)
     manifest = load_teacher_manifest(root)
     frame_outputs: list[JsonDict] = []
+    artifact_kinds = _artifact_kinds(manifest)
 
     for frame_record in manifest["frames"]:
         if not isinstance(frame_record, dict):
@@ -61,20 +69,26 @@ def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
         frame_dir = output / frame_name
         artifacts = frame_record.get("artifacts", {})
         previews: dict[str, str] = {}
+        scalar_values: dict[str, float] = {}
 
-        for kind in EXPECTED_ARTIFACT_KINDS:
+        for kind in artifact_kinds:
             artifact_record = artifacts.get(kind) if isinstance(artifacts, dict) else None
             if not isinstance(artifact_record, dict):
                 continue
             array = load_array(root / str(artifact_record["path"]))
+            if array.ndim == 0 or (array.ndim == 1 and array.size == 1):
+                scalar_values[kind] = float(array.reshape(-1)[0])
+                continue
             if kind == "dense_features":
                 rgb = _normalize_to_uint8(array[:, :, :3])
                 target = frame_dir / f"{kind}.ppm"
                 _write_ppm(target, rgb)
-            else:
+            elif array.ndim == 2:
                 image = _normalize_to_uint8(array)
                 target = frame_dir / f"{kind}.pgm"
                 _write_pgm(target, image)
+            else:
+                continue
             previews[kind] = target.relative_to(output).as_posix()
 
         frame_outputs.append(
@@ -83,6 +97,7 @@ def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
                 "camera_id": frame_record["camera_id"],
                 "frame_id": frame_record["frame_id"],
                 "previews": previews,
+                "scalar_values": scalar_values,
             }
         )
 
@@ -91,6 +106,7 @@ def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
         "source_artifacts": str(root.as_posix()),
         "teacher_name": manifest["teacher_name"],
         "mock": bool(manifest["mock"]),
+        "artifact_kinds": list(artifact_kinds),
         "visualization_written": True,
         "frame_count": len(frame_outputs),
         "frames": frame_outputs,

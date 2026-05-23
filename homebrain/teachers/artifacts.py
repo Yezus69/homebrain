@@ -22,12 +22,20 @@ EXPECTED_ARTIFACT_KINDS: tuple[str, ...] = (
     "dynamic_mask",
     "bev_preview",
 )
+DEPTH_PRO_ARTIFACT_KINDS: tuple[str, ...] = (
+    "depth_m",
+    "depth_confidence",
+    "focallength_px",
+    "bev_preview",
+)
 
 EXPECTED_DTYPES: dict[str, str] = {
     "depth": "float32",
+    "depth_m": "float32",
     "depth_confidence": "float32",
     "dense_features": "float32",
     "dynamic_mask": "uint8",
+    "focallength_px": "float32",
     "bev_preview": "float32",
 }
 
@@ -42,10 +50,15 @@ class TeacherArtifactValidation:
     artifact_shape_error_count: int
     artifact_determinism_pass: bool
     manifest_frame_count: int
+    depth_frame_count: int = 0
+    depth_missing_count: int = 0
+    depth_nan_count: int = 0
+    depth_nonpositive_count: int = 0
+    depth_shape_error_count: int = 0
     errors: tuple[str, ...] = ()
 
     def to_metrics(self) -> dict[str, Any]:
-        return {
+        metrics = {
             "teacher_artifact_count": self.teacher_artifact_count,
             "teacher_mock_used": self.teacher_mock_used,
             "artifact_load_success": self.artifact_load_success,
@@ -55,6 +68,23 @@ class TeacherArtifactValidation:
             "artifact_determinism_pass": self.artifact_determinism_pass,
             "teacher_manifest_frame_count": self.manifest_frame_count,
         }
+        if (
+            self.depth_frame_count
+            or self.depth_missing_count
+            or self.depth_nan_count
+            or self.depth_nonpositive_count
+            or self.depth_shape_error_count
+        ):
+            metrics.update(
+                {
+                    "depth_frame_count": self.depth_frame_count,
+                    "depth_missing_count": self.depth_missing_count,
+                    "depth_nan_count": self.depth_nan_count,
+                    "depth_nonpositive_count": self.depth_nonpositive_count,
+                    "depth_shape_error_count": self.depth_shape_error_count,
+                }
+            )
+        return metrics
 
 
 def frame_key(frame: FrameEvent | JsonDict) -> str:
@@ -64,10 +94,12 @@ def frame_key(frame: FrameEvent | JsonDict) -> str:
 
 
 def expected_shape(kind: str, width: int, height: int) -> tuple[int, ...]:
-    if kind in {"depth", "depth_confidence", "dynamic_mask"}:
+    if kind in {"depth", "depth_m", "depth_confidence", "dynamic_mask"}:
         return (height, width)
     if kind == "dense_features":
         return (height, width, FEATURE_CHANNELS)
+    if kind == "focallength_px":
+        return (1,)
     if kind == "bev_preview":
         return BEV_PREVIEW_SHAPE
     raise ValueError(f"unknown teacher artifact kind {kind!r}")
@@ -161,6 +193,13 @@ def _record_width_height(frame: FrameEvent | JsonDict) -> tuple[int, int]:
     return int(frame["width"]), int(frame["height"])
 
 
+def _artifact_kinds(manifest: JsonDict) -> tuple[str, ...]:
+    kinds = manifest.get("artifact_kinds")
+    if not isinstance(kinds, list) or not all(isinstance(kind, str) for kind in kinds):
+        return EXPECTED_ARTIFACT_KINDS
+    return tuple(kinds)
+
+
 def validate_teacher_artifacts(
     artifacts_dir: str | Path,
     *,
@@ -187,18 +226,27 @@ def validate_teacher_artifacts(
     manifest_frame_count = len(manifest_frames) if isinstance(manifest_frames, list) else 0
     frames_by_key = _manifest_frames_by_key(manifest)
     expected_frames = _expected_frames(frames, manifest)
+    artifact_kinds = _artifact_kinds(manifest)
+    validates_depth_m = "depth_m" in artifact_kinds
 
     valid_artifact_count = 0
     frames_with_all_artifacts = 0
     missing_artifact_count = 0
     shape_error_count = 0
+    depth_frame_count = 0
+    depth_missing_count = 0
+    depth_nan_count = 0
+    depth_nonpositive_count = 0
+    depth_shape_error_count = 0
     determinism_pass = bool(manifest.get("deterministic", False))
 
     for expected_frame in expected_frames:
         key = frame_key(expected_frame)
         frame_record = frames_by_key.get(key)
         if frame_record is None:
-            missing_artifact_count += len(EXPECTED_ARTIFACT_KINDS)
+            missing_artifact_count += len(artifact_kinds)
+            if validates_depth_m:
+                depth_missing_count += 1
             determinism_pass = False
             errors.append(f"missing frame artifact record: {key}")
             continue
@@ -213,16 +261,20 @@ def validate_teacher_artifacts(
 
         artifacts = frame_record.get("artifacts")
         if not isinstance(artifacts, dict):
-            missing_artifact_count += len(EXPECTED_ARTIFACT_KINDS)
+            missing_artifact_count += len(artifact_kinds)
+            if validates_depth_m:
+                depth_missing_count += 1
             determinism_pass = False
             errors.append(f"missing artifacts object for frame artifact record: {key}")
             continue
 
         width, height = _record_width_height(expected_frame)
-        for kind in EXPECTED_ARTIFACT_KINDS:
+        for kind in artifact_kinds:
             artifact_record = artifacts.get(kind)
             if not isinstance(artifact_record, dict):
                 missing_artifact_count += 1
+                if kind == "depth_m":
+                    depth_missing_count += 1
                 frame_complete = False
                 determinism_pass = False
                 errors.append(f"missing {kind} artifact record for frame {key}")
@@ -231,6 +283,8 @@ def validate_teacher_artifacts(
             relative_path = artifact_record.get("path")
             if not isinstance(relative_path, str):
                 missing_artifact_count += 1
+                if kind == "depth_m":
+                    depth_missing_count += 1
                 frame_complete = False
                 determinism_pass = False
                 errors.append(f"missing {kind} artifact path for frame {key}")
@@ -239,6 +293,8 @@ def validate_teacher_artifacts(
             artifact_path = root / relative_path
             if not artifact_path.exists():
                 missing_artifact_count += 1
+                if kind == "depth_m":
+                    depth_missing_count += 1
                 frame_complete = False
                 determinism_pass = False
                 errors.append(f"missing {kind} artifact file for frame {key}: {relative_path}")
@@ -248,14 +304,33 @@ def validate_teacher_artifacts(
                 array = load_array(artifact_path)
             except Exception as exc:  # noqa: BLE001 - keep eval resilient.
                 shape_error_count += 1
+                if kind == "depth_m":
+                    depth_shape_error_count += 1
                 frame_complete = False
                 determinism_pass = False
                 errors.append(f"failed to load {kind} artifact for frame {key}: {exc}")
                 continue
 
             valid_artifact_count += 1
-            expected = expected_shape(kind, width, height)
-            expected_dtype = EXPECTED_DTYPES[kind]
+            try:
+                expected = expected_shape(kind, width, height)
+                expected_dtype = EXPECTED_DTYPES[kind]
+            except KeyError:
+                shape_error_count += 1
+                if kind == "depth_m":
+                    depth_shape_error_count += 1
+                frame_complete = False
+                determinism_pass = False
+                errors.append(f"unknown artifact dtype for {kind} frame {key}")
+                continue
+            except ValueError as exc:
+                shape_error_count += 1
+                if kind == "depth_m":
+                    depth_shape_error_count += 1
+                frame_complete = False
+                determinism_pass = False
+                errors.append(str(exc))
+                continue
             manifest_shape = artifact_record.get("shape")
             manifest_dtype = artifact_record.get("dtype")
             if (
@@ -265,12 +340,19 @@ def validate_teacher_artifacts(
                 or manifest_dtype != expected_dtype
             ):
                 shape_error_count += 1
+                if kind == "depth_m":
+                    depth_shape_error_count += 1
                 frame_complete = False
                 determinism_pass = False
                 errors.append(
                     f"shape/dtype error for {kind} frame {key}: "
                     f"array shape={array.shape} dtype={array.dtype}"
                 )
+            elif kind == "depth_m":
+                depth_frame_count += 1
+                depth_nan_count += int(np.count_nonzero(~np.isfinite(array)))
+                finite = array[np.isfinite(array)]
+                depth_nonpositive_count += int(np.count_nonzero(finite <= np.float32(0.0)))
 
             expected_hash = artifact_record.get("sha256")
             if not isinstance(expected_hash, str) or file_sha256(artifact_path) != expected_hash:
@@ -290,5 +372,10 @@ def validate_teacher_artifacts(
         artifact_shape_error_count=shape_error_count,
         artifact_determinism_pass=determinism_pass and missing_artifact_count == 0 and shape_error_count == 0,
         manifest_frame_count=manifest_frame_count,
+        depth_frame_count=depth_frame_count,
+        depth_missing_count=depth_missing_count,
+        depth_nan_count=depth_nan_count,
+        depth_nonpositive_count=depth_nonpositive_count,
+        depth_shape_error_count=depth_shape_error_count,
         errors=tuple(errors),
     )

@@ -18,7 +18,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 |---|---|---:|---:|---|
 | DINO-family visual model | dense features / teacher | UNVERIFIED | No | Verify exact repo + weight license. |
 | Depth Anything family | geometry/depth teacher | UNVERIFIED | No | Verify exact version and checkpoint license. |
-| Apple Depth Pro | metric depth teacher | UNVERIFIED | No | Verify official license. |
+| Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
 | MoGe / point-map model | geometry teacher | UNVERIFIED | No | Verify official license. |
 | VGGT-family | offline multi-view geometry teacher | UNVERIFIED | No | Some checkpoints may differ in license. Verify exact checkpoint. |
 | SAM-family video segmentation | mask/dynamic-object teacher | UNVERIFIED | No | Verify exact version. |
@@ -48,3 +48,17 @@ Goal 1 added the teacher artifact interface and deterministic mock teacher only.
 - The mock teacher is local HomeBrain code and emits `mock: true`, `synthetic: true`, and `real_perception: false`.
 - The only numerical file dependency used by the implementation is `numpy`, which was already allowed by `AGENTS.md` for initial development.
 - Candidate real teacher licenses above remain `UNVERIFIED` and must be audited before any real wrapper/checkpoint is treated as usable.
+
+## Goal 3 dependency update
+
+Goal 3 added an optional Depth Pro teacher wrapper.
+
+- Source URL: https://github.com/apple/ml-depth-pro
+- License URL: https://github.com/apple/ml-depth-pro/blob/main/LICENSE
+- Model/checkpoint source: official Depth Pro checkpoint setup from the Apple repository.
+- License name/status in HomeBrain: `pending_human_review`; do not mark as runtime-safe or product-safe yet.
+- Intended use: offline training-time geometry teacher producing pseudo-label artifacts.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Mock/fallback status: a fake Depth Pro backend exists only when explicitly selected with `--backend fake`; those artifacts are marked `mock: true`, `synthetic: true`, and `real_perception: false`.
+- Risk: real Depth Pro outputs are monocular estimates and are not control-safe. Use them only as teacher artifacts until calibrated evaluation and legal review are complete.
