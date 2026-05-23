@@ -1,0 +1,21 @@
+# generated artifacts
+runs/
+artifacts/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# os/editor
+.DS_Store
+.vscode/
+.idea/
