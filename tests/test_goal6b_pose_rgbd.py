@@ -95,6 +95,15 @@ def test_tum_rgbd_route_truth_bev_pack_qa_and_compare(tmp_path) -> None:
     assert qa["shape_error_count"] == 0
     assert qa["nan_count"] == 0
     assert qa["control_safe_true_count"] == 0
+    assert qa["pose_label_count"] == 11
+    assert qa["pose_label_frame"] == "camera_relative_dataset_pose"
+    pack_manifest = json.loads((pack / "manifest.json").read_text(encoding="utf-8"))
+    assert pack_manifest["not_robot_frame_truth"] is True
+    first_example = np.load(pack / pack_manifest["examples"][0]["example_path"], allow_pickle=False)
+    assert first_example["pose_delta_mask"].item() == 1.0
+    assert str(first_example["pose_label_frame"].item()) == "camera_relative_dataset_pose"
+    assert first_example["pose_delta"].shape == (3,)
+    assert first_example["pose_delta"][0] != 0.0
     write_json(qa_path, qa)
 
     compare_geometry_sources(log_dir=route, source_a=bev, source_b=bev, out_path=comparison_path)

@@ -98,3 +98,47 @@ def test_spatial_v0_tiny_train_eval_and_modeld_outputs(tmp_path) -> None:
     with np.load(modeld_out / outputs[0].local_bev_ref, allow_pickle=False) as data:
         assert data["bev_logits"].shape == (5, 4, 4)
         assert data["uncertainty_grid"].shape == (4, 4)
+
+
+def test_spatial_v0_multi_pack_manifest_reports_sources(tmp_path) -> None:
+    manifest_path = tmp_path / "datasets.json"
+    train_out = tmp_path / "spatial_v0_manifest"
+    eval_out = tmp_path / "manifest_eval.json"
+    packs = []
+    for source_name in ("da3_fixture", "tum_fixture"):
+        route = tmp_path / f"{source_name}_route"
+        bev = tmp_path / f"{source_name}_bev"
+        pack = tmp_path / f"{source_name}_pack"
+        features = tmp_path / f"{source_name}_dino_fake"
+        _write_route(route, count=12)
+        _write_bev(route, bev, count=12, confidence=0.8)
+        pack_spatial_dataset(log_dir=route, bev_dir=bev, out_dir=pack)
+        run_dino_teacher(route, features, backend_name="fake")
+        packs.append({"source_name": source_name, "dataset": str(pack), "features": str(features)})
+    manifest_path.write_text(
+        json.dumps({"schema_version": "homebrain.spatial_v0_dataset_manifest.v0", "packs": packs}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    metrics = train_spatial_v0(
+        dataset_manifest=manifest_path,
+        out_dir=train_out,
+        max_steps=5,
+        device_name="cpu",
+        batch_size=4,
+    )
+    assert metrics["dataset_manifest"] == manifest_path.as_posix()
+    assert metrics["control_safe"] is False
+    assert len(metrics["source_metrics"]["val"]) == 2
+    assert {item["source_name"] for item in metrics["source_metrics"]["val"]} == {"da3_fixture", "tum_fixture"}
+
+    eval_metrics = eval_spatial_v0(
+        checkpoint=train_out / "checkpoint.pt",
+        dataset_manifest=manifest_path,
+        out_path=eval_out,
+        split="val",
+        device_name="cpu",
+    )
+    assert eval_metrics["source_name"] == "combined"
+    assert len(eval_metrics["sources"]) == 2
+    assert eval_metrics["control_safe"] is False

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from bisect import bisect_right
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,11 @@ from torch.utils.data import Dataset
 
 from homebrain.data.spatial_dataset import SPATIAL_MANIFEST_FILE, load_example_npz, read_json
 from homebrain.messages.schema import FrameEvent, JsonDict
-from homebrain.teachers.artifacts import frame_key, load_array, load_teacher_manifest
+from homebrain.teachers.artifacts import file_sha256, frame_key, load_array, load_teacher_manifest
 
 BEV_OUTPUT_CHANNELS: tuple[str, ...] = ("free", "occupied", "unknown", "traversable", "risky")
 SENSOR_MASK_FIELDS: tuple[str, ...] = ("pose", "action", "imu", "wheel")
+SPATIAL_DATASET_MANIFEST_SCHEMA_VERSION = "homebrain.spatial_v0_dataset_manifest.v0"
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,13 @@ class FeatureRecord:
     patch_path: Path
     cls_path: Path
     feature_shape: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class SpatialPackSpec:
+    source_name: str
+    dataset_dir: Path
+    feature_dir: Path
 
 
 class DINOFeatureStore:
@@ -93,6 +102,7 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         *,
         feature_dir: str | Path | None = None,
         split: str | None = None,
+        source_name: str | None = None,
         tiny_overfit: bool = False,
         tiny_limit: int = 8,
         allow_tiny_fixture_features: bool = False,
@@ -102,6 +112,8 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         if self.manifest.get("control_safe") is not False:
             raise ValueError("SpatialTrainPack must remain control_safe=false")
         self.robot_supervision_grade = _robot_supervision_grade(self.manifest)
+        self.source_name = source_name or _source_name(self.root, self.manifest)
+        self.not_robot_frame_truth = bool(self.manifest.get("not_robot_frame_truth", False))
         records = self.manifest.get("examples") or self.manifest.get("frames")
         if not isinstance(records, list):
             raise ValueError("SpatialTrainPack manifest examples must be a list")
@@ -115,6 +127,10 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
             raise ValueError(f"no examples found in {self.root}")
         self.feature_store = DINOFeatureStore(feature_dir) if feature_dir is not None else None
         self.allow_tiny_fixture_features = allow_tiny_fixture_features
+        self.feature_alignment = self._feature_alignment_summary()
+        if self.feature_store is not None and self.feature_alignment["missing_feature_count"] > 0:
+            missing = self.feature_alignment["missing_feature_keys"][:5]
+            raise ValueError(f"DINO features are missing for SpatialTrainPack examples: {missing}")
         grid_shape = self.manifest.get("grid_shape")
         if not isinstance(grid_shape, list) or len(grid_shape) != 2:
             raise ValueError("SpatialTrainPack manifest must include grid_shape")
@@ -134,11 +150,15 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         timestamp_s = np.asarray([(timestamp_ns - self.start_timestamp_ns) / 1_000_000_000.0], dtype=np.float32)
         sensor_mask = np.zeros((len(SENSOR_MASK_FIELDS),), dtype=np.float32)
         pose_delta = np.zeros((3,), dtype=np.float32)
-        pose_mask = np.asarray([0.0], dtype=np.float32)
+        pose_mask = np.asarray([_scalar_float(example, "pose_delta_mask", 0.0)], dtype=np.float32)
         if "pose_delta" in example:
             pose_delta = np.asarray(example["pose_delta"], dtype=np.float32).reshape(3)
-            pose_mask = np.asarray([1.0], dtype=np.float32)
-            sensor_mask[0] = 1.0
+            if "pose_delta_mask" not in example:
+                pose_mask = np.asarray([1.0], dtype=np.float32)
+        sensor_mask[0] = pose_mask[0]
+        sensor_mask[1] = _scalar_float(example, "action_label_mask", 0.0)
+        sensor_mask[2] = _scalar_float(example, "imu_label_mask", 0.0)
+        sensor_mask[3] = _scalar_float(example, "wheel_label_mask", 0.0)
 
         return {
             "features": torch.from_numpy(np.transpose(patch_features, (2, 0, 1)).copy()),
@@ -152,6 +172,12 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
             "pose_mask": torch.from_numpy(pose_mask),
             "frame_id": torch.tensor(int(record["frame_id"]), dtype=torch.int64),
             "timestamp_ns": torch.tensor(timestamp_ns, dtype=torch.int64),
+            "source_name": self.source_name,
+            "robot_supervision_grade": self.robot_supervision_grade,
+            "not_robot_frame_truth": torch.tensor(
+                _scalar_bool(example, "not_robot_frame_truth", self.not_robot_frame_truth),
+                dtype=torch.bool,
+            ),
         }
 
     def _load_first_feature_shape(self) -> tuple[int, int, int]:
@@ -173,6 +199,36 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
             cls_feature = patch_features.mean(axis=(0, 1)).astype(np.float32)
             return patch_features, cls_feature, np.asarray([0.0], dtype=np.float32)
         raise ValueError("DINO feature artifacts are required unless tiny fixture features are explicitly enabled")
+
+    def _feature_alignment_summary(self) -> JsonDict:
+        if self.feature_store is None:
+            return {
+                "feature_artifacts": None,
+                "example_count": len(self.records),
+                "feature_frame_count": 0,
+                "aligned_example_count": 0,
+                "missing_feature_count": 0,
+                "extra_feature_count": 0,
+                "missing_feature_keys": [],
+                "extra_feature_keys": [],
+            }
+        example_keys = {
+            f"{record['sequence_id']}:{record['camera_id']}:{record['frame_id']}"
+            for record in self.records
+        }
+        feature_keys = set(self.feature_store.records)
+        missing = sorted(example_keys - feature_keys)
+        extra = sorted(feature_keys - example_keys)
+        return {
+            "feature_artifacts": self.feature_store.root.as_posix(),
+            "example_count": len(self.records),
+            "feature_frame_count": len(feature_keys),
+            "aligned_example_count": len(example_keys & feature_keys),
+            "missing_feature_count": len(missing),
+            "extra_feature_count": len(extra),
+            "missing_feature_keys": missing,
+            "extra_feature_keys": extra[:50],
+        }
 
 
 def _bev_labels_and_mask(example: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -204,6 +260,31 @@ def _tiny_fixture_features(example: dict[str, np.ndarray]) -> np.ndarray:
     return repeated.astype(np.float32)
 
 
+def _scalar_float(example: dict[str, np.ndarray], field: str, default: float) -> float:
+    if field not in example:
+        return default
+    try:
+        return float(np.asarray(example[field]).item())
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _scalar_bool(example: dict[str, np.ndarray], field: str, default: bool) -> bool:
+    if field not in example:
+        return default
+    try:
+        return bool(np.asarray(example[field]).item())
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _source_name(root: Path, manifest: dict[str, Any]) -> str:
+    source = manifest.get("source_depth_teacher_name")
+    if isinstance(source, str) and source:
+        return source
+    return root.name
+
+
 def _robot_supervision_grade(manifest: dict[str, Any]) -> str:
     existing = manifest.get("robot_supervision_grade")
     if isinstance(existing, str) and existing in {
@@ -228,3 +309,130 @@ def _robot_supervision_grade(manifest: dict[str, Any]) -> str:
     if source_name in {"da3", "depth_pro"} or "weak_bev" in source_bev or source_backend in {"real", "fake"}:
         return "weak_visual_geometry"
     return "unknown"
+
+
+class SpatialMultiPackDataset(Dataset[dict[str, Any]]):
+    def __init__(
+        self,
+        pack_specs: list[SpatialPackSpec],
+        *,
+        split: str | None = None,
+        tiny_overfit: bool = False,
+        tiny_limit: int = 8,
+    ) -> None:
+        if not pack_specs:
+            raise ValueError("dataset manifest must include at least one pack")
+        self.datasets = [
+            SpatialTrainDataset(
+                spec.dataset_dir,
+                feature_dir=spec.feature_dir,
+                split=split,
+                source_name=spec.source_name,
+                tiny_overfit=tiny_overfit,
+                tiny_limit=tiny_limit,
+            )
+            for spec in pack_specs
+        ]
+        self.datasets = [dataset for dataset in self.datasets if len(dataset) > 0]
+        if not self.datasets:
+            raise ValueError("no examples found across dataset manifest")
+        self.cumulative_sizes: list[int] = []
+        total = 0
+        for dataset in self.datasets:
+            total += len(dataset)
+            self.cumulative_sizes.append(total)
+        self.grid_shape = self.datasets[0].grid_shape
+        self.feature_shape = self.datasets[0].feature_shape
+        for dataset in self.datasets[1:]:
+            if dataset.grid_shape != self.grid_shape:
+                raise ValueError(f"mixed BEV grid shapes are not supported: {dataset.grid_shape} != {self.grid_shape}")
+            if dataset.feature_shape[-1] != self.feature_shape[-1]:
+                raise ValueError(
+                    "mixed DINO feature dimensions are not supported: "
+                    f"{dataset.feature_shape[-1]} != {self.feature_shape[-1]}"
+                )
+        grades = sorted({dataset.robot_supervision_grade for dataset in self.datasets})
+        self.robot_supervision_grade = grades[0] if len(grades) == 1 else "mixed"
+        names = sorted({dataset.source_name for dataset in self.datasets})
+        self.source_name = names[0] if len(names) == 1 else "combined"
+        self.feature_alignment = {
+            "sources": [dataset.feature_alignment for dataset in self.datasets],
+            "example_count": len(self),
+            "aligned_example_count": sum(int(dataset.feature_alignment["aligned_example_count"]) for dataset in self.datasets),
+            "missing_feature_count": sum(int(dataset.feature_alignment["missing_feature_count"]) for dataset in self.datasets),
+        }
+
+    def __len__(self) -> int:
+        return self.cumulative_sizes[-1]
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        dataset_index = bisect_right(self.cumulative_sizes, index)
+        previous = 0 if dataset_index == 0 else self.cumulative_sizes[dataset_index - 1]
+        return self.datasets[dataset_index][index - previous]
+
+    def source_datasets(self) -> list[SpatialTrainDataset]:
+        return list(self.datasets)
+
+
+def load_spatial_dataset_manifest(path: str | Path) -> list[SpatialPackSpec]:
+    manifest_path = Path(path)
+    data = read_json(manifest_path)
+    packs_raw = data.get("packs", data.get("datasets"))
+    if isinstance(data, list):
+        packs_raw = data
+    if not isinstance(packs_raw, list):
+        raise ValueError("dataset manifest must contain a packs list")
+    base = manifest_path.parent
+    specs: list[SpatialPackSpec] = []
+    for index, item in enumerate(packs_raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"dataset manifest pack {index} must be an object")
+        dataset_value = item.get("dataset", item.get("dataset_dir"))
+        feature_value = item.get("features", item.get("feature_dir"))
+        if not isinstance(dataset_value, str) or not isinstance(feature_value, str):
+            raise ValueError(f"dataset manifest pack {index} must include dataset and features")
+        dataset_dir = _resolve_manifest_path(base, dataset_value)
+        feature_dir = _resolve_manifest_path(base, feature_value)
+        source_name = item.get("source_name")
+        specs.append(
+            SpatialPackSpec(
+                source_name=str(source_name) if isinstance(source_name, str) and source_name else dataset_dir.name,
+                dataset_dir=dataset_dir,
+                feature_dir=feature_dir,
+            )
+        )
+    return specs
+
+
+def dataset_manifest_hashes(
+    *,
+    dataset_manifest: str | Path | None,
+    pack_specs: list[SpatialPackSpec],
+) -> JsonDict:
+    hashes: JsonDict = {
+        "dataset_manifest_sha256": file_sha256(dataset_manifest) if dataset_manifest is not None else None,
+        "packs": [],
+    }
+    pack_hashes: list[JsonDict] = []
+    for spec in pack_specs:
+        pack_hashes.append(
+            {
+                "source_name": spec.source_name,
+                "dataset": spec.dataset_dir.as_posix(),
+                "dataset_manifest_sha256": file_sha256(spec.dataset_dir / SPATIAL_MANIFEST_FILE),
+                "features": spec.feature_dir.as_posix(),
+                "feature_manifest_sha256": file_sha256(spec.feature_dir / "teacher_manifest.json"),
+            }
+        )
+    hashes["packs"] = pack_hashes
+    return hashes
+
+
+def _resolve_manifest_path(base: Path, value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    direct = Path.cwd() / path
+    if direct.exists():
+        return direct
+    return base / path

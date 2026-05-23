@@ -39,6 +39,16 @@ REQUIRED_EXAMPLE_FIELDS: tuple[str, ...] = (
 OPTIONAL_EXAMPLE_FIELDS: tuple[str, ...] = (
     "bev_height",
     "bev_floor_candidate",
+    "not_robot_frame_truth",
+    "split_unit_id",
+    "pose_delta",
+    "pose_delta_mask",
+    "pose_label_frame",
+    "pose_label_source",
+    "pose_label_target_frame_id",
+    "action_label_mask",
+    "imu_label_mask",
+    "wheel_label_mask",
 )
 
 BEV_LABEL_FIELDS: tuple[str, ...] = (
@@ -93,6 +103,10 @@ def scalar_bool(value: bool) -> np.ndarray:
     return np.asarray(value, dtype=np.bool_)
 
 
+def scalar_float(value: float) -> np.ndarray:
+    return np.asarray(value, dtype=np.float32)
+
+
 def write_deterministic_npz(path: str | Path, arrays: dict[str, np.ndarray]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -143,4 +157,3 @@ def as_float(value: Any, default: float = 0.0) -> float:
         if np.isfinite(number):
             return number
     return default
-

@@ -82,6 +82,9 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
     nan_count = 0
     weak_label_false_count = 0
     control_safe_true_count = 0
+    not_robot_frame_truth_false_count = 0
+    pose_label_count = 0
+    pose_label_missing_mask_count = 0
     label_overlap_cell_count = 0
     label_sum_error_cell_count = 0
     frame_qualities: list[FrameQuality] = []
@@ -123,6 +126,14 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
             weak_label_false_count += 1
         if _safe_scalar_bool(example, "control_safe", True) is not False:
             control_safe_true_count += 1
+        if "not_robot_frame_truth" in example and _safe_scalar_bool(example, "not_robot_frame_truth", False) is not True:
+            not_robot_frame_truth_false_count += 1
+        if "pose_delta_mask" in example:
+            pose_mask = _safe_scalar_float(example, "pose_delta_mask", 0.0)
+            if pose_mask > 0.0:
+                pose_label_count += 1
+            else:
+                pose_label_missing_mask_count += 1
 
         arrays = {field: np.asarray(example[field]) for field in BEV_LABEL_FIELDS + ("bev_confidence",)}
         if "bev_floor_candidate" in example:
@@ -191,6 +202,11 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
         "nan_count": nan_count,
         "weak_label_false_count": weak_label_false_count,
         "control_safe_true_count": control_safe_true_count,
+        "not_robot_frame_truth_false_count": not_robot_frame_truth_false_count,
+        "pose_label_count": pose_label_count,
+        "pose_label_missing_mask_count": pose_label_missing_mask_count,
+        "pose_label_frame": manifest.get("pose_label_frame", "none"),
+        "pose_label_convention": manifest.get("pose_label_convention"),
         "control_safe": False if manifest.get("control_safe") is False and control_safe_true_count == 0 else True,
         "robot_supervision_grade": robot_supervision_grade,
         "split_counts": split_counts,
@@ -306,6 +322,13 @@ def _safe_scalar_str(example: dict[str, np.ndarray], field: str, default: str) -
 def _safe_scalar_int(example: dict[str, np.ndarray], field: str, default: int) -> int:
     try:
         return int(np.asarray(example[field]).item())
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _safe_scalar_float(example: dict[str, np.ndarray], field: str, default: float) -> float:
+    try:
+        return float(np.asarray(example[field]).item())
     except Exception:  # noqa: BLE001
         return default
 

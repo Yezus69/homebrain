@@ -107,6 +107,53 @@ python -m homebrain.brain.visualize_spatial_outputs --log runs/spatial_v0_modeld
 
 Current Goal 7 outcome: real DINOv2-small artifacts exist for the short60 route with `feature_shape=[16,16,384]`; tiny overfit trained on 8 examples and wrote `runs/spatial_v0_overfit/checkpoint.pt`; train loss dropped from `0.6873307228088379` to `0.013037266675382853` with `loss_reduction_ratio=0.9810320326987496`. Full-pack eval is a generalization check only for this tiny overfit and reported `val_loss=2.3066179419402033`, `bev_iou_or_proxy=0.6176380563061684`, `pose_delta_rmse=null`, and `inference_fps=74.37446661472443`. Modeld and replayd load the checkpoint and emit BEV/pose/uncertainty `BrainOutputEvent`s with `representation_pretraining_only=true` and `control_safe=false`.
 
+## Gate 2.1: SpatialMemoryNet v0 real train/val source comparison
+
+Required before trajectory scoring:
+- deterministic sequence-aware train/val/review splits
+- no direct train/val adjacency for contiguous frame windows
+- multi-pack dataset manifests
+- TUM RGB-D pose-delta labels with masks and a documented non-robot frame convention
+- real DINO features for every training example
+- DA3-only, TUM-only, and DA3+TUM mixed train/val runs
+- per-source and combined eval JSON
+- modeld/replayd checkpoint load on real routes
+- prediction-vs-label contact sheets
+
+Dataset manifest examples:
+```bash
+python -m homebrain.train.train_spatial_v0 --dataset-manifest runs/spatial_v0_goal7b_manifests/da3_only.json --out runs/spatial_v0_goal7b_da3_only --max-steps 60 --batch-size 8
+python -m homebrain.train.train_spatial_v0 --dataset-manifest runs/spatial_v0_goal7b_manifests/tum_only.json --out runs/spatial_v0_goal7b_tum_only --max-steps 60 --batch-size 8
+python -m homebrain.train.train_spatial_v0 --dataset-manifest runs/spatial_v0_goal7b_manifests/da3_tum_mixed.json --out runs/spatial_v0_goal7b_da3_tum_mixed --max-steps 60 --batch-size 8
+```
+
+Current Goal 7B results:
+```text
+DA3-only: train_loss_start=0.6888465762138367, train_loss_end=0.07643128633499145, val_loss=0.155940979719162, bev_iou_or_proxy=0.7961926609277725, pose_delta_rmse=null
+TUM-only: train_loss_start=0.6987095204266635, train_loss_end=0.1375339532440359, val_loss=0.17899657785892487, bev_iou_or_proxy=0.6982371807098389, pose_delta_rmse=0.027870545917272272
+DA3+TUM mixed: train_loss_start=0.6956273503601551, train_loss_end=0.14402997074648738, val_loss=0.19234523177146912, bev_iou_or_proxy=0.7420604333281517, pose_delta_rmse=0.04466951437836996
+Mixed per-source val: DA3 val_loss=0.2110961526632309, TUM val_loss=0.1939407934745153
+```
+
+Pose label convention:
+```text
+pose_label_frame=camera_relative_dataset_pose
+transform=inv(T_dataset_camera_current) @ T_dataset_camera_next
+components=[camera_relative_x_m, camera_relative_z_m_stored_as_dy, relative_yaw_about_camera_y_rad]
+not_robot_odometry=true
+control_safe=false
+```
+
+Replay/modeld verification:
+```bash
+python -m homebrain.brain.modeld --log runs/room_walk_001_route_short60 --checkpoint runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt --features runs/room_walk_001_route_short60/teacher_artifacts/dino --out runs/spatial_v0_goal7b_modeld_short60
+python -m homebrain.replay.replayd --log runs/room_walk_001_route_short60 --checkpoint runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt --features runs/room_walk_001_route_short60/teacher_artifacts/dino --out runs/spatial_v0_goal7b_replayed_short60
+python -m homebrain.brain.modeld --log runs/tum_freiburg1_xyz_route --checkpoint runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt --features runs/tum_freiburg1_xyz_route/teacher_artifacts/dino --out runs/spatial_v0_goal7b_modeld_tum
+python -m homebrain.replay.replayd --log runs/tum_freiburg1_xyz_route --checkpoint runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt --features runs/tum_freiburg1_xyz_route/teacher_artifacts/dino --out runs/spatial_v0_goal7b_replayed_tum
+```
+
+All Goal 7B checkpoints and BrainOutputEvents remain `representation_pretraining_only=true` and `control_safe=false`. There is still no trajectory scorer.
+
 ## Gate 3: trajectory scorer
 
 Required before control integration:

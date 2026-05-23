@@ -33,3 +33,13 @@ Likely cause: not applicable.
 Minimal next repair action: not applicable. The next useful action is broader training/eval beyond the deliberate 8-example overfit subset.
 
 Command output summary: `python -m homebrain.tools.setup_dino_teacher --model-id dinov2_vits14 --device cuda` wrote `external/dino_setup_status.json` with `success=true`; real DINO wrote 60 frame feature artifacts under `runs/room_walk_001_route_short60/teacher_artifacts/dino`; `python -m pytest -q` reported 36 passed. Residual risk: the checkpoint is an overfit representation-pretraining artifact only, not a navigation or control-safe model.
+
+## 2026-05-23 - Goal 7B SpatialMemoryNet v0 train/val source comparison status
+
+Exact failure: none active. Pytest passed, deterministic split repeat manifests matched byte-for-byte for both accepted packs, real TUM DINO extraction completed, DA3-only/TUM-only/DA3+TUM train/eval runs completed, and the mixed checkpoint loaded in modeld/replayd on short60 and TUM routes.
+
+Likely cause: not applicable.
+
+Minimal next repair action: not applicable. The next useful action is either trajectory scoring if this baseline is accepted as sufficient, or data/model repair if the current validation losses and source gap are considered too weak.
+
+Command output summary: `python -m pytest -q` reported 37 passed. DA3-only val loss was `0.155940979719162`; TUM-only val loss was `0.17899657785892487` with `pose_delta_rmse=0.027870545917272272`; mixed val loss was `0.19234523177146912`, with mixed per-source val losses DA3 `0.2110961526632309` and TUM `0.1939407934745153`. Replay evals reported `replay_determinism_pass=true`, short60 `brain_output_count=120` over 60 frames, and TUM `brain_output_count=240` over 120 frames. Residual risk: all outputs are representation-pretraining-only, not control-safe, and no trajectory scorer exists.

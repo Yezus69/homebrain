@@ -103,3 +103,13 @@ Goal 7 added DINOv2-small as an offline frozen visual feature teacher and PyTorc
 - Required for normal tests: no. Tests use `--backend fake` artifacts marked `mock=true`, `synthetic=true`, and `real_perception=false`.
 - Mock/fallback status: fake DINO backend exists only when explicitly selected with `--backend fake`.
 - Risk: DINO features are visual representation artifacts, not geometry/traversability truth or control-safety evidence; all Goal 7 outputs remain `representation_pretraining_only=true` and `control_safe=false`.
+
+## Goal 7B dependency update
+
+Goal 7B did not add new external dependencies, models, datasets, or product-runtime requirements.
+
+- DINOv2-small was reused as an offline frozen feature teacher and run on the TUM `freiburg1_xyz` route; status remains `pending_human_review`.
+- TUM RGB-D was reused for public RGB-D/depth/pose geometry anchors; status remains `CC BY 4.0` observed with `license_review_status=pending_human_review`.
+- DA3 weak geometry labels were reused only as `weak_visual_geometry`; status remains `pending_human_review`.
+- TUM pose deltas are stored as `camera_relative_dataset_pose`, explicitly not robot odometry or robot-frame truth.
+- All new checkpoints, metrics, replay outputs, and contact sheets are `representation_pretraining_only=true` and `control_safe=false`.

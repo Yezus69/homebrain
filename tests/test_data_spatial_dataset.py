@@ -155,13 +155,18 @@ def test_pack_spatial_dataset_writes_deterministic_npz_examples(tmp_path) -> Non
     assert manifest["weak_label"] is True
     assert manifest["control_safe"] is False
     assert manifest["example_count"] == 12
-    assert manifest["split_counts"] == {"review": 2, "train": 9, "val": 1}
+    assert manifest["split_counts"] == {"review": 3, "train": 7, "val": 2}
+    splits = [record["split"] for record in manifest["examples"]]
+    for previous, current in zip(splits, splits[1:]):
+        assert {previous, current} != {"train", "val"}
 
     first_example = np.load(out_a / manifest["examples"][0]["example_path"], allow_pickle=False)
     assert first_example["weak_label"].item() is True
     assert first_example["control_safe"].item() is False
+    assert first_example["not_robot_frame_truth"].item() is True
+    assert first_example["pose_delta_mask"].item() == 0.0
     assert first_example["bev_free"].shape == (4, 4)
-    assert str(first_example["split"].item()) == "review"
+    assert str(first_example["split"].item()) == "train"
 
 
 def test_qa_spatial_dataset_quarantines_low_quality_labels(tmp_path) -> None:
