@@ -13,7 +13,10 @@ from homebrain.teachers.artifacts import (
     load_teacher_manifest,
     validate_teacher_artifacts,
 )
-from homebrain.teachers.depth_pro_teacher import run_depth_pro_teacher
+from homebrain.teachers.depth_pro_teacher import (
+    _resolve_depth_pro_checkpoint_uri,
+    run_depth_pro_teacher,
+)
 from homebrain.teachers.registry import create_teacher
 from homebrain.teachers.run_teacher import main as run_teacher_main
 from homebrain.teachers.visualize_artifacts import visualize_artifacts
@@ -45,6 +48,32 @@ def test_depth_pro_registry_and_fake_cli_backend_work(tmp_path) -> None:
     )
     assert exit_code == 0
     assert (artifacts / "teacher_manifest.json").exists()
+
+
+def test_depth_pro_checkpoint_resolution_prefers_env(tmp_path, monkeypatch) -> None:
+    checkpoint = tmp_path / "custom_depth_pro.pt"
+    checkpoint.write_bytes(b"placeholder")
+    monkeypatch.setenv("DEPTH_PRO_CHECKPOINT", str(checkpoint))
+
+    class DummyDepthPro:
+        __file__ = str(tmp_path / "ml-depth-pro" / "src" / "depth_pro" / "__init__.py")
+
+    assert _resolve_depth_pro_checkpoint_uri(DummyDepthPro) == str(checkpoint)
+
+
+def test_depth_pro_checkpoint_resolution_finds_editable_repo_checkpoint(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "ml-depth-pro"
+    package_dir = repo / "src" / "depth_pro"
+    package_dir.mkdir(parents=True)
+    checkpoint = repo / "checkpoints" / "depth_pro.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"placeholder")
+    monkeypatch.delenv("DEPTH_PRO_CHECKPOINT", raising=False)
+
+    class DummyDepthPro:
+        __file__ = str(package_dir / "__init__.py")
+
+    assert _resolve_depth_pro_checkpoint_uri(DummyDepthPro) == str(checkpoint)
 
 
 def test_fake_depth_pro_backend_writes_artifacts_and_manifest(tmp_path) -> None:

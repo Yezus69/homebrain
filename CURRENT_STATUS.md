@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 3 optional real Depth Pro geometry teacher implemented and verified with a fake test backend.
+Goal 3.1 real Depth Pro smoke test on a short imported room-walk route completed; next objective is depth-to-BEV preparation.
 
 ## Last completed goal
 
-Goal 3: optional Depth Pro teacher wrapper, artifact validation, visualization, setup docs, and tests.
+Goal 3.1: real Depth Pro backend smoke-tested on a 60-frame real room-walk route, visualized, evaluated, and kept offline teacher-only.
 
 ## Current implementation status
 
@@ -28,6 +28,10 @@ Goal 3: optional Depth Pro teacher wrapper, artifact validation, visualization, 
 - Depth Pro artifacts write `depth_m.npy`, `depth_confidence.npy`, `focallength_px.npy`, `bev_preview.npy`, and `metadata.json` per frame.
 - Eval emits Depth Pro validation metrics: `depth_frame_count`, `depth_missing_count`, `depth_nan_count`, `depth_nonpositive_count`, and `depth_shape_error_count`.
 - Depth Pro visualization writes previews for depth/confidence/BEV artifacts and records focal length as scalar metadata.
+- Existing real room-walk import `runs/room_walk_001_route` has 350 frames; Goal 3.1 created a bounded 60-frame route at `runs/room_walk_001_route_short60`.
+- Real Depth Pro ran from the local ignored `external/ml-depth-pro` install with local checkpoint `external/ml-depth-pro/checkpoints/depth_pro.pt` and CUDA.
+- Real Depth Pro artifacts from Goal 3.1 are structurally usable as offline geometry inputs for the next depth-to-BEV prototype, but they are not production-approved or control-safe.
+- Real Depth Pro did not emit model confidence in this run, so `depth_confidence.npy` is the documented HomeBrain heuristic.
 - No student ML yet.
 
 ## Commands that should work
@@ -49,6 +53,10 @@ python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --lo
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz
 python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json
 python -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/depth_pro
+python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk_001/frames --out runs/room_walk_001_route_short60 --camera front_rgb --fps 10 --max-frames 60
+.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --device cuda --log runs\room_walk_001_route_short60 --out runs\room_walk_001_route_short60\teacher_artifacts\depth_pro
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_depth_pro_viz_short60
+python -m homebrain.eval.run_eval --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_eval_with_depth_pro_short60.json
 ```
 
 ## Metrics snapshot
@@ -77,6 +85,25 @@ Latest Goal 3 fake Depth Pro eval from `runs/dummy_eval_with_depth_pro_fake.json
   "teacher_artifact_count": 24,
   "teacher_manifest_frame_count": 6,
   "teacher_mock_used": true
+}
+```
+
+Latest Goal 3.1 real Depth Pro eval from `runs/room_walk_001_eval_with_depth_pro_short60.json`:
+
+```json
+{
+  "artifact_load_success": true,
+  "artifact_shape_error_count": 0,
+  "depth_frame_count": 60,
+  "depth_missing_count": 0,
+  "depth_nan_count": 0,
+  "depth_nonpositive_count": 0,
+  "depth_shape_error_count": 0,
+  "frame_count": 60,
+  "frames_with_teacher_artifacts": 60,
+  "teacher_artifact_count": 240,
+  "teacher_manifest_frame_count": 60,
+  "teacher_mock_used": false
 }
 ```
 
@@ -165,3 +192,15 @@ Metrics: fake Depth Pro eval reported `event_count=24`, `frame_count=6`, `brain_
 Blockers: none.
 Risks: real Depth Pro was not executed because this environment has no confirmed local Depth Pro dependency/checkpoint setup; Apple Depth Pro license status remains `pending_human_review`; fake backend output is test-only and not real perception; Depth Pro depth is an offline teacher signal and not control-safe.
 Next recommended goal: after human license review and local checkpoint setup, run real Depth Pro on a short imported room route and compare artifact/eval summaries against the fake backend before using depth artifacts for student-training data.
+
+### 005 - Goal 3.1 real Depth Pro room-walk smoke test
+
+Goal attempted: run the already-implemented real Depth Pro backend on a short real imported room-walk route, visualize artifacts, evaluate them, and decide whether the real geometry artifacts are usable for the next depth-to-BEV step.
+Files changed: updated `CURRENT_STATUS.md` only. Existing uncommitted edits in `.gitignore`, `docs/TEACHER_SETUP.md`, `homebrain/teachers/depth_pro_teacher.py`, and `tests/test_depth_pro_teacher.py` were present before this run and were not reverted.
+Commands run: `python -m pytest -q`; `python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk_001/frames --out runs/room_walk_001_route_short60 --camera front_rgb --fps 10 --max-frames 60`; `.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --device cuda --log runs\room_walk_001_route_short60 --out runs\room_walk_001_route_short60\teacher_artifacts\depth_pro`; `python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_depth_pro_viz_short60`; `python -m homebrain.eval.run_eval --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_eval_with_depth_pro_short60.json`; artifact stats one-liner over the real Depth Pro `.npy` files.
+Test result: pass, 20 tests passed. Real Depth Pro teacher, visualization, and eval commands all exited 0.
+Artifacts created: `runs/room_walk_001_route_short60/`; `runs/room_walk_001_route_short60/teacher_artifacts/depth_pro/teacher_manifest.json`; per-frame real Depth Pro `depth_m.npy`, `depth_confidence.npy`, `focallength_px.npy`, `bev_preview.npy`, and `metadata.json` for 60 frames; `runs/room_walk_001_depth_pro_viz_short60/visualization_manifest.json`; per-frame PGM previews under `runs/room_walk_001_depth_pro_viz_short60/`; `runs/room_walk_001_eval_with_depth_pro_short60.json`; teacher stdout/stderr logs at `runs/room_walk_001_depth_pro_teacher.out.log` and `runs/room_walk_001_depth_pro_teacher.err.log`.
+Metrics: eval reported `event_count=60`, `frame_count=60`, `imported_frame_count=60`, `image_load_error_count=0`, `timestamp_interval_error_count=0`, `missing_sensor_notice_count=3`, `replay_determinism_pass=true`, `brain_output_count=60`, `artifact_load_success=true`, `frames_with_teacher_artifacts=60`, `missing_artifact_count=0`, `artifact_shape_error_count=0`, `teacher_artifact_count=240`, `teacher_manifest_frame_count=60`, `teacher_mock_used=false`, `depth_frame_count=60`, `depth_missing_count=0`, `depth_nan_count=0`, `depth_nonpositive_count=0`, and `depth_shape_error_count=0`. Artifact summary found depth shape `[1080, 1920]`, BEV preview shape `[16, 16]`, finite depth ratio `1.0`, depth median range `0.7821933031082153..1.4078009128570557` meters, depth max range `1.3864846229553223..2.9322547912597656` meters, confidence mean range `0.9991635084152222..0.9997700452804565`, and focal length range `2102.803955078125..2180.53564453125` px. Visualization manifest reported `visualization_written=true` and `frame_count=60`.
+Blockers: none. `BLOCKERS.md` was not created or updated.
+Risks: Apple Depth Pro remains `pending_human_review` and is not production-approved; outputs are monocular offline teacher geometry and are not control-safe navigation labels; no ground-truth calibration or metric-depth validation exists for this room walk; route is image-only with no IMU, wheel odometry, commands, or intrinsics; `depth_confidence.npy` came from the HomeBrain heuristic because this Depth Pro prediction exposed only `depth` and `focallength_px`; real backend artifacts are nondeterministic (`artifact_determinism_pass=false`) and should not be used as a determinism gate.
+Next recommended goal: build the smallest depth-to-BEV prototype that consumes real Depth Pro `depth_m.npy` plus focal length metadata from this short route, writes explicit geometry/occupancy preview artifacts, and evaluates shape/load/finiteness without claiming traversability or control safety.

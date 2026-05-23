@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import importlib
+import os
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -64,6 +66,7 @@ class RealDepthProBackend:
 
     def __init__(self, *, device: str | None = None) -> None:
         self.device = device
+        self._checkpoint_uri: str | None = None
         self._depth_pro: Any | None = None
         self._model: Any | None = None
         self._transform: Any | None = None
@@ -75,6 +78,7 @@ class RealDepthProBackend:
             "depth_pro_package": "loaded" if self._depth_pro is not None else "not_loaded",
             "model_loaded": self._model is not None,
             "weights_status": "loaded_from_local_depth_pro_install" if self._model is not None else "not_loaded",
+            "checkpoint_uri": self._checkpoint_uri or "depth_pro_default",
             "device": self.device or "depth_pro_default",
             "downloads_attempted_by_homebrain": False,
         }
@@ -89,10 +93,11 @@ class RealDepthProBackend:
         tensor = self._transform(image)
         if self.device is not None and hasattr(tensor, "to"):
             tensor = tensor.to(self.device)
+        model_f_px = self._model_focal_length(f_px, tensor)
 
         context = self._torch.no_grad() if self._torch is not None else nullcontext()
         with context:
-            prediction = self._model.infer(tensor, f_px=f_px)
+            prediction = self._model.infer(tensor, f_px=model_f_px)
 
         depth = _to_numpy(prediction["depth"])
         focallength = _optional_float_from_prediction(prediction.get("focallength_px"))
@@ -121,12 +126,13 @@ class RealDepthProBackend:
             ) from exc
 
         try:
-            model, transform = depth_pro.create_model_and_transforms()
+            checkpoint_uri = _resolve_depth_pro_checkpoint_uri(depth_pro)
+            model, transform = _create_depth_pro_model_and_transforms(depth_pro, checkpoint_uri)
         except Exception as exc:  # noqa: BLE001 - missing weights surface here.
             raise DepthProUnavailableError(
                 "Depth Pro is installed but the model/checkpoints could not be loaded. "
-                "Run the Depth Pro checkpoint setup outside tests, then retry; HomeBrain "
-                "does not download weights automatically."
+                "Run the Depth Pro checkpoint setup outside tests, set DEPTH_PRO_CHECKPOINT "
+                "if needed, then retry; HomeBrain does not download weights automatically."
             ) from exc
 
         try:
@@ -137,6 +143,7 @@ class RealDepthProBackend:
         model.eval()
         if self.device is not None and hasattr(model, "to"):
             model = model.to(self.device)
+        self._checkpoint_uri = checkpoint_uri
         self._depth_pro = depth_pro
         self._model = model
         self._transform = transform
@@ -161,6 +168,20 @@ class RealDepthProBackend:
 
         rgb = _raw_frame_to_rgb(frame_path, frame)
         return Image.fromarray(rgb, mode="RGB"), _intrinsics_focal_length_px(frame.intrinsics)
+
+    def _model_focal_length(self, value: float | None, tensor: Any) -> Any:
+        if value is None or self._torch is None:
+            return value
+        if hasattr(value, "to"):
+            return value.to(
+                device=getattr(tensor, "device", None),
+                dtype=getattr(tensor, "dtype", None),
+            )
+        return self._torch.as_tensor(
+            value,
+            device=getattr(tensor, "device", None),
+            dtype=getattr(tensor, "dtype", None),
+        )
 
 
 class FakeDepthProBackend:
@@ -359,6 +380,38 @@ def run_depth_pro_teacher(
 ) -> TeacherRunSummary:
     teacher = create_depth_pro_teacher(backend_name=backend_name, device=device)
     return teacher.run(TeacherRunConfig(log_dir=Path(log_dir), out_dir=Path(out_dir)))
+
+
+def _create_depth_pro_model_and_transforms(depth_pro: Any, checkpoint_uri: str | None) -> tuple[Any, Any]:
+    if checkpoint_uri is None:
+        return depth_pro.create_model_and_transforms()
+
+    depth_pro_config_module = importlib.import_module("depth_pro.depth_pro")
+    config = replace(
+        depth_pro_config_module.DEFAULT_MONODEPTH_CONFIG_DICT,
+        checkpoint_uri=checkpoint_uri,
+    )
+    return depth_pro.create_model_and_transforms(config=config)
+
+
+def _resolve_depth_pro_checkpoint_uri(depth_pro: Any) -> str | None:
+    env_checkpoint = os.environ.get("DEPTH_PRO_CHECKPOINT")
+    if env_checkpoint:
+        return env_checkpoint
+
+    module_file = getattr(depth_pro, "__file__", None)
+    if isinstance(module_file, str):
+        module_path = Path(module_file).resolve()
+        for parent in module_path.parents:
+            candidate = parent / "checkpoints" / "depth_pro.pt"
+            if candidate.exists():
+                return str(candidate)
+
+    cwd_candidate = Path.cwd() / "checkpoints" / "depth_pro.pt"
+    if cwd_candidate.exists():
+        return str(cwd_candidate)
+
+    return None
 
 
 def _created_at(deterministic: bool) -> str:

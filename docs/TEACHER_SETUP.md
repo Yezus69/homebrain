@@ -26,16 +26,35 @@ pip install -e .
 source get_pretrained_models.sh
 ```
 
-On Windows, run the shell script from Git Bash or WSL, or follow the official repository's current checkpoint download instructions.
+On Windows without Conda, a local venv works. From this repository root:
+
+```powershell
+cd external\ml-depth-pro
+py -3.10 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv\Scripts\python.exe -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+.\.venv\Scripts\python.exe -m pip install -e .
+
+New-Item -ItemType Directory -Force checkpoints
+curl.exe -L --fail --continue-at - --output checkpoints\depth_pro.pt https://ml-site.cdn-apple.com/models/depth-pro/depth_pro.pt
+```
+
+If using Hugging Face instead of Apple's direct URL, recent `huggingface_hub` versions use the `hf` CLI:
+
+```powershell
+.\.venv\Scripts\hf.exe download --local-dir checkpoints apple/DepthPro
+```
+
+HomeBrain looks for the checkpoint in the editable `ml-depth-pro` clone. If the weights live elsewhere, set `DEPTH_PRO_CHECKPOINT` to the full `depth_pro.pt` path before running the real backend.
 
 ### Run Real Depth Pro
 
 After importing a route:
 
-```bash
-python -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/depth_pro
-python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_depth_pro_viz
-python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_depth_pro_eval.json
+```powershell
+.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --device cuda --log runs\room_walk_route --out runs\room_walk_route\teacher_artifacts\depth_pro
+.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.visualize_artifacts --artifacts runs\room_walk_route\teacher_artifacts\depth_pro --out runs\room_walk_depth_pro_viz
+.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.eval.run_eval --log runs\room_walk_route --teacher-artifacts runs\room_walk_route\teacher_artifacts\depth_pro --out runs\room_walk_depth_pro_eval.json
 ```
 
 If Depth Pro or local checkpoints are unavailable, the CLI fails clearly. HomeBrain does not download weights automatically.
