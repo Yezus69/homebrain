@@ -359,6 +359,59 @@ trainable_for=geometry_pretrain_only
 
 Current short60 DA3 QA outcome: structurally valid real DA3 artifacts exist, but weak BEV promotion is quarantined because `pose_jump_outlier_count=1`.
 
+## Gate 1.9: DA3 pose windows and RGB-D truth anchor
+
+DA3 pose diagnostics and stable-window selection can unlock weak geometry labels without pretending a route-level pose outlier disappeared. This gate does not train SpatialMemoryNet and does not mark phone video or public RGB-D data as robot-frame control truth.
+
+Required DA3 diagnostics:
+```bash
+python -m homebrain.geometry.inspect_pose_sequence --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_da3_pose_inspect_short60
+python -m homebrain.geometry.select_stable_windows --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_da3_stable_windows_short60.json --min-window 20
+```
+
+Required DA3 window-gated weak BEV and pack:
+```bash
+python -m homebrain.geometry.da3_to_weak_bev --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --qa runs/room_walk_001_da3_self_calib_qa_short60.json --window-spec runs/room_walk_001_da3_stable_windows_short60.json --out runs/room_walk_001_route_short60/geometry/da3_weak_bev_stable_windows_short60
+python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/da3_weak_bev_stable_windows_short60 --out runs/room_walk_001_da3_weak_bev_stable_windows_short60_eval.json
+python -m homebrain.data.pack_spatial_dataset --log runs/room_walk_001_route_short60 --bev runs/room_walk_001_route_short60/geometry/da3_weak_bev_stable_windows_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/da3 --out runs/room_walk_001_da3_stable_spatial_pack_short60
+python -m homebrain.data.qa_spatial_dataset --dataset runs/room_walk_001_da3_stable_spatial_pack_short60 --out runs/room_walk_001_da3_stable_spatial_pack_qa_short60.json
+```
+
+Public RGB-D truth-anchor commands:
+```bash
+python -m homebrain.datasets.setup_tum_rgbd --out data/public/tum_rgbd --sequence freiburg1_xyz --download
+python -m homebrain.datasets.tum_rgbd_to_route --source data/public/tum_rgbd/freiburg1_xyz --out runs/tum_freiburg1_xyz_route --max-frames 120
+python -m homebrain.geometry.rgbd_truth_to_bev --log runs/tum_freiburg1_xyz_route --out runs/tum_freiburg1_xyz_route/geometry/rgbd_truth_bev
+python -m homebrain.geometry.validate_bev --bev runs/tum_freiburg1_xyz_route/geometry/rgbd_truth_bev --out runs/tum_freiburg1_xyz_rgbd_truth_bev_eval.json
+python -m homebrain.data.pack_spatial_dataset --log runs/tum_freiburg1_xyz_route --bev runs/tum_freiburg1_xyz_route/geometry/rgbd_truth_bev --out runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack
+python -m homebrain.data.qa_spatial_dataset --dataset runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack_qa.json
+```
+
+Geometry comparison command:
+```bash
+python -m homebrain.geometry.compare_geometry_sources --log runs/room_walk_001_route_short60 --a runs/room_walk_001_route_short60/geometry/da3_weak_bev_stable_windows_short60 --b runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_geometry_compare_da3_depthpro_short60.json
+```
+
+Gate metrics:
+```text
+pose_jump_outlier_count
+outlier_deltas[].previous_frame_id/current_frame_id
+accepted_window_count
+excluded_frame_ids
+bev_missing_count
+bev_shape_error_count
+bev_nan_count
+example_count
+missing_count
+shape_error_count
+nan_count
+control_safe_true_count
+valid_mask_disagreement_mean
+occupancy_disagreement_mean
+```
+
+Current Goal 6B outcome: short60 DA3 pose diagnostics identify exactly one outlier delta, frame 19 to frame 20. Stable-window selection accepts windows `0..19` and `21..59`, producing a 59-example DA3 weak-label pack with zero missing/shape/nan errors. TUM `freiburg1_xyz` setup/import/truth-BEV produces a 120-example geometry-anchor pack with zero missing/shape/nan errors. All artifacts remain `control_safe=false` and TUM license review remains `pending_human_review`.
+
 ## Gate 1.5: image-sequence imported routes
 
 Real indoor image folders can be imported into ordinary HomeBrain segment logs with frame artifacts and explicit missing-sensor metadata.

@@ -11,6 +11,7 @@ from homebrain.messages.schema import JsonDict
 from homebrain.replay.segment_log import load_manifest
 from homebrain.teachers.artifacts import (
     file_sha256,
+    frame_key,
     load_array,
     load_teacher_manifest,
     relative_to_root,
@@ -27,13 +28,18 @@ def convert_da3_to_weak_bev(
     teacher_artifacts_dir: str | Path,
     qa_path: str | Path,
     out_dir: str | Path,
+    window_spec_path: str | Path | None = None,
     force_review: bool = False,
 ) -> Path:
     log_root = Path(log_dir)
     teacher_root = Path(teacher_artifacts_dir)
     output = Path(out_dir)
     qa = _read_json(qa_path)
-    if qa.get("promotable_to_weak_bev") is not True and not force_review:
+    window_spec = _read_json(window_spec_path) if window_spec_path is not None else None
+    accepted_window_lookup = _accepted_window_lookup(window_spec) if window_spec is not None else None
+    if accepted_window_lookup is not None and not accepted_window_lookup:
+        raise ValueError(f"window spec has no accepted frames: {window_spec_path}")
+    if qa.get("promotable_to_weak_bev") is not True and not force_review and accepted_window_lookup is None:
         reasons = qa.get("quarantine_reasons")
         raise ValueError(f"QA did not approve weak BEV promotion; reasons={reasons}")
 
@@ -46,13 +52,28 @@ def convert_da3_to_weak_bev(
     for source_record in teacher_manifest["frames"]:
         if not isinstance(source_record, dict):
             continue
+        stable_window_id = (
+            accepted_window_lookup.get(frame_key(source_record))
+            if accepted_window_lookup is not None
+            else None
+        )
+        if accepted_window_lookup is not None and stable_window_id is None:
+            continue
         try:
-            record = _write_frame(output=output, teacher_root=teacher_root, source_record=source_record)
+            record = _write_frame(
+                output=output,
+                teacher_root=teacher_root,
+                source_record=source_record,
+                stable_window_id=stable_window_id,
+            )
         except Exception as exc:  # noqa: BLE001 - preserve frame failure in manifest.
             warnings.append(f"frame_{source_record.get('frame_id')}_failed:{exc}")
             continue
         frame_records.append(record)
         warnings.extend(str(item) for item in record.get("warnings", []))
+
+    if accepted_window_lookup is not None and not frame_records:
+        raise ValueError("window spec accepted frames, but none matched DA3 teacher frames")
 
     manifest: JsonDict = {
         "schema_version": BEV_SCHEMA_VERSION,
@@ -67,6 +88,11 @@ def convert_da3_to_weak_bev(
         "source_depth_real_perception": bool(teacher_manifest.get("real_perception", False)),
         "source_qa": Path(qa_path).as_posix(),
         "source_qa_sha256": file_sha256(qa_path),
+        "source_window_spec": Path(window_spec_path).as_posix() if window_spec_path is not None else None,
+        "source_window_spec_sha256": file_sha256(window_spec_path) if window_spec_path is not None else None,
+        "window_gated": accepted_window_lookup is not None,
+        "accepted_window_count": _accepted_window_count(window_spec),
+        "accepted_window_ids": _accepted_window_ids(window_spec),
         "grid_shape": list(DEFAULT_GRID_SHAPE),
         "grid_orientation": {
             "note": "image_plane_relative_depth_proxy_not_robot_frame_truth",
@@ -89,6 +115,7 @@ def convert_da3_to_weak_bev(
         "assumptions": [
             "DA3 relative visual geometry is not metric robot-frame truth",
             "weak labels are for geometry pretraining/review only",
+            "stable-window gating excludes pose-jump target frames when a window spec is supplied",
         ],
         "frame_count": len(frame_records),
         "frames": frame_records,
@@ -98,7 +125,13 @@ def convert_da3_to_weak_bev(
     return manifest_path
 
 
-def _write_frame(*, output: Path, teacher_root: Path, source_record: JsonDict) -> JsonDict:
+def _write_frame(
+    *,
+    output: Path,
+    teacher_root: Path,
+    source_record: JsonDict,
+    stable_window_id: str | None,
+) -> JsonDict:
     artifacts = source_record.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("missing artifacts object")
@@ -132,6 +165,7 @@ def _write_frame(*, output: Path, teacher_root: Path, source_record: JsonDict) -
             "extrinsics": _artifact_path(artifacts, ("extrinsics", "camera_pose")),
         },
         "source_data_ref": source_record.get("source_data_ref"),
+        "stable_window_id": stable_window_id,
         "width": int(source_record["width"]),
         "height": int(source_record["height"]),
         "weak_label": True,
@@ -167,6 +201,7 @@ def _write_frame(*, output: Path, teacher_root: Path, source_record: JsonDict) -
         "calibration_class": "teacher_estimated",
         "not_robot_frame_truth": True,
         "trainable_for": "geometry_pretrain_only",
+        "stable_window_id": stable_window_id,
         "metadata_path": relative_to_root(metadata_path, output),
         "metadata_sha256": file_sha256(metadata_path),
         "artifacts": artifact_records,
@@ -262,12 +297,55 @@ def _read_json(path: str | Path) -> JsonDict:
     return data
 
 
+def _accepted_window_lookup(window_spec: JsonDict | None) -> dict[str, str]:
+    if window_spec is None:
+        return {}
+    accepted = window_spec.get("accepted_windows")
+    if not isinstance(accepted, list):
+        return {}
+    lookup: dict[str, str] = {}
+    for index, window in enumerate(accepted):
+        if not isinstance(window, dict) or window.get("accepted") is not True:
+            continue
+        window_id = str(window.get("window_id") or f"accepted_window_{index:03d}")
+        frame_keys = window.get("frame_keys")
+        if not isinstance(frame_keys, list):
+            continue
+        for key in frame_keys:
+            if isinstance(key, str):
+                lookup[key] = window_id
+    return lookup
+
+
+def _accepted_window_count(window_spec: JsonDict | None) -> int:
+    if window_spec is None:
+        return 0
+    accepted = window_spec.get("accepted_windows")
+    if not isinstance(accepted, list):
+        return 0
+    return sum(1 for window in accepted if isinstance(window, dict) and window.get("accepted") is True)
+
+
+def _accepted_window_ids(window_spec: JsonDict | None) -> list[str]:
+    if window_spec is None:
+        return []
+    accepted = window_spec.get("accepted_windows")
+    if not isinstance(accepted, list):
+        return []
+    ids: list[str] = []
+    for index, window in enumerate(accepted):
+        if isinstance(window, dict) and window.get("accepted") is True:
+            ids.append(str(window.get("window_id") or f"accepted_window_{index:03d}"))
+    return ids
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Promote DA3 QA-passed artifacts into weak visual BEV labels.")
     parser.add_argument("--log", required=True, help="Input HomeBrain route log directory.")
     parser.add_argument("--teacher-artifacts", required=True, help="Input DA3 teacher artifact directory.")
     parser.add_argument("--qa", required=True, help="Self-calibration QA JSON.")
     parser.add_argument("--out", required=True, help="Output weak BEV directory.")
+    parser.add_argument("--window-spec", default=None, help="Stable-window JSON; emit only accepted windows.")
     parser.add_argument("--force-review", action="store_true", help="Write weak BEV despite QA quarantine for manual review only.")
     args = parser.parse_args(argv)
     manifest_path = convert_da3_to_weak_bev(
@@ -275,6 +353,7 @@ def main(argv: list[str] | None = None) -> int:
         teacher_artifacts_dir=args.teacher_artifacts,
         qa_path=args.qa,
         out_dir=args.out,
+        window_spec_path=args.window_spec,
         force_review=args.force_review,
     )
     print(f"wrote DA3 weak BEV manifest to {manifest_path.as_posix()}")

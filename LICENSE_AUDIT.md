@@ -27,6 +27,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | iGibson | synthetic control data | UNVERIFIED | No | Use only after license check. |
 | ARKitScenes | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | ScanNet / ScanNet++ | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
+| TUM RGB-D SLAM Dataset | public RGB-D / pose geometry anchor | UNVERIFIED / pending_human_review | No | Official page lists CC BY 4.0; keep pending human review before product/training approval. |
 | Ego4D / EPIC-KITCHENS | visual clutter/dynamics data | UNVERIFIED | No | Verify dataset terms. |
 
 ## Rule
@@ -75,3 +76,16 @@ Goal 6A added explicit setup and a real/fake wrapper for Depth Anything 3.
 - Required for normal tests: no.
 - Mock/fallback status: a fake DA3 backend exists only when explicitly selected with `--backend fake`; those artifacts are marked `mock: true`, `synthetic: true`, and `real_perception: false`.
 - Risk: DA3-SMALL outputs are relative teacher geometry and camera estimates, not robot-frame metric truth or control-safe labels. Weak BEV promotion is gated by self-calibration QA.
+
+## Goal 6B dependency update
+
+Goal 6B added a public RGB-D/pose truth-anchor importer for TUM RGB-D.
+
+- Source URL: https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+- Sequence/download used: `freiburg1_xyz`, `rgbd_dataset_freiburg1_xyz.tgz`
+- License name/status in HomeBrain: `CC BY 4.0` observed on the official dataset page, with `license_review_status=pending_human_review`.
+- Intended use: offline public RGB-D/pose geometry anchor for depth/pose/BEV structural checks and geometry pretraining review.
+- Required at runtime: no.
+- Required for normal tests: no; tests use a tiny synthetic TUM-style fixture generated locally.
+- Mock/fallback status: no fake public dataset is substituted for missing real data. If download/setup fails, setup metadata and `BLOCKERS.md` must record the exact failure.
+- Risk: TUM camera trajectories are dataset camera poses and are not robot-frame metric traversability truth; generated BEV anchors remain `control_safe=false` and `not_robot_frame_truth=true`.

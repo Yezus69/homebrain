@@ -3,6 +3,7 @@ runs/
 artifacts/
 checkpoints/
 external/
+data/public/
 *.pt
 *.pth
 *.onnx
