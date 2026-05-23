@@ -161,16 +161,113 @@ Required before control integration:
 - scorer ranks candidates
 - unsafe candidates can be penalized
 - coverage/risk/debug outputs visible in replay
+- every decision artifact is marked `replay_only=true`, `control_safe=false`, and `not_executed=true`
+- no raw PWM or hardware-control command is emitted
 
 Trajectory metrics:
 ```text
 candidate_count
 selected_candidate_id
-risk_score
-coverage_gain_proxy
-uncertainty_penalty
+selected_risk_score
+selected_coverage_gain_proxy
+selected_unknown_penalty
+selected_uncertainty_penalty
+risky_candidate_fraction
+stop_selected_fraction
+coverage_memory_cells_seen
 trajectory_eval_runtime_ms
 ```
+
+Current Goal 8 commands:
+```bash
+python -m homebrain.policies.synthetic_fixture --out runs/goal8_synthetic_policy_fixture --count 6
+python -m homebrain.policies.run_trajectory_scorer --log runs/goal8_synthetic_policy_fixture --bev-source labels --out runs/goal8_policy_synthetic
+python -m homebrain.policies.run_trajectory_scorer --log runs/spatial_v0_goal7b_modeld_short60 --bev-source model --out runs/goal8_policy_modeld_short60
+python -m homebrain.policies.run_trajectory_scorer --log runs/spatial_v0_goal7b_modeld_tum --bev-source model --out runs/goal8_policy_modeld_tum
+python -m homebrain.policies.run_trajectory_scorer --log runs/room_walk_001_route_short60 --checkpoint runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt --features runs/room_walk_001_route_short60/teacher_artifacts/dino --bev-source model --out runs/goal8_policy_checkpoint_short60 --device cpu --max-frames 5
+```
+
+Current Goal 8 outputs:
+```text
+trajectory_decisions.jsonl
+trajectory_eval.json
+trajectory_overlay_contact_sheet.ppm
+trajectory_policy_manifest.json
+```
+
+Current Goal 8 results:
+```text
+Synthetic fixture: frame_count=6, candidate_count=9, selected_candidate_id=straight_medium, risky_candidate_fraction=0.2222222222222222, selected_risk_score=0.0, selected_coverage_gain_proxy=3.5, stop_selected_fraction=0.0, coverage_memory_cells_seen=40
+Short60 modeld: frame_count=60, candidate_count=9, selected_candidate_id=stop, risky_candidate_fraction=1.0, selected_risk_score=1.0, selected_coverage_gain_proxy=0.0, stop_selected_fraction=1.0, coverage_memory_cells_seen=966
+TUM modeld: frame_count=120, candidate_count=9, selected_candidate_id=stop, risky_candidate_fraction=0.9064814814814814, selected_risk_score=0.8938543225328127, selected_coverage_gain_proxy=0.36666666666666664, stop_selected_fraction=0.8916666666666667, coverage_memory_cells_seen=932
+Checkpoint+features smoke: frame_count=5, candidate_count=9, selected_candidate_id=stop, risky_candidate_fraction=1.0, selected_risk_score=1.0, stop_selected_fraction=1.0, coverage_memory_cells_seen=1002
+```
+
+Gate interpretation: Goal 8 trajectory scoring is replay/debug/eval only. Stop-heavy decisions on current SpatialMemoryNet outputs are a model/data signal, not a control-safety claim.
+
+## Gate 3.1: stop-heavy audit and ActionLabelPack v0
+
+Required before learned trajectory scoring:
+- stop-heavy behavior is audited before any learned scorer is trained
+- model-BEV policy behavior is compared with label-BEV policy behavior where accepted packs exist
+- controlled indoor-like BEV grids exist for deterministic action supervision
+- ActionLabelPack v0 stores per-candidate expert proxy scores, not executed controls
+- QA reports label balance, source distribution, deterministic hash, and safety flags
+- every action-label artifact is marked `replay_only=true`, `not_executed=true`, and `control_safe=false`
+- no control-safe claim, raw PWM, ROS/Nav2/Isaac/Habitat, SAM, NoMaD, or ViNT integration is added
+
+Stop audit metrics:
+```text
+stop_selected_fraction
+selected_motion_fraction
+risky_candidate_fraction
+occupied_hit_rate
+unknown_hit_rate
+uncertainty_penalty_mean
+coverage_gain_mean
+candidate_footprint_block_rate
+bev_channel_histograms
+likely_root_causes
+```
+
+ActionLabelPack QA metrics:
+```text
+example_count
+candidate_count_mean
+selected_stop_fraction
+selected_motion_fraction
+collision_positive_rate
+coverage_gain_mean
+action_entropy
+source_distribution
+source_selected_distribution
+source_selected_stop_fraction
+source_selected_motion_fraction
+deterministic_hash
+```
+
+Current Goal 9A commands:
+```bash
+python -m homebrain.policies.run_trajectory_scorer --log runs/room_walk_001_da3_stable_spatial_pack_short60 --bev-source labels --out runs/goal9_policy_labels_da3
+python -m homebrain.policies.run_trajectory_scorer --log runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --bev-source labels --out runs/goal9_policy_labels_tum
+python -m homebrain.policies.audit_stop_heavy --policy runs/goal8_policy_modeld_short60 --out runs/goal9_stop_audit_short60 --labels runs/room_walk_001_da3_stable_spatial_pack_short60 --modeld runs/spatial_v0_goal7b_modeld_short60
+python -m homebrain.policies.audit_stop_heavy --policy runs/goal8_policy_modeld_tum --out runs/goal9_stop_audit_tum --labels runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --modeld runs/spatial_v0_goal7b_modeld_tum
+python -m homebrain.policies.generate_controlled_bev_maps --out runs/goal9_controlled_bev_maps --meters-per-cell 0.05
+python -m homebrain.policies.build_action_label_pack --source runs/goal9_controlled_bev_maps --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal9_action_label_pack_v0
+python -m homebrain.policies.qa_action_label_pack --pack runs/goal9_action_label_pack_v0 --out runs/goal9_action_label_pack_v0_qa.json
+```
+
+Current Goal 9A results:
+```text
+Short60 model-BEV audit: stop_selected_fraction=1.0, selected_motion_fraction=0.0, risky_candidate_fraction=1.0, occupied_hit_rate=1.0, unknown_hit_rate=0.004166666666666667, candidate_footprint_block_rate=1.0. Likely causes: most motion candidates marked risky, candidate footprints overlap occupied/risky cells, little/no coverage gain, dense occupied/risky BEV.
+Short60 model-vs-DA3-label comparison: overlap_count=59, agreement_fraction=1.0, model_stop_selected_fraction=1.0, label_stop_selected_fraction=1.0.
+TUM model-BEV audit: stop_selected_fraction=0.8916666666666667, selected_motion_fraction=0.10833333333333334, risky_candidate_fraction=0.9064814814814818, occupied_hit_rate=0.9083333333333333, unknown_hit_rate=1.0, candidate_footprint_block_rate=1.0. Likely causes: motion candidates marked risky, occupied/risky hits, unknown hits, dense occupied/risky BEV.
+TUM model-vs-label comparison: overlap_count=120, agreement_fraction=0.8916666666666667, model_stop_selected_fraction=0.8916666666666667, label_stop_selected_fraction=0.8583333333333333, model_stop_label_motion_fraction=0.03333333333333333.
+Label-BEV scorer: DA3 stable pack stop_selected_fraction=1.0; TUM RGB-D truth pack stop_selected_fraction=0.8583333333333333.
+ActionLabelPack QA: example_count=1299, candidate_count_mean=9.0, selected_stop_fraction=0.123941493456505, selected_motion_fraction=0.876058506543495, collision_positive_rate=0.2613121204345223, coverage_gain_mean=32.44256265503379, action_entropy=2.0299437511026057, action_label_pack_qa_pass=true. Controlled open_room selected_stop_fraction=0.0 and selected_motion_fraction=1.0; DA3 reviewed source selected_stop_fraction=1.0; TUM reviewed source selected_stop_fraction=0.85.
+```
+
+Gate interpretation: Goal 9A is an audit and deterministic action-labeling gate only. Stop-heavy model and label behavior is not hidden, and ActionLabelPack v0 is replay-only supervision for later experiments, not a learned policy or control evidence.
 
 ## Gate 4: real-video spatial output
 

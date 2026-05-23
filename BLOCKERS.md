@@ -43,3 +43,23 @@ Likely cause: not applicable.
 Minimal next repair action: not applicable. The next useful action is either trajectory scoring if this baseline is accepted as sufficient, or data/model repair if the current validation losses and source gap are considered too weak.
 
 Command output summary: `python -m pytest -q` reported 37 passed. DA3-only val loss was `0.155940979719162`; TUM-only val loss was `0.17899657785892487` with `pose_delta_rmse=0.027870545917272272`; mixed val loss was `0.19234523177146912`, with mixed per-source val losses DA3 `0.2110961526632309` and TUM `0.1939407934745153`. Replay evals reported `replay_determinism_pass=true`, short60 `brain_output_count=120` over 60 frames, and TUM `brain_output_count=240` over 120 frames. Residual risk: all outputs are representation-pretraining-only, not control-safe, and no trajectory scorer exists.
+
+## 2026-05-23 - Goal 8 replay-only trajectory scorer status
+
+Exact failure: none active. Candidate generation, heuristic scoring, replay-local coverage memory, policy artifact writing, overlays, synthetic fixture scoring, short60 modeld scoring, TUM modeld scoring, checkpoint+features smoke scoring, and pytest all completed.
+
+Likely cause: not applicable.
+
+Minimal next repair action: not applicable. The next useful action is learned trajectory labels from deterministic algorithmic coverage/risk supervision on controlled grids or reviewed BEV packs.
+
+Command output summary: `python -m pytest -q` reported 42 passed. Synthetic fixture scoring selected `straight_medium` with `selected_risk_score=0.0`, `selected_coverage_gain_proxy=3.5`, and `stop_selected_fraction=0.0`. Short60 modeld scoring selected `stop` for all 60 frames with `risky_candidate_fraction=1.0`; TUM modeld scoring selected stop for most frames with `stop_selected_fraction=0.8916666666666667`. Every Goal 8 decision JSONL line was marked `replay_only`, `control_safe=false`, and `not_executed`. Residual risk: current modeld BEV outputs are stop-heavy under the heuristic scorer, and all artifacts remain debug/eval only rather than control-safe behavior.
+
+## 2026-05-23 - Goal 9A stop-heavy audit and ActionLabelPack v0 status
+
+Exact failure: none active. Stop-heavy audit, label-BEV policy comparisons, controlled BEV generation, ActionLabelPack v0 build, ActionLabelPack QA, and pytest all completed.
+
+Likely cause: not applicable as a goal failure. The audit did confirm the underlying stop-heavy behavior is real: current model-BEV and reviewed label-BEV sources frequently mark candidate footprints risky/blocked.
+
+Minimal next repair action: not applicable for Goal 9A completion. The next useful action is either train a learned trajectory scorer from the new ActionLabelPack with the stop-heavy reviewed-source caveat, or repair perception/scorer thresholds before training.
+
+Command output summary: `python -m pytest -q` reported 45 passed. Short60 audit reported `stop_selected_fraction=1.0`, `risky_candidate_fraction=1.0`, `occupied_hit_rate=1.0`, and `candidate_footprint_block_rate=1.0`; DA3 label comparison also selected stop for every overlapping frame. TUM audit reported `stop_selected_fraction=0.8916666666666667`, `occupied_hit_rate=0.9083333333333333`, `unknown_hit_rate=1.0`, and `candidate_footprint_block_rate=1.0`; TUM label BEV selected stop on `0.8583333333333333` of frames. ActionLabelPack QA reported `example_count=1299`, `selected_motion_fraction=0.876058506543495`, `selected_stop_fraction=0.123941493456505`, `action_label_pack_qa_pass=true`, and controlled open-room `source_selected_stop_fraction=0.0`. Residual risk: reviewed real BEV sources remain stop-heavy under the deterministic heuristic, while controlled-grid labels are simplified and not control-safe.
