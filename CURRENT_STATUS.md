@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 4 depth-to-BEV weak geometry labels completed; next objective is calibration review and dataset packaging for future SpatialMemoryNet training.
+Goal 5 BEV QA and SpatialTrainPack v0 completed; next objective is calibration/human review before any SpatialMemoryNet training.
 
 ## Last completed goal
 
-Goal 4: Depth Pro per-frame depth converted into explicit local egocentric BEV weak labels, visualized, evaluated, swept over plausible camera configs, and kept offline teacher-only/control-unsafe.
+Goal 5: Existing DepthPro-to-BEV outputs packed into deterministic SpatialTrainPack v0 examples, QA reviewed, visualized with contact sheets, and quarantined as low-quality for training.
 
 ## Current implementation status
 
@@ -39,6 +39,10 @@ Goal 4: Depth Pro per-frame depth converted into explicit local egocentric BEV w
 - BEV manifests and frame metadata are explicitly marked `weak_label=true` and `control_safe=false`.
 - Geometry eval emits `bev_frame_count`, `bev_missing_count`, `bev_shape_error_count`, `bev_nan_count`, `free_ratio_mean`, `obstacle_ratio_mean`, `unknown_ratio_mean`, `confidence_mean`, and `temporal_jitter_mean`.
 - Real short60 and full 350-frame route BEV artifacts exist under each route's `geometry/depth_pro_bev/` directory.
+- `homebrain.data` exists with `pack_spatial_dataset`, `qa_spatial_dataset`, and `visualize_spatial_dataset` CLIs.
+- SpatialTrainPack v0 writes deterministic `.npz` examples with BEV labels, confidence, optional height/floor candidate arrays, RGB references, provenance, split, camera-config hash, teacher-manifest hash, `weak_label=true`, and `control_safe=false`.
+- Spatial QA emits structural counts, label/confidence/visibility density metrics, temporal jitter/flicker metrics, `trainable_candidate`, and `quarantine_reasons`.
+- Current short60 SpatialTrainPack is structurally clean but quarantined as low-quality: confidence, label density, and observed/visible coverage are too low for training.
 - No student ML yet.
 
 ## Commands that should work
@@ -67,6 +71,9 @@ python -m homebrain.eval.run_eval --log runs/room_walk_001_route_short60 --teach
 python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev
 python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_short60
 python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_short60.json
+python -m homebrain.data.pack_spatial_dataset --log runs/room_walk_001_route_short60 --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_spatial_pack_short60
+python -m homebrain.data.qa_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_qa_short60.json
+python -m homebrain.data.visualize_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_viz_short60
 ```
 
 ## Metrics snapshot
@@ -154,6 +161,37 @@ Latest Goal 4 full-route BEV eval from `runs/room_walk_001_bev_eval_full.json`:
   "temporal_jitter_mean": 0.03962974570200571,
   "unknown_ratio_mean": 0.9297401785714291,
   "weak_label": true
+}
+```
+
+Latest Goal 5 short60 SpatialTrainPack QA from `runs/room_walk_001_spatial_pack_qa_short60.json`:
+
+```json
+{
+  "example_count": 60,
+  "missing_count": 0,
+  "shape_error_count": 0,
+  "nan_count": 0,
+  "free_ratio_mean": 0.012500000000000002,
+  "obstacle_ratio_mean": 0.0663984375,
+  "unknown_ratio_mean": 0.9211015625000002,
+  "confidence_mean": 0.05978431813418865,
+  "confidence_nonzero_ratio_mean": 0.059875000000000005,
+  "label_density_mean": 0.0788984375,
+  "observed_ratio_mean": 0.08698958333333336,
+  "visible_confidence_positive_ratio_mean": 0.059875000000000005,
+  "low_confidence_frame_count": 60,
+  "empty_label_frame_count": 0,
+  "temporal_visible_jitter_mean": 0.27240900394193374,
+  "temporal_label_flicker_mean": 0.29610244463242247,
+  "trainable_candidate": false,
+  "quality_status": "quarantined_low_quality",
+  "quarantine_reasons": [
+    "mean_confidence_below_0.20",
+    "low_confidence_frame_fraction_above_0.20",
+    "label_density_below_0.10",
+    "observed_visible_ratio_below_0.10"
+  ]
 }
 ```
 
@@ -266,3 +304,15 @@ Metrics: short60 BEV eval reported `bev_frame_count=60`, `bev_missing_count=0`, 
 Blockers: none. `BLOCKERS.md` was not created or updated.
 Risks: camera intrinsics/extrinsics are assumed rather than calibrated; short60 and full-route BEV manifests record principal point as image-center assumed; Depth Pro remains offline teacher-only with Apple license still pending human review; BEV free/obstacle/unknown labels are weak geometry labels, not ground truth traversability and not control-safe; temporal jitter is a raw egocentric frame-to-frame sanity metric without odometry alignment; real Depth Pro artifacts remain nondeterministic and should not be used as a determinism gate.
 Next recommended goal: calibrate or estimate camera intrinsics/extrinsics and add a reviewed BEV dataset packer that samples these weak labels into SpatialMemoryNet-ready training examples with explicit weak-label provenance.
+
+### 007 - Goal 5 BEV QA + SpatialTrainPack v0
+
+Goal attempted: turn existing DepthPro-to-BEV short60 outputs into a deterministic reviewed training-data package, or quarantine them honestly if label quality is poor; no new teachers and no student training.
+Files changed: added `homebrain/data/__init__.py`, `homebrain/data/spatial_dataset.py`, `homebrain/data/pack_spatial_dataset.py`, `homebrain/data/qa_spatial_dataset.py`, `homebrain/data/visualize_spatial_dataset.py`, `tests/test_data_spatial_dataset.py`, and `docs/EXPERT_ACTION_DATA_PLAN.md`; updated `EVALS.md` and `CURRENT_STATUS.md`.
+Commands run: required context reads of `AGENTS.md`, `PROJECT_BRIEF.md`, `CURRENT_STATUS.md`, `EVALS.md`, `DECISIONS.md`, `DATA_STRATEGY.md`, `ARCHITECTURE.md`, and `MODEL_SPEC.md`; `python -m pytest tests\test_data_spatial_dataset.py -q`; `python -m pytest -q`; `python -m homebrain.data.pack_spatial_dataset --log runs/room_walk_001_route_short60 --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_spatial_pack_short60`; `python -m homebrain.data.qa_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_qa_short60.json`; `python -m homebrain.data.visualize_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_viz_short60`; `python -m homebrain.data.pack_spatial_dataset --log runs/room_walk_001_route_short60 --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_spatial_pack_short60_repeat`; determinism hash-tree compare over the two package directories. One inline determinism one-liner failed due PowerShell quoting and was rerun successfully via stdin Python.
+Test result: pass. Targeted data tests: 3 passed. Full suite: 29 passed. Required pack, QA, and visualization commands exited 0. Determinism compare reported `deterministic_match=True` over 61 files.
+Artifacts created: `runs/room_walk_001_spatial_pack_short60/manifest.json`; 60 deterministic `.npz` examples under `runs/room_walk_001_spatial_pack_short60/examples/`; QA report `runs/room_walk_001_spatial_pack_qa_short60.json`; visualization manifest and contact sheets under `runs/room_walk_001_spatial_pack_viz_short60/` (`first_frames.ppm`, `median_confidence_frames.ppm`, `worst_confidence_frames.ppm`); repeat deterministic package under `runs/room_walk_001_spatial_pack_short60_repeat/`.
+Metrics: QA reported `example_count=60`, `missing_count=0`, `shape_error_count=0`, `nan_count=0`, `weak_label_false_count=0`, `control_safe_true_count=0`, `free_ratio_mean=0.012500000000000002`, `obstacle_ratio_mean=0.0663984375`, `unknown_ratio_mean=0.9211015625000002`, `confidence_mean=0.05978431813418865`, `confidence_nonzero_ratio_mean=0.059875000000000005`, `label_density_mean=0.0788984375`, `observed_ratio_mean=0.08698958333333336`, `visible_confidence_positive_ratio_mean=0.059875000000000005`, `low_confidence_frame_count=60`, `empty_label_frame_count=0`, `temporal_jitter_mean=0.026459216101694914`, `temporal_visible_jitter_mean=0.27240900394193374`, `temporal_label_flicker_mean=0.29610244463242247`, `trainable_candidate=false`, and `quality_status=quarantined_low_quality`. Quarantine reasons were `mean_confidence_below_0.20`, `low_confidence_frame_fraction_above_0.20`, `label_density_below_0.10`, and `observed_visible_ratio_below_0.10`.
+Blockers: none. `BLOCKERS.md` was not created or updated.
+Risks: the current short60 package is structurally usable for review but not a training candidate; camera intrinsics/extrinsics remain assumed, labels are weak DepthPro-derived geometry rather than ground truth traversability, confidence and visible coverage are low, temporal visible jitter/flicker is notable in reviewed cells, and all examples remain `weak_label=true` and `control_safe=false`.
+Next recommended goal: perform camera calibration or collect a calibrated RGB-D/pose reference sequence, then rerun BEV projection and SpatialTrainPack QA before any SpatialMemoryNet training; optionally add a small human review notes file for the quarantined short60 contact sheets.

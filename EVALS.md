@@ -212,6 +212,78 @@ temporal_jitter_mean
 
 Camera-config sweeps may report sanity/stability scores, but those scores are not ground truth and must not be used as control-safety evidence.
 
+## Gate 1.7: BEV QA and SpatialTrainPack v0
+
+Depth-to-BEV weak geometry labels can be packed into deterministic reviewed training-data candidates. This gate does not add new teachers, train SpatialMemoryNet, or claim label quality. QA must either expose acceptable structural metrics or quarantine low-quality labels.
+
+Required package outputs:
+```text
+manifest.json
+examples/*.npz
+```
+
+Each example must carry:
+```text
+frame_id
+timestamp_ns
+rgb_ref / rgb_path
+bev_free
+bev_obstacle
+bev_unknown
+bev_confidence
+optional bev_height
+optional bev_floor_candidate
+provenance
+weak_label=true
+control_safe=false
+camera_config_hash
+teacher_manifest_hash
+split=train|val|review
+```
+
+Required commands:
+```bash
+python -m homebrain.data.pack_spatial_dataset --log runs/room_walk_001_route_short60 --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_spatial_pack_short60
+python -m homebrain.data.qa_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_qa_short60.json
+python -m homebrain.data.visualize_spatial_dataset --dataset runs/room_walk_001_spatial_pack_short60 --out runs/room_walk_001_spatial_pack_viz_short60
+```
+
+QA metrics:
+```text
+example_count
+manifest_example_count
+missing_count
+shape_error_count
+nan_count
+weak_label_false_count
+control_safe_true_count
+free_ratio_mean/min/max
+obstacle_ratio_mean/min/max
+unknown_ratio_mean/min/max
+confidence_mean/min/median/max
+confidence_nonzero_ratio_mean
+label_density_mean/min/median
+observed_ratio_mean
+visible_confidence_positive_ratio_mean
+source_observed_ratio_mean
+low_confidence_frame_count
+empty_label_frame_count
+label_overlap_cell_count
+label_sum_error_cell_count
+temporal_jitter_mean/p95
+temporal_visible_jitter_mean/p95
+temporal_label_flicker_mean/p95
+trainable_candidate
+quarantine_reasons
+```
+
+Gate interpretation:
+- `missing_count`, `shape_error_count`, and `nan_count` must be zero for structural pass.
+- `weak_label=true` and `control_safe=false` must remain true for every example.
+- `trainable_candidate=false` is the correct result when confidence, observed/visible coverage, label density, or temporal stability is poor.
+- Full-grid unknown ratio alone is not sufficient evidence for either acceptance or quarantine.
+- Contact sheets are review aids only and are not ground-truth overlays.
+
 ## Gate 1.5: image-sequence imported routes
 
 Real indoor image folders can be imported into ordinary HomeBrain segment logs with frame artifacts and explicit missing-sensor metadata.
