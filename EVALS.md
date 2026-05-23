@@ -56,10 +56,14 @@ Required before trajectory learning:
 - training script runs
 - eval script writes metrics
 - replay integration emits BEV/pose/uncertainty
+- DINO-family features are frozen offline teacher artifacts, not a runtime dependency
+- `trainable_candidate=true` and `structurally_trainable=true` do not imply robot control safety
 
 Model metrics:
 ```text
-train_loss
+train_loss_start
+train_loss_end
+loss_reduction_ratio
 val_loss
 bev_loss
 bev_iou_or_proxy
@@ -67,6 +71,41 @@ pose_delta_rmse
 uncertainty_calibration_proxy
 inference_fps
 ```
+
+Current DINO feature teacher verification:
+```bash
+python -m homebrain.teachers.run_teacher --teacher dino --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/dino_fake
+python -m homebrain.tools.setup_dino_teacher --model-id dinov2_vits14 --device cuda
+python -m homebrain.teachers.run_teacher --teacher dino --backend real --device cuda --model-id dinov2_vits14 --log runs/room_walk_001_route_short60 --out runs/room_walk_001_route_short60/teacher_artifacts/dino --image-size 224
+```
+
+DINO per-frame artifacts:
+```text
+patch_features.npy
+cls_feature.npy
+metadata.json
+teacher_manifest.json
+```
+
+DINO manifest requirements:
+```text
+teacher_name=dino
+model_id/model_path
+feature_shape
+license_review_status=pending_human_review
+runtime_dependency=false
+```
+
+Current SpatialMemoryNet v0 commands:
+```bash
+python -m homebrain.train.train_spatial_v0 --dataset runs/room_walk_001_da3_stable_spatial_pack_short60 --features runs/room_walk_001_route_short60/teacher_artifacts/dino --out runs/spatial_v0_overfit --max-steps 300 --tiny-overfit
+python -m homebrain.train.eval_spatial_v0 --checkpoint runs/spatial_v0_overfit/checkpoint.pt --dataset runs/room_walk_001_da3_stable_spatial_pack_short60 --out runs/spatial_v0_overfit_eval.json
+python -m homebrain.brain.modeld --log runs/room_walk_001_route_short60 --checkpoint runs/spatial_v0_overfit/checkpoint.pt --features runs/room_walk_001_route_short60/teacher_artifacts/dino --out runs/spatial_v0_modeld_replay_short60
+python -m homebrain.replay.replayd --log runs/room_walk_001_route_short60 --checkpoint runs/spatial_v0_overfit/checkpoint.pt --features runs/room_walk_001_route_short60/teacher_artifacts/dino --out runs/spatial_v0_replayed_short60
+python -m homebrain.brain.visualize_spatial_outputs --log runs/spatial_v0_modeld_replay_short60 --out runs/spatial_v0_modeld_replay_short60_viz
+```
+
+Current Goal 7 outcome: real DINOv2-small artifacts exist for the short60 route with `feature_shape=[16,16,384]`; tiny overfit trained on 8 examples and wrote `runs/spatial_v0_overfit/checkpoint.pt`; train loss dropped from `0.6873307228088379` to `0.013037266675382853` with `loss_reduction_ratio=0.9810320326987496`. Full-pack eval is a generalization check only for this tiny overfit and reported `val_loss=2.3066179419402033`, `bev_iou_or_proxy=0.6176380563061684`, `pose_delta_rmse=null`, and `inference_fps=74.37446661472443`. Modeld and replayd load the checkpoint and emit BEV/pose/uncertainty `BrainOutputEvent`s with `representation_pretraining_only=true` and `control_safe=false`.
 
 ## Gate 3: trajectory scorer
 

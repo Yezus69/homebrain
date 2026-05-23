@@ -4,7 +4,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from homebrain.brain.modeld import replay_events_with_dummy_model
+from homebrain.brain.modeld import replay_events_with_dummy_model, replay_events_with_spatial_model
 from homebrain.messages.schema import Event
 from homebrain.replay.segment_log import load_manifest, read_events, write_segment
 
@@ -29,21 +29,39 @@ def _copy_artifacts(source_dir: Path, out_dir: Path, artifact_files: list[str]) 
         shutil.copy2(source_path, target_path)
 
 
-def replay_log(log_dir: str | Path, out_dir: str | Path) -> None:
+def replay_log(
+    log_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    checkpoint: str | Path | None = None,
+    feature_dir: str | Path | None = None,
+    device_name: str | None = None,
+) -> None:
     source_path = Path(log_dir)
     output_path = Path(out_dir)
     manifest = load_manifest(source_path)
     events = read_events(source_path)
     ordered_events = order_events_for_replay(events)
-    replayed_events = replay_events_with_dummy_model(ordered_events)
 
     output_path.mkdir(parents=True, exist_ok=True)
     _copy_artifacts(source_path, output_path, manifest.artifact_files)
+    if checkpoint is not None:
+        replayed_events, model_artifacts = replay_events_with_spatial_model(
+            ordered_events,
+            log_dir=source_path,
+            out_dir=output_path,
+            checkpoint=checkpoint,
+            feature_dir=feature_dir,
+            device_name=device_name,
+        )
+    else:
+        replayed_events = replay_events_with_dummy_model(ordered_events)
+        model_artifacts = []
     write_segment(
         output_path,
         replayed_events,
         segment_id=f"{manifest.segment_id}-replay",
-        artifact_files=list(manifest.artifact_files),
+        artifact_files=[*manifest.artifact_files, *model_artifacts],
     )
 
 
@@ -51,8 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Deterministically replay a HomeBrain segment.")
     parser.add_argument("--log", required=True, help="Input segment log directory.")
     parser.add_argument("--out", required=True, help="Output segment log directory.")
+    parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet v0 checkpoint.")
+    parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
+    parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
-    replay_log(args.log, args.out)
+    replay_log(args.log, args.out, checkpoint=args.checkpoint, feature_dir=args.features, device_name=args.device)
     return 0
 
 

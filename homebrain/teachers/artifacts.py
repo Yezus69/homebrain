@@ -34,6 +34,10 @@ DA3_ARTIFACT_KINDS: tuple[str, ...] = (
     "intrinsics",
     "extrinsics",
 )
+DINO_ARTIFACT_KINDS: tuple[str, ...] = (
+    "patch_features",
+    "cls_feature",
+)
 
 EXPECTED_DTYPES: dict[str, str] = {
     "depth": "float32",
@@ -48,6 +52,8 @@ EXPECTED_DTYPES: dict[str, str] = {
     "extrinsics": "float32",
     "camera_pose": "float32",
     "bev_preview": "float32",
+    "patch_features": "float32",
+    "cls_feature": "float32",
 }
 
 
@@ -117,6 +123,10 @@ def expected_shape(kind: str, width: int, height: int) -> tuple[int, ...]:
         return (3, 4)
     if kind == "bev_preview":
         return BEV_PREVIEW_SHAPE
+    if kind == "patch_features":
+        return (-1, -1, -1)
+    if kind == "cls_feature":
+        return (-1,)
     raise ValueError(f"unknown teacher artifact kind {kind!r}")
 
 
@@ -329,7 +339,7 @@ def validate_teacher_artifacts(
 
             valid_artifact_count += 1
             try:
-                expected = expected_shape(kind, width, height)
+                expected = _expected_record_shape(kind, artifact_record, width, height)
                 expected_dtype = EXPECTED_DTYPES[kind]
             except KeyError:
                 shape_error_count += 1
@@ -354,6 +364,7 @@ def validate_teacher_artifacts(
                 or manifest_shape != list(expected)
                 or str(array.dtype) != expected_dtype
                 or manifest_dtype != expected_dtype
+                or _dino_shape_error(kind, array)
             ):
                 shape_error_count += 1
                 if kind in depth_kinds:
@@ -395,3 +406,25 @@ def validate_teacher_artifacts(
         depth_shape_error_count=depth_shape_error_count,
         errors=tuple(errors),
     )
+
+
+def _expected_record_shape(
+    kind: str,
+    artifact_record: JsonDict,
+    width: int,
+    height: int,
+) -> tuple[int, ...]:
+    if kind in DINO_ARTIFACT_KINDS:
+        raw_shape = artifact_record.get("shape")
+        if not isinstance(raw_shape, list) or not all(isinstance(value, int) for value in raw_shape):
+            raise ValueError(f"{kind} artifact record is missing a concrete shape")
+        return tuple(int(value) for value in raw_shape)
+    return expected_shape(kind, width, height)
+
+
+def _dino_shape_error(kind: str, array: np.ndarray) -> bool:
+    if kind == "patch_features":
+        return array.ndim != 3 or any(int(dim) <= 0 for dim in array.shape)
+    if kind == "cls_feature":
+        return array.ndim != 1 or int(array.shape[0]) <= 0
+    return False

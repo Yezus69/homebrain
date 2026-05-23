@@ -30,6 +30,12 @@ MIN_OBSERVED_RATIO = 0.10
 MAX_LOW_CONFIDENCE_FRAME_FRACTION = 0.20
 MAX_TEMPORAL_VISIBLE_JITTER = 0.30
 MIN_EXAMPLES_FOR_TRAINING_GATE = 10
+ROBOT_SUPERVISION_GRADES = {
+    "weak_visual_geometry",
+    "public_rgbd_anchor",
+    "robot_frame_metric",
+    "unknown",
+}
 
 
 @dataclass(frozen=True)
@@ -172,6 +178,7 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
     low_confidence_frame_count = sum(1 for item in frame_qualities if item.confidence_mean < LOW_CONFIDENCE_THRESHOLD)
     empty_label_frame_count = sum(1 for item in frame_qualities if item.empty_label)
     temporal = _temporal_metrics(frame_qualities)
+    robot_supervision_grade = _robot_supervision_grade(manifest)
 
     metrics: dict[str, Any] = {
         "schema_version": SPATIAL_QA_SCHEMA_VERSION,
@@ -184,6 +191,8 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
         "nan_count": nan_count,
         "weak_label_false_count": weak_label_false_count,
         "control_safe_true_count": control_safe_true_count,
+        "control_safe": False if manifest.get("control_safe") is False and control_safe_true_count == 0 else True,
+        "robot_supervision_grade": robot_supervision_grade,
         "split_counts": split_counts,
         "free_ratio_mean": mean(free_ratios),
         "free_ratio_min": min(free_ratios) if free_ratios else 0.0,
@@ -214,8 +223,12 @@ def qa_spatial_dataset(dataset_dir: str | Path) -> dict[str, Any]:
         "errors": errors[:50],
         **temporal,
     }
+    structural_blockers = _structural_blockers(metrics)
+    metrics["structurally_trainable"] = not structural_blockers
+    metrics["structural_blockers"] = structural_blockers
     quarantine_reasons = _quarantine_reasons(metrics)
     metrics["trainable_candidate"] = not quarantine_reasons
+    metrics["trainable_candidate_control_safe"] = False
     metrics["quality_status"] = "candidate_requires_human_review" if not quarantine_reasons else "quarantined_low_quality"
     metrics["quarantine_reasons"] = quarantine_reasons
     return metrics
@@ -233,7 +246,12 @@ def _failed_manifest_metrics(error: str) -> dict[str, Any]:
         "missing_count": 1,
         "shape_error_count": 0,
         "nan_count": 0,
+        "control_safe": False,
+        "robot_supervision_grade": "unknown",
+        "structurally_trainable": False,
+        "structural_blockers": ["missing_or_malformed_dataset_manifest"],
         "trainable_candidate": False,
+        "trainable_candidate_control_safe": False,
         "quality_status": "quarantined_low_quality",
         "quarantine_reasons": ["missing_or_malformed_dataset_manifest"],
         "errors": [error],
@@ -382,6 +400,49 @@ def _quarantine_reasons(metrics: dict[str, Any]) -> list[str]:
     return reasons
 
 
+def _structural_blockers(metrics: dict[str, Any]) -> list[str]:
+    blockers: list[str] = []
+    if int(metrics.get("missing_count", 0)) > 0:
+        blockers.append("missing_examples_or_fields")
+    if int(metrics.get("shape_error_count", 0)) > 0:
+        blockers.append("shape_errors_present")
+    if int(metrics.get("nan_count", 0)) > 0:
+        blockers.append("nonfinite_values_present")
+    if int(metrics.get("weak_label_false_count", 0)) > 0:
+        blockers.append("weak_label_flag_missing")
+    if int(metrics.get("control_safe_true_count", 0)) > 0:
+        blockers.append("control_safe_flag_must_remain_false")
+    if int(metrics.get("label_overlap_cell_count", 0)) > 0:
+        blockers.append("overlapping_free_obstacle_unknown_labels")
+    if int(metrics.get("label_sum_error_cell_count", 0)) > 0:
+        blockers.append("free_obstacle_unknown_do_not_partition_grid")
+    if int(metrics.get("example_count", 0)) < MIN_EXAMPLES_FOR_TRAINING_GATE:
+        blockers.append(f"example_count_below_{MIN_EXAMPLES_FOR_TRAINING_GATE}")
+    return blockers
+
+
+def _robot_supervision_grade(manifest: dict[str, Any]) -> str:
+    existing = manifest.get("robot_supervision_grade")
+    if isinstance(existing, str) and existing in ROBOT_SUPERVISION_GRADES:
+        return existing
+
+    source_name = str(manifest.get("source_depth_teacher_name", "")).lower()
+    source_backend = str(manifest.get("source_depth_backend", "")).lower()
+    source_bev = str(manifest.get("source_bev", "")).lower()
+    if "robot_frame_metric" in {source_name, source_backend}:
+        return "robot_frame_metric"
+    if (
+        "tum" in source_name
+        or "rgbd_truth" in source_name
+        or "public_rgbd" in source_backend
+        or "rgbd_truth" in source_bev
+    ):
+        return "public_rgbd_anchor"
+    if source_name in {"da3", "depth_pro"} or "weak_bev" in source_bev or source_backend in {"real", "fake"}:
+        return "weak_visual_geometry"
+    return "unknown"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QA a HomeBrain SpatialTrainPack and emit quarantine metrics.")
     parser.add_argument("--dataset", required=True, help="Input SpatialTrainPack directory.")
@@ -395,4 +456,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

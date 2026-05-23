@@ -11,6 +11,7 @@ import sys
 from homebrain.teachers.base import TeacherRunConfig
 from homebrain.teachers.da3_teacher import DA3_DEFAULT_MODEL_ID, DA3UnavailableError
 from homebrain.teachers.depth_pro_teacher import DepthProUnavailableError
+from homebrain.teachers.dino_teacher import DINO_DEFAULT_MODEL_ID, DINOUnavailableError
 from homebrain.teachers.registry import TEACHER_NAMES, create_teacher
 
 
@@ -27,11 +28,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Teacher backend. Use 'fake' only for tests; real never intentionally downloads weights.",
     )
     parser.add_argument("--device", default=None, help="Optional teacher device, e.g. cpu or cuda.")
-    parser.add_argument("--model-id", default=DA3_DEFAULT_MODEL_ID, help="DA3 model id for manifests/setup lookup.")
-    parser.add_argument("--model-dir", default=None, help="Local DA3 model directory or snapshot path.")
-    parser.add_argument("--max-frames", type=int, default=None, help="Optional DA3 frame cap.")
+    parser.add_argument("--model-id", default=None, help="Teacher model id for manifests/setup lookup.")
+    parser.add_argument("--model-dir", default=None, help="Optional local teacher model directory or snapshot path.")
+    parser.add_argument("--max-frames", type=int, default=None, help="Optional teacher frame cap.")
     parser.add_argument("--window-size", type=int, default=None, help="Optional DA3 batch/window size.")
-    parser.add_argument("--stride", type=int, default=1, help="Optional DA3 frame stride.")
+    parser.add_argument("--stride", type=int, default=1, help="Optional teacher frame stride.")
+    parser.add_argument("--image-size", type=int, default=224, help="DINO input image size; must be a multiple of 14.")
     args = parser.parse_args(argv_list)
 
     if _should_reexec_da3(args):
@@ -42,11 +44,12 @@ def main(argv: list[str] | None = None) -> int:
             args.teacher,
             backend_name=args.backend,
             device=args.device,
-            model_id=args.model_id,
+            model_id=_default_model_id(args.teacher, args.model_id),
             model_dir=args.model_dir,
             max_frames=args.max_frames,
             window_size=args.window_size,
             stride=args.stride,
+            image_size=args.image_size,
         )
         summary = teacher.run(TeacherRunConfig(log_dir=args.log, out_dir=args.out))
     except DepthProUnavailableError as exc:
@@ -55,10 +58,21 @@ def main(argv: list[str] | None = None) -> int:
     except DA3UnavailableError as exc:
         print(f"DA3 teacher unavailable: {exc}", file=sys.stderr)
         return 2
+    except DINOUnavailableError as exc:
+        print(f"DINO teacher unavailable: {exc}", file=sys.stderr)
+        return 2
 
-    backend_note = f" with {args.backend} backend" if args.teacher in {"depth_pro", "da3"} else ""
+    backend_note = f" with {args.backend} backend" if args.teacher in {"depth_pro", "da3", "dino"} else ""
     print(f"wrote {summary.frame_count} {args.teacher} teacher frames{backend_note} to {summary.manifest_path.as_posix()}")
     return 0
+
+
+def _default_model_id(teacher: str, model_id: str | None) -> str:
+    if model_id:
+        return model_id
+    if teacher == "dino":
+        return DINO_DEFAULT_MODEL_ID
+    return DA3_DEFAULT_MODEL_ID
 
 
 def _should_reexec_da3(args: argparse.Namespace) -> bool:

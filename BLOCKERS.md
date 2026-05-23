@@ -23,3 +23,13 @@ Minimal next repair action: install/verify an NVIDIA driver visible to `nvidia-s
 Command output summary: see `external/da3_setup_status.json` field `cuda_auto` for the probe, pip install attempt, and smoke command details.
 
 Resolution update: rerunning setup after forcing a CUDA wheel reinstall selected `https://download.pytorch.org/whl/cu126`, installed `torch=2.12.0+cu126`, reported `torch.cuda.is_available()=true`, and passed the DA3 one-frame CUDA smoke. This CUDA setup blocker is resolved as of the latest `external/da3_setup_status.json`.
+
+## 2026-05-23 - Goal 7 DINO SpatialMemoryNet v0 status
+
+Exact failure: none active. DINOv2-small setup, real short60 feature extraction, tiny SpatialMemoryNet v0 overfit, eval, modeld checkpoint inference, replayd checkpoint inference, visualization, and pytest all completed.
+
+Likely cause: not applicable.
+
+Minimal next repair action: not applicable. The next useful action is broader training/eval beyond the deliberate 8-example overfit subset.
+
+Command output summary: `python -m homebrain.tools.setup_dino_teacher --model-id dinov2_vits14 --device cuda` wrote `external/dino_setup_status.json` with `success=true`; real DINO wrote 60 frame feature artifacts under `runs/room_walk_001_route_short60/teacher_artifacts/dino`; `python -m pytest -q` reported 36 passed. Residual risk: the checkpoint is an overfit representation-pretraining artifact only, not a navigation or control-safe model.

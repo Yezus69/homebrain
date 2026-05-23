@@ -148,6 +148,7 @@ def pack_spatial_dataset(
         "source_depth_backend": bev_manifest.get("source_depth_backend"),
         "source_depth_mock": bool(bev_manifest.get("source_depth_mock", False)),
         "source_depth_real_perception": bool(bev_manifest.get("source_depth_real_perception", False)),
+        "robot_supervision_grade": _robot_supervision_grade(bev_manifest),
         "teacher_artifacts": Path(teacher_artifacts).as_posix() if teacher_artifacts is not None else None,
         "teacher_manifest_hash": teacher_manifest_hash,
         "camera_config_hash": camera_config_hash,
@@ -286,6 +287,24 @@ def _example_provenance(
     }
 
 
+def _robot_supervision_grade(bev_manifest: JsonDict) -> str:
+    source_name = str(bev_manifest.get("source_depth_teacher_name", "")).lower()
+    source_backend = str(bev_manifest.get("source_depth_backend", "")).lower()
+    source_path = str(bev_manifest.get("source_log", "")).lower()
+    if "robot_frame_metric" in {source_name, source_backend}:
+        return "robot_frame_metric"
+    if (
+        "tum" in source_name
+        or "rgbd_truth" in source_name
+        or "public_rgbd" in source_backend
+        or "tum" in source_path
+    ):
+        return "public_rgbd_anchor"
+    if source_name in {"da3", "depth_pro"} or source_backend in {"real", "fake"}:
+        return "weak_visual_geometry"
+    return "unknown"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Pack BEV weak labels into a deterministic SpatialTrainPack.")
     parser.add_argument("--log", required=True, help="Input HomeBrain route log directory.")
@@ -305,4 +324,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

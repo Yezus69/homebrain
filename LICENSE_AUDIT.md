@@ -16,7 +16,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 
 | Name | Intended use | Current status | Production runtime? | Notes |
 |---|---|---:|---:|---|
-| DINO-family visual model | dense features / teacher | UNVERIFIED | No | Verify exact repo + weight license. |
+| DINO-family visual model | dense features / teacher | UNVERIFIED / pending_human_review | No | Goal 7 used DINOv2-small `dinov2_vits14` through torch.hub as an offline frozen feature teacher; verify exact repo + weight license before product/training approval. |
 | Depth Anything family | geometry/depth teacher | UNVERIFIED / pending_human_review | No | DA3-SMALL setup added for offline teacher use; verify exact code/model card/license before product use. |
 | Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
 | MoGe / point-map model | geometry teacher | UNVERIFIED | No | Verify official license. |
@@ -89,3 +89,17 @@ Goal 6B added a public RGB-D/pose truth-anchor importer for TUM RGB-D.
 - Required for normal tests: no; tests use a tiny synthetic TUM-style fixture generated locally.
 - Mock/fallback status: no fake public dataset is substituted for missing real data. If download/setup fails, setup metadata and `BLOCKERS.md` must record the exact failure.
 - Risk: TUM camera trajectories are dataset camera poses and are not robot-frame metric traversability truth; generated BEV anchors remain `control_safe=false` and `not_robot_frame_truth=true`.
+
+## Goal 7 dependency update
+
+Goal 7 added DINOv2-small as an offline frozen visual feature teacher and PyTorch student training/inference for SpatialMemoryNet v0.
+
+- Source URL: https://github.com/facebookresearch/dinov2
+- Model/checkpoint source: torch hub `facebookresearch/dinov2`, model id `dinov2_vits14`, checkpoint file `dinov2_vits14_pretrain.pth`.
+- Setup status: `external/dino_setup_status.json` reports `success=true`, `torch=2.1.0+cu121`, CUDA available, and model loaded on `cuda`.
+- License name/status in HomeBrain: `pending_human_review`; do not mark as runtime-safe, product-safe, or training-approved beyond local research artifacts yet.
+- Intended use: offline frozen dense visual feature teacher for representation pretraining.
+- Required at runtime: no. Student checkpoint inference in `modeld` uses saved DINO feature artifacts for replay, not the DINO model.
+- Required for normal tests: no. Tests use `--backend fake` artifacts marked `mock=true`, `synthetic=true`, and `real_perception=false`.
+- Mock/fallback status: fake DINO backend exists only when explicitly selected with `--backend fake`.
+- Risk: DINO features are visual representation artifacts, not geometry/traversability truth or control-safety evidence; all Goal 7 outputs remain `representation_pretraining_only=true` and `control_safe=false`.

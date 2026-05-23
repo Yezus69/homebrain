@@ -3,6 +3,7 @@
 from homebrain.teachers.artifacts import (
     DA3_ARTIFACT_KINDS,
     DEPTH_PRO_ARTIFACT_KINDS,
+    DINO_ARTIFACT_KINDS,
     EXPECTED_ARTIFACT_KINDS,
     TEACHER_MANIFEST_FILE,
     TeacherArtifactValidation,
@@ -11,23 +12,50 @@ from homebrain.teachers.artifacts import (
     write_teacher_manifest,
 )
 from homebrain.teachers.base import Teacher, TeacherRunConfig, TeacherRunSummary
-from homebrain.teachers.da3_teacher import DA3Teacher, FakeDA3Backend, RealDA3Backend
-from homebrain.teachers.depth_pro_teacher import DepthProTeacher, FakeDepthProBackend, RealDepthProBackend
-from homebrain.teachers.mock_teacher import MockTeacher
-from homebrain.teachers.registry import TEACHER_NAMES, create_teacher
+
+_LAZY_EXPORTS = {
+    "DA3Teacher": ("homebrain.teachers.da3_teacher", "DA3Teacher"),
+    "DepthProTeacher": ("homebrain.teachers.depth_pro_teacher", "DepthProTeacher"),
+    "DINOTeacher": ("homebrain.teachers.dino_teacher", "DINOTeacher"),
+    "FakeDA3Backend": ("homebrain.teachers.da3_teacher", "FakeDA3Backend"),
+    "FakeDepthProBackend": ("homebrain.teachers.depth_pro_teacher", "FakeDepthProBackend"),
+    "FakeDINOBackend": ("homebrain.teachers.dino_teacher", "FakeDINOBackend"),
+    "MockTeacher": ("homebrain.teachers.mock_teacher", "MockTeacher"),
+    "RealDA3Backend": ("homebrain.teachers.da3_teacher", "RealDA3Backend"),
+    "RealDepthProBackend": ("homebrain.teachers.depth_pro_teacher", "RealDepthProBackend"),
+    "RealDINOBackend": ("homebrain.teachers.dino_teacher", "RealDINOBackend"),
+    "TEACHER_NAMES": ("homebrain.teachers.registry", "TEACHER_NAMES"),
+    "create_teacher": ("homebrain.teachers.registry", "create_teacher"),
+}
+
+
+def __getattr__(name: str) -> object:
+    target = _LAZY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    module_name, attribute = target
+    from importlib import import_module
+
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
 __all__ = [
     "DEPTH_PRO_ARTIFACT_KINDS",
     "DA3_ARTIFACT_KINDS",
     "DA3Teacher",
+    "DINO_ARTIFACT_KINDS",
+    "DINOTeacher",
     "EXPECTED_ARTIFACT_KINDS",
     "TEACHER_MANIFEST_FILE",
     "DepthProTeacher",
-    "FakeDepthProBackend",
     "FakeDA3Backend",
+    "FakeDepthProBackend",
+    "FakeDINOBackend",
     "MockTeacher",
-    "RealDepthProBackend",
     "RealDA3Backend",
+    "RealDepthProBackend",
+    "RealDINOBackend",
     "TEACHER_NAMES",
     "Teacher",
     "TeacherArtifactValidation",

@@ -3,9 +3,10 @@ from __future__ import annotations
 from homebrain.teachers.base import Teacher
 from homebrain.teachers.da3_teacher import create_da3_teacher
 from homebrain.teachers.depth_pro_teacher import create_depth_pro_teacher
+from homebrain.teachers.dino_teacher import DINO_DEFAULT_MODEL_ID, create_dino_teacher
 from homebrain.teachers.mock_teacher import MockTeacher
 
-TEACHER_NAMES: tuple[str, ...] = ("mock", "depth_pro", "da3")
+TEACHER_NAMES: tuple[str, ...] = ("mock", "depth_pro", "da3", "dino")
 
 
 def create_teacher(
@@ -18,6 +19,7 @@ def create_teacher(
     max_frames: int | None = None,
     window_size: int | None = None,
     stride: int = 1,
+    image_size: int = 224,
 ) -> Teacher:
     if name == "mock":
         return MockTeacher()
@@ -32,5 +34,15 @@ def create_teacher(
             max_frames=max_frames,
             window_size=window_size,
             stride=stride,
+        )
+    if name == "dino":
+        return create_dino_teacher(
+            backend_name=backend_name,
+            device=device,
+            model_id=model_id or DINO_DEFAULT_MODEL_ID,
+            model_dir=model_dir,
+            max_frames=max_frames,
+            stride=stride,
+            image_size=image_size,
         )
     raise ValueError(f"unknown teacher {name!r}; expected one of {', '.join(TEACHER_NAMES)}")
