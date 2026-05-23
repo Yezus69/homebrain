@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 1 teacher artifact interface and deterministic mock teacher implemented and verified.
+Goal 2 real indoor image-sequence ingestion into route logs implemented and verified.
 
 ## Last completed goal
 
-Goal 1: teacher artifact interface and deterministic mock teacher.
+Goal 2: real indoor image-sequence ingestion into HomeBrain route logs.
 
 ## Current implementation status
 
@@ -18,6 +18,9 @@ Goal 1: teacher artifact interface and deterministic mock teacher.
 - `homebrain.teachers` exists with a teacher base interface, deterministic `.npy` artifact helpers, a mock teacher, run CLI, visualization CLI, manifest loader, and artifact validator.
 - Mock teacher artifacts are explicitly marked `mock: true`, `synthetic: true`, and `real_perception: false`.
 - Eval can optionally validate teacher artifacts without changing Goal 0 metrics when no teacher path is supplied.
+- `homebrain.ingest` exists with an image-sequence CLI that imports `.jpg`, `.jpeg`, `.png`, `.pgm`, and `.ppm` frames into normal route logs.
+- Imported image routes write copied frame artifacts, `FrameEvent` records, and `route_metadata.json` with source provenance, fps, frame count, dimensions when consistent, explicit missing sensor notices, and `user_owned_or_license_unknown=true`.
+- Eval emits imported-route metrics when `route_metadata.json` has `source_type=image_sequence`.
 - No ML yet.
 
 ## Commands that should work
@@ -30,29 +33,38 @@ python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.j
 python -m homebrain.teachers.run_teacher --teacher mock --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/mock_teacher
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/mock_teacher_viz
 python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/dummy_eval_with_teacher.json
+python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk/frames --out runs/room_walk_route --camera front_rgb --fps 10
+python -m homebrain.replay.replayd --log runs/room_walk_route --out runs/room_walk_replayed
+python -m homebrain.teachers.run_teacher --teacher mock --log runs/room_walk_route --out runs/room_walk_route/teacher_artifacts/mock_teacher
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_mock_teacher_viz
+python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/mock_teacher --out runs/room_walk_eval_with_teacher.json
 ```
 
 ## Metrics snapshot
 
-Latest Goal 1 eval from `runs/dummy_eval_with_teacher.json`:
+Latest Goal 2 imported-route eval from `runs/goal2_room_walk_eval_with_teacher.json`:
 
 ```json
 {
   "artifact_determinism_pass": true,
   "artifact_load_success": true,
   "artifact_shape_error_count": 0,
-  "brain_output_count": 6,
+  "brain_output_count": 3,
   "dropped_frame_count": 0,
-  "eval_runtime_sec": 0.004416,
-  "event_count": 24,
+  "eval_runtime_sec": 0.001932,
+  "event_count": 3,
   "event_ordering_error_count": 0,
-  "frame_count": 6,
-  "frames_with_teacher_artifacts": 6,
+  "frame_count": 3,
+  "frames_with_teacher_artifacts": 3,
+  "image_load_error_count": 0,
+  "imported_frame_count": 3,
   "missing_artifact_count": 0,
+  "missing_sensor_notice_count": 3,
   "replay_determinism_pass": true,
-  "teacher_artifact_count": 30,
-  "teacher_manifest_frame_count": 6,
-  "teacher_mock_used": true
+  "teacher_artifact_count": 15,
+  "teacher_manifest_frame_count": 3,
+  "teacher_mock_used": true,
+  "timestamp_interval_error_count": 0
 }
 ```
 
@@ -117,3 +129,15 @@ Metrics: `event_count=24`, `frame_count=6`, `dropped_frame_count=0`, `event_orde
 Blockers: none.
 Risks: mock depth/features/masks/BEV are deterministic synthetic interface artifacts only and must not be used as real perception labels or model performance; all real teacher candidates remain license-unverified.
 Next recommended goal: Goal 2 real indoor video/image ingestion, or a small Goal 1.1 cleanup if artifact schema docs should be promoted into `SCHEMA.md`.
+
+### 003 - Goal 2 real indoor image-sequence ingestion
+
+Goal attempted: implement a lean ingestion path that turns real indoor image sequences into normal HomeBrain route logs while keeping missing IMU, wheel odometry, commands, and intrinsics explicitly unavailable.
+Files changed: added `homebrain/ingest/__init__.py`, `homebrain/ingest/metadata.py`, `homebrain/ingest/image_sequence.py`, and `tests/test_ingest_image_sequence.py`; updated `homebrain/messages/schema.py`, `homebrain/eval/run_eval.py`, `EVALS.md`, `DATA_STRATEGY.md`, `SCHEMA.md`, and `CURRENT_STATUS.md`.
+Commands run: `python -m pytest -q`; PowerShell fixture generation for `runs/goal2_tiny_room_walk_frames` (first byte-expression attempt emitted nonfatal PowerShell errors, then corrected and rewrote the three PGM frames); `python -m homebrain.ingest.image_sequence --frames runs/goal2_tiny_room_walk_frames --out runs/goal2_room_walk_route --camera front_rgb --fps 10`; `python -m homebrain.replay.replayd --log runs/goal2_room_walk_route --out runs/goal2_room_walk_replayed`; `python -m homebrain.teachers.run_teacher --teacher mock --log runs/goal2_room_walk_route --out runs/goal2_room_walk_route/teacher_artifacts/mock_teacher`; `python -m homebrain.teachers.visualize_artifacts --artifacts runs/goal2_room_walk_route/teacher_artifacts/mock_teacher --out runs/goal2_room_walk_mock_teacher_viz`; `python -m homebrain.eval.run_eval --log runs/goal2_room_walk_route --teacher-artifacts runs/goal2_room_walk_route/teacher_artifacts/mock_teacher --out runs/goal2_room_walk_eval_with_teacher.json`; `python -m homebrain.replay.generate_dummy_log --out runs/dummy_route`; `python -m homebrain.replay.replayd --log runs/dummy_route --out runs/replayed_route`; `python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.json`; `python -m homebrain.teachers.run_teacher --teacher mock --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/mock_teacher`; `python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/mock_teacher_viz`; `python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/dummy_eval_with_teacher.json`.
+Test result: pass, 14 tests passed.
+Artifacts created: `runs/goal2_tiny_room_walk_frames/*.pgm`; `runs/goal2_room_walk_route/manifest.json`, `events.jsonl`, `route_metadata.json`, and copied frame artifacts; `runs/goal2_room_walk_replayed/`; `runs/goal2_room_walk_route/teacher_artifacts/mock_teacher/`; `runs/goal2_room_walk_mock_teacher_viz/visualization_manifest.json` and preview PGM/PPM files; `runs/goal2_room_walk_eval_with_teacher.json`; refreshed dummy route, replay, teacher, visualization, and eval artifacts under `runs/`.
+Metrics: imported route eval reported `event_count=3`, `frame_count=3`, `imported_frame_count=3`, `image_load_error_count=0`, `timestamp_interval_error_count=0`, `missing_sensor_notice_count=3`, `dropped_frame_count=0`, `event_ordering_error_count=0`, `replay_determinism_pass=true`, `brain_output_count=3`, `teacher_artifact_count=15`, `teacher_mock_used=true`, `artifact_load_success=true`, `frames_with_teacher_artifacts=3`, `missing_artifact_count=0`, `artifact_shape_error_count=0`, `artifact_determinism_pass=true`, `teacher_manifest_frame_count=3`, `eval_runtime_sec=0.001932`. Refreshed dummy eval with teacher reported `event_count=24`, `frame_count=6`, `brain_output_count=6`, `teacher_artifact_count=30`, and `artifact_load_success=true`.
+Blockers: none.
+Risks: image dimensions are parsed with lean standard-library header readers, not full image decoding; this avoids OpenCV/Pillow but catches header-level load errors only. Imported image routes still have no real odometry, IMU, command, or calibration data, by design.
+Next recommended goal: run a real self-collected room walk through the importer and mock teacher, then decide whether Goal 3 should begin with teacher-backed dataset loading or a small Goal 2.1 around richer route-source metadata/provenance.

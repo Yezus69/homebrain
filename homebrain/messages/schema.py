@@ -137,7 +137,15 @@ class FrameEvent:
     frame_id: int
     width: int
     height: int
-    format: Literal["rgb8", "bgr8", "gray8", "encoded_jpeg"]
+    format: Literal[
+        "rgb8",
+        "bgr8",
+        "gray8",
+        "encoded_jpeg",
+        "encoded_png",
+        "encoded_pgm",
+        "encoded_ppm",
+    ]
     data_ref: str
     intrinsics: JsonDict | None = None
     event_type: Literal["frame"] = field(default="frame", init=False)
@@ -149,7 +157,15 @@ class FrameEvent:
     def from_dict(cls, data: JsonDict) -> "FrameEvent":
         _require_event_type(data, "frame")
         fmt = _require_str(data, "format")
-        if fmt not in {"rgb8", "bgr8", "gray8", "encoded_jpeg"}:
+        if fmt not in {
+            "rgb8",
+            "bgr8",
+            "gray8",
+            "encoded_jpeg",
+            "encoded_png",
+            "encoded_pgm",
+            "encoded_ppm",
+        }:
             raise ValueError(f"unsupported frame format {fmt!r}")
         return cls(
             timestamp_ns=_require_int(data, "timestamp_ns"),

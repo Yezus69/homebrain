@@ -86,3 +86,42 @@ sequence_id/
 ```
 
 Codex may choose a simpler compressed JSON/NPZ format initially, but the format must be deterministic and documented.
+
+## Current image-sequence ingestion
+
+Goal 2 adds a lean image-folder importer that writes normal HomeBrain route logs:
+
+```bash
+python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk/frames --out runs/room_walk_route --camera front_rgb --fps 10
+```
+
+Accepted frame extensions are `.jpg`, `.jpeg`, `.png`, `.pgm`, and `.ppm`. Files are imported in deterministic sorted order, copied under the route `frames/` directory, and represented as `FrameEvent` records. The route also gets `route_metadata.json` with:
+
+```text
+source_type=image_sequence
+source_path
+camera_name
+fps
+frame_count
+width/height when consistent and available
+has_imu=false
+has_wheel_odometry=false
+has_commands=false
+user_owned_or_license_unknown=true
+```
+
+Image-only imports must not synthesize IMU, wheel odometry, or command events. Missing sensors are recorded as unavailable in `route_metadata.json`, and camera intrinsics are marked missing on imported frame events.
+
+Optional sampling:
+
+```bash
+python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk/frames --out runs/room_walk_route_stride2 --camera front_rgb --fps 10 --stride 2 --max-frames 300
+```
+
+External phone-video conversion example:
+
+```bash
+ffmpeg -i phone_room_walk.mp4 -vf fps=10 data/inbox/room_walk/frames/%06d.jpg
+```
+
+`ffmpeg` is an external operator tool, not a HomeBrain Python dependency. Keep raw collected videos and derived frames out of git unless a tiny fixture is intentionally committed for tests.

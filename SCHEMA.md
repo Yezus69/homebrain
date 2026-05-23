@@ -31,6 +31,16 @@ intrinsics: optional dict
 
 `data_ref` may point to an image file inside the segment.
 
+Goal 2 extends imported image-frame formats to include:
+
+```text
+encoded_png
+encoded_pgm
+encoded_ppm
+```
+
+For image-sequence imports, `intrinsics` must explicitly mark calibration as missing instead of implying a real calibration exists.
+
 ## ImuEvent
 
 ```text
@@ -112,3 +122,38 @@ event_count: int
 ## Determinism rule
 
 Replaying the same segment with the same model/config must produce byte-identical output artifacts unless the config explicitly allows nondeterminism.
+
+## Route source metadata
+
+Image-sequence imports write `route_metadata.json` as a manifest artifact:
+
+```text
+schema_version: "homebrain.route_source.v0"
+source_type: "image_sequence"
+source_path: string
+camera_name: string
+fps: number
+effective_fps: number
+stride: int
+max_frames: optional int
+source_frame_count: int
+selected_frame_count: int
+frame_count: int
+imported_frame_count: int
+width: optional int
+height: optional int
+dimensions_consistent: bool
+source_frame_interval_ns: int
+expected_timestamp_interval_ns: int
+has_imu: false
+has_wheel_odometry: false
+has_commands: false
+has_intrinsics: false
+user_owned_or_license_unknown: bool
+image_load_error_count: int
+image_load_errors: list[dict]
+missing_sensor_notices: list[dict]
+frames: list[dict]
+```
+
+This metadata records absent sensors as unavailable. It must not be replaced by fake IMU, wheel odometry, or command events.

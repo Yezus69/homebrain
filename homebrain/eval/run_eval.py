@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from homebrain.brain.modeld import replay_events_with_dummy_model
+from homebrain.ingest.metadata import load_route_metadata
 from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent
 from homebrain.replay.replayd import order_events_for_replay
 from homebrain.replay.segment_log import canonical_event_text, read_events
@@ -41,6 +42,45 @@ def count_dropped_frames(events: list[Event]) -> int:
     return dropped
 
 
+def count_timestamp_interval_errors(frames: list[FrameEvent], expected_interval_ns: int) -> int:
+    if expected_interval_ns <= 0:
+        return max(len(frames) - 1, 0)
+    errors = 0
+    ordered_frames = sorted(frames, key=lambda frame: (frame.timestamp_ns, frame.frame_id))
+    for previous, current in zip(ordered_frames, ordered_frames[1:]):
+        if current.timestamp_ns - previous.timestamp_ns != expected_interval_ns:
+            errors += 1
+    return errors
+
+
+def imported_route_metrics(log_dir: str | Path, ordered_events: list[Event]) -> dict[str, Any]:
+    try:
+        metadata = load_route_metadata(log_dir)
+    except Exception as exc:  # noqa: BLE001 - eval should report malformed metadata.
+        return {
+            "imported_frame_count": 0,
+            "image_load_error_count": 1,
+            "timestamp_interval_error_count": 0,
+            "missing_sensor_notice_count": 0,
+            "imported_route_metadata_error": str(exc),
+        }
+    if metadata is None or metadata.get("source_type") != "image_sequence":
+        return {}
+
+    frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
+    expected_interval = int(metadata.get("expected_timestamp_interval_ns", 0))
+    notices = metadata.get("missing_sensor_notices", [])
+    return {
+        "imported_frame_count": int(metadata.get("imported_frame_count", len(frames))),
+        "image_load_error_count": int(metadata.get("image_load_error_count", 0)),
+        "timestamp_interval_error_count": count_timestamp_interval_errors(
+            frames,
+            expected_interval,
+        ),
+        "missing_sensor_notice_count": len(notices) if isinstance(notices, list) else 0,
+    }
+
+
 def evaluate_log(
     log_dir: str | Path,
     *,
@@ -64,6 +104,7 @@ def evaluate_log(
         "brain_output_count": sum(1 for event in replay_a if isinstance(event, BrainOutputEvent)),
         "eval_runtime_sec": round(elapsed, 6),
     }
+    metrics.update(imported_route_metrics(log_dir, ordered_events))
     if teacher_artifacts is not None:
         frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
         validation = validate_teacher_artifacts(teacher_artifacts, frames=frames)
