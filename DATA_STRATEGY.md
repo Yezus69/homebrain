@@ -125,3 +125,20 @@ ffmpeg -i phone_room_walk.mp4 -vf fps=10 data/inbox/room_walk/frames/%06d.jpg
 ```
 
 `ffmpeg` is an external operator tool, not a HomeBrain Python dependency. Keep raw collected videos and derived frames out of git unless a tiny fixture is intentionally committed for tests.
+
+## Current depth-to-BEV weak labels
+
+Depth Pro artifacts can now be converted into local egocentric BEV arrays under a route-owned geometry directory:
+
+```bash
+python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev
+```
+
+The camera config is an explicit assumption file, not measured calibration. If principal point or extrinsics are missing, BEV metadata records the assumption. The generated labels are intended for future student training/evaluation only and are always marked `weak_label=true` and `control_safe=false`.
+
+Visualization and validation:
+
+```bash
+python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_short60
+python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_short60.json
+```

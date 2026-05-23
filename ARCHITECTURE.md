@@ -80,6 +80,20 @@ Candidate teachers:
 
 Teacher outputs become pseudo-labels or features. They are not automatically product runtime dependencies.
 
+## Offline geometry labels
+
+Depth teacher artifacts can be converted into explicit local egocentric BEV weak labels before any student training. The current depth-to-BEV path consumes Depth Pro `depth_m.npy` plus `focallength_px.npy`, applies an explicit camera-height/pitch/roll/yaw config, and writes per-frame local grids:
+
+```text
+depth_m + focallength_px + camera config
+        ->
+pinhole point projection
+        ->
+robot-frame floor/obstacle/unknown BEV weak labels
+```
+
+These BEV labels are training/evaluation artifacts only. Manifests and frame metadata must include `weak_label=true` and `control_safe=false`. Missing calibration is handled by documented assumptions, not silent defaults.
+
 ## Control philosophy
 
 Use candidate trajectories.

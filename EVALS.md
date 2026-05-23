@@ -168,6 +168,50 @@ depth_shape_error_count
 
 Depth Pro outputs are offline teacher artifacts for training/evaluation. They are not control-safe runtime dependencies or direct navigation labels.
 
+## Gate 1.6: depth-to-BEV weak geometry labels
+
+Depth Pro depth can be projected into local egocentric BEV weak labels for future SpatialMemoryNet training and trajectory scoring. This gate does not train a student model and does not claim traversability or control safety.
+
+Required outputs:
+```text
+bev_free.npy
+bev_obstacle.npy
+bev_unknown.npy
+bev_floor_candidate.npy
+bev_height.npy
+bev_confidence.npy
+metadata.json
+bev_manifest.json
+```
+
+Every BEV manifest and frame metadata must include:
+```text
+weak_label=true
+control_safe=false
+```
+
+Required commands:
+```bash
+python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev
+python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_short60
+python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_short60.json
+```
+
+Geometry eval metrics:
+```text
+bev_frame_count
+bev_missing_count
+bev_shape_error_count
+bev_nan_count
+free_ratio_mean
+obstacle_ratio_mean
+unknown_ratio_mean
+confidence_mean
+temporal_jitter_mean
+```
+
+Camera-config sweeps may report sanity/stability scores, but those scores are not ground truth and must not be used as control-safety evidence.
+
 ## Gate 1.5: image-sequence imported routes
 
 Real indoor image folders can be imported into ordinary HomeBrain segment logs with frame artifacts and explicit missing-sensor metadata.

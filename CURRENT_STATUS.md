@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 3.1 real Depth Pro smoke test on a short imported room-walk route completed; next objective is depth-to-BEV preparation.
+Goal 4 depth-to-BEV weak geometry labels completed; next objective is calibration review and dataset packaging for future SpatialMemoryNet training.
 
 ## Last completed goal
 
-Goal 3.1: real Depth Pro backend smoke-tested on a 60-frame real room-walk route, visualized, evaluated, and kept offline teacher-only.
+Goal 4: Depth Pro per-frame depth converted into explicit local egocentric BEV weak labels, visualized, evaluated, swept over plausible camera configs, and kept offline teacher-only/control-unsafe.
 
 ## Current implementation status
 
@@ -32,6 +32,13 @@ Goal 3.1: real Depth Pro backend smoke-tested on a 60-frame real room-walk route
 - Real Depth Pro ran from the local ignored `external/ml-depth-pro` install with local checkpoint `external/ml-depth-pro/checkpoints/depth_pro.pt` and CUDA.
 - Real Depth Pro artifacts from Goal 3.1 are structurally usable as offline geometry inputs for the next depth-to-BEV prototype, but they are not production-approved or control-safe.
 - Real Depth Pro did not emit model confidence in this run, so `depth_confidence.npy` is the documented HomeBrain heuristic.
+- `homebrain.geometry` exists with camera config loading, pinhole depth-to-point projection, BEV rasterization, depth-to-BEV CLI, BEV visualization CLI, and BEV validation/eval CLI.
+- Default assumed camera config exists at `configs/camera/phone_robot_height_guess.json`.
+- Depth-to-BEV consumes `depth_m.npy`, `focallength_px.npy`, and optional `depth_confidence.npy`; missing principal point is recorded as an image-center assumption.
+- BEV artifacts write `bev_free.npy`, `bev_obstacle.npy`, `bev_unknown.npy`, `bev_floor_candidate.npy`, `bev_height.npy`, `bev_confidence.npy`, and `metadata.json` per frame, plus route-level `bev_manifest.json`.
+- BEV manifests and frame metadata are explicitly marked `weak_label=true` and `control_safe=false`.
+- Geometry eval emits `bev_frame_count`, `bev_missing_count`, `bev_shape_error_count`, `bev_nan_count`, `free_ratio_mean`, `obstacle_ratio_mean`, `unknown_ratio_mean`, `confidence_mean`, and `temporal_jitter_mean`.
+- Real short60 and full 350-frame route BEV artifacts exist under each route's `geometry/depth_pro_bev/` directory.
 - No student ML yet.
 
 ## Commands that should work
@@ -57,6 +64,9 @@ python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk_001/fram
 .\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --device cuda --log runs\room_walk_001_route_short60 --out runs\room_walk_001_route_short60\teacher_artifacts\depth_pro
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_depth_pro_viz_short60
 python -m homebrain.eval.run_eval --log runs/room_walk_001_route_short60 --teacher-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --out runs/room_walk_001_eval_with_depth_pro_short60.json
+python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev
+python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_short60
+python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_short60.json
 ```
 
 ## Metrics snapshot
@@ -104,6 +114,46 @@ Latest Goal 3.1 real Depth Pro eval from `runs/room_walk_001_eval_with_depth_pro
   "teacher_artifact_count": 240,
   "teacher_manifest_frame_count": 60,
   "teacher_mock_used": false
+}
+```
+
+Latest Goal 4 short60 BEV eval from `runs/room_walk_001_bev_eval_short60.json`:
+
+```json
+{
+  "bev_frame_count": 60,
+  "bev_load_success": true,
+  "bev_manifest_frame_count": 60,
+  "bev_missing_count": 0,
+  "bev_nan_count": 0,
+  "bev_shape_error_count": 0,
+  "confidence_mean": 0.05978431813418865,
+  "control_safe": false,
+  "free_ratio_mean": 0.012500000000000002,
+  "obstacle_ratio_mean": 0.0663984375,
+  "temporal_jitter_mean": 0.026459216101694914,
+  "unknown_ratio_mean": 0.9211015625000002,
+  "weak_label": true
+}
+```
+
+Latest Goal 4 full-route BEV eval from `runs/room_walk_001_bev_eval_full.json`:
+
+```json
+{
+  "bev_frame_count": 350,
+  "bev_load_success": true,
+  "bev_manifest_frame_count": 350,
+  "bev_missing_count": 0,
+  "bev_nan_count": 0,
+  "bev_shape_error_count": 0,
+  "confidence_mean": 0.15065131975321233,
+  "control_safe": false,
+  "free_ratio_mean": 0.03238169642857142,
+  "obstacle_ratio_mean": 0.03787812499999998,
+  "temporal_jitter_mean": 0.03962974570200571,
+  "unknown_ratio_mean": 0.9297401785714291,
+  "weak_label": true
 }
 ```
 
@@ -204,3 +254,15 @@ Metrics: eval reported `event_count=60`, `frame_count=60`, `imported_frame_count
 Blockers: none. `BLOCKERS.md` was not created or updated.
 Risks: Apple Depth Pro remains `pending_human_review` and is not production-approved; outputs are monocular offline teacher geometry and are not control-safe navigation labels; no ground-truth calibration or metric-depth validation exists for this room walk; route is image-only with no IMU, wheel odometry, commands, or intrinsics; `depth_confidence.npy` came from the HomeBrain heuristic because this Depth Pro prediction exposed only `depth` and `focallength_px`; real backend artifacts are nondeterministic (`artifact_determinism_pass=false`) and should not be used as a determinism gate.
 Next recommended goal: build the smallest depth-to-BEV prototype that consumes real Depth Pro `depth_m.npy` plus focal length metadata from this short route, writes explicit geometry/occupancy preview artifacts, and evaluates shape/load/finiteness without claiming traversability or control safety.
+
+### 006 - Goal 4 depth-to-BEV weak geometry labels
+
+Goal attempted: convert Depth Pro per-frame depth into explicit local egocentric BEV weak labels for future SpatialMemoryNet training and trajectory scoring, without student training or control-safety claims.
+Files changed: added `homebrain/geometry/__init__.py`, `homebrain/geometry/camera_config.py`, `homebrain/geometry/depth_to_points.py`, `homebrain/geometry/bev_projector.py`, `homebrain/geometry/run_depth_to_bev.py`, `homebrain/geometry/visualize_bev.py`, `homebrain/geometry/validate_bev.py`, `configs/camera/phone_robot_height_guess.json`, and `tests/test_geometry_bev.py`; updated `ARCHITECTURE.md`, `DATA_STRATEGY.md`, `EVALS.md`, and `CURRENT_STATUS.md`.
+Commands run: `python -m pytest tests\test_geometry_bev.py -q`; `python -m pytest -q`; `python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev --sweep-report runs/room_walk_001_bev_sweep_report.json`; `python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_short60`; `python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route_short60/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_short60.json`; `.\external\ml-depth-pro\.venv\Scripts\python.exe -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --device cuda --log runs\room_walk_001_route --out runs\room_walk_001_route\teacher_artifacts\depth_pro`; `python -m homebrain.eval.run_eval --log runs/room_walk_001_route --teacher-artifacts runs/room_walk_001_route/teacher_artifacts/depth_pro --out runs/room_walk_001_eval_with_depth_pro_full.json`; `python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route --depth-artifacts runs/room_walk_001_route/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route/geometry/depth_pro_bev`; `python -m homebrain.geometry.validate_bev --bev runs/room_walk_001_route/geometry/depth_pro_bev --out runs/room_walk_001_bev_eval_full.json`; `python -m homebrain.geometry.visualize_bev --bev runs/room_walk_001_route/geometry/depth_pro_bev --out runs/room_walk_001_bev_viz_full`.
+Test result: pass. Targeted geometry tests: 6 passed. Full suite: 26 passed.
+Artifacts created: short60 BEV artifacts under `runs/room_walk_001_route_short60/geometry/depth_pro_bev/`; short60 BEV previews under `runs/room_walk_001_bev_viz_short60/`; short60 BEV eval at `runs/room_walk_001_bev_eval_short60.json`; camera-config sweep report at `runs/room_walk_001_bev_sweep_report.json`; full-route real Depth Pro artifacts under `runs/room_walk_001_route/teacher_artifacts/depth_pro/`; full-route Depth Pro eval at `runs/room_walk_001_eval_with_depth_pro_full.json`; full-route BEV artifacts under `runs/room_walk_001_route/geometry/depth_pro_bev/`; full-route BEV eval at `runs/room_walk_001_bev_eval_full.json`; full-route BEV previews under `runs/room_walk_001_bev_viz_full/`; full teacher logs at `runs/room_walk_001_depth_pro_teacher_full.out.log` and `runs/room_walk_001_depth_pro_teacher_full.err.log`.
+Metrics: short60 BEV eval reported `bev_frame_count=60`, `bev_missing_count=0`, `bev_shape_error_count=0`, `bev_nan_count=0`, `free_ratio_mean=0.012500000000000002`, `obstacle_ratio_mean=0.0663984375`, `unknown_ratio_mean=0.9211015625000002`, `confidence_mean=0.05978431813418865`, `temporal_jitter_mean=0.026459216101694914`, `weak_label=true`, and `control_safe=false`. Sweep report processed 4 variants over 60 frames; base sanity score was `0.004592084094796972`, and all variants had `frame_error_count=0`. Full Depth Pro eval reported `depth_frame_count=350`, `depth_missing_count=0`, `depth_nan_count=0`, `depth_nonpositive_count=0`, `depth_shape_error_count=0`, `frames_with_teacher_artifacts=350`, and `teacher_mock_used=false`. Full-route BEV eval reported `bev_frame_count=350`, `bev_missing_count=0`, `bev_shape_error_count=0`, `bev_nan_count=0`, `free_ratio_mean=0.03238169642857142`, `obstacle_ratio_mean=0.03787812499999998`, `unknown_ratio_mean=0.9297401785714291`, `confidence_mean=0.15065131975321233`, `temporal_jitter_mean=0.03962974570200571`, `weak_label=true`, and `control_safe=false`.
+Blockers: none. `BLOCKERS.md` was not created or updated.
+Risks: camera intrinsics/extrinsics are assumed rather than calibrated; short60 and full-route BEV manifests record principal point as image-center assumed; Depth Pro remains offline teacher-only with Apple license still pending human review; BEV free/obstacle/unknown labels are weak geometry labels, not ground truth traversability and not control-safe; temporal jitter is a raw egocentric frame-to-frame sanity metric without odometry alignment; real Depth Pro artifacts remain nondeterministic and should not be used as a determinism gate.
+Next recommended goal: calibrate or estimate camera intrinsics/extrinsics and add a reviewed BEV dataset packer that samples these weak labels into SpatialMemoryNet-ready training examples with explicit weak-label provenance.
