@@ -38,3 +38,13 @@ If a goal adds a dependency, it must add:
 - risk
 - whether it is required at runtime
 - whether a mock/fallback exists
+
+## Goal 1 dependency update
+
+Goal 1 added the teacher artifact interface and deterministic mock teacher only.
+
+- No real teacher model, dataset, checkpoint, or external model weight was added.
+- No torch, ROS, Nav2, Habitat, Isaac, or simulator dependency was added.
+- The mock teacher is local HomeBrain code and emits `mock: true`, `synthetic: true`, and `real_perception: false`.
+- The only numerical file dependency used by the implementation is `numpy`, which was already allowed by `AGENTS.md` for initial development.
+- Candidate real teacher licenses above remain `UNVERIFIED` and must be audited before any real wrapper/checkpoint is treated as usable.

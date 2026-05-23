@@ -38,6 +38,10 @@ teacher_mock_used
 artifact_load_success
 visualization_written
 license_audit_updated
+frames_with_teacher_artifacts
+missing_artifact_count
+artifact_shape_error_count
+artifact_determinism_pass
 ```
 
 ## Gate 2: SpatialMemoryNet v0
@@ -104,6 +108,25 @@ pytest -q
 python -m homebrain.replay.generate_dummy_log --out runs/dummy_route
 python -m homebrain.replay.replayd --log runs/dummy_route --out runs/replayed_route
 python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.json
+python -m homebrain.teachers.run_teacher --teacher mock --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/mock_teacher
+python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/mock_teacher_viz
+python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/mock_teacher --out runs/dummy_eval_with_teacher.json
 ```
 
 As new features are added, Codex must update this file with exact current commands.
+
+## Current teacher artifact validation
+
+The mock teacher writes deterministic synthetic artifacts only:
+
+```text
+depth.npy
+depth_confidence.npy
+dense_features.npy
+dynamic_mask.npy
+bev_preview.npy
+metadata.json
+teacher_manifest.json
+```
+
+All mock teacher manifests and metadata must include `mock: true`, `synthetic: true`, and `real_perception: false`. These metrics validate artifact availability and format only; they are not perception/model performance metrics.

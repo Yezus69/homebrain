@@ -10,6 +10,7 @@ from homebrain.brain.modeld import replay_events_with_dummy_model
 from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent
 from homebrain.replay.replayd import order_events_for_replay
 from homebrain.replay.segment_log import canonical_event_text, read_events
+from homebrain.teachers.artifacts import validate_teacher_artifacts
 
 
 def count_event_ordering_errors(events: list[Event]) -> int:
@@ -40,7 +41,12 @@ def count_dropped_frames(events: list[Event]) -> int:
     return dropped
 
 
-def evaluate_log(log_dir: str | Path, *, eval_runtime_sec: float | None = None) -> dict[str, Any]:
+def evaluate_log(
+    log_dir: str | Path,
+    *,
+    teacher_artifacts: str | Path | None = None,
+    eval_runtime_sec: float | None = None,
+) -> dict[str, Any]:
     started = time.perf_counter()
     events = read_events(log_dir)
     ordered_events = order_events_for_replay(events)
@@ -49,7 +55,7 @@ def evaluate_log(log_dir: str | Path, *, eval_runtime_sec: float | None = None) 
     deterministic = canonical_event_text(replay_a) == canonical_event_text(replay_b)
     elapsed = time.perf_counter() - started if eval_runtime_sec is None else eval_runtime_sec
 
-    return {
+    metrics = {
         "event_count": len(events),
         "frame_count": sum(1 for event in events if isinstance(event, FrameEvent)),
         "dropped_frame_count": count_dropped_frames(events),
@@ -58,6 +64,11 @@ def evaluate_log(log_dir: str | Path, *, eval_runtime_sec: float | None = None) 
         "brain_output_count": sum(1 for event in replay_a if isinstance(event, BrainOutputEvent)),
         "eval_runtime_sec": round(elapsed, 6),
     }
+    if teacher_artifacts is not None:
+        frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
+        validation = validate_teacher_artifacts(teacher_artifacts, frames=frames)
+        metrics.update(validation.to_metrics())
+    return metrics
 
 
 def write_eval_metrics(metrics: dict[str, Any], out_path: str | Path) -> None:
@@ -71,9 +82,14 @@ def write_eval_metrics(metrics: dict[str, Any], out_path: str | Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run HomeBrain Goal 0 eval metrics.")
     parser.add_argument("--log", required=True, help="Input segment log directory.")
+    parser.add_argument(
+        "--teacher-artifacts",
+        default=None,
+        help="Optional teacher artifact directory to validate alongside the log.",
+    )
     parser.add_argument("--out", required=True, help="Output metrics JSON path.")
     args = parser.parse_args(argv)
-    metrics = evaluate_log(args.log)
+    metrics = evaluate_log(args.log, teacher_artifacts=args.teacher_artifacts)
     write_eval_metrics(metrics, args.out)
     return 0
 
