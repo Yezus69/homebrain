@@ -29,8 +29,11 @@ Frame types must be explicit:
 - `controlled_robot_frame_proxy`: deterministic grid-world supervision for replay-only candidate-label tests.
 - `phone_or_teacher_estimated_geometry`: DA3/phone/depth-teacher geometry; useful for geometry pretraining, not action truth.
 - `public_rgbd_camera_pose_geometry`: public RGB-D pose/depth geometry such as TUM; useful for geometry/pose pretraining, not robot action truth.
+- `public_robot_frame_geometry`: public robot-mounted RGB-D/pose geometry projected through a camera-to-base transform into the robot action frame; still replay-only and only action-valid after sanity audit.
 - `model_prediction`: SpatialMemoryNet output; debug/eval only.
 - `explicit_robot_frame_truth`: reserved for future robot logs with calibrated robot-frame pose/footprint evidence.
+
+Dataset frame provenance must also be explicit. `dataset_frame_type=public_robot_mounted` means the source came from a robot-mounted public dataset. It is not enough by itself for action labels: `robot_frame_truth_candidate=true` requires both robot/base pose evidence and a camera-to-base transform, and `robot_frame_truth=true` is allowed only when those transforms are present rather than assumed. If `--review-assumed-extrinsics` is used, the resulting BEV must remain `robot_frame_truth=false` and `action_supervision_ok=false`.
 
 ## Footprint And Semantics
 
@@ -52,6 +55,7 @@ Every BEV/action artifact must carry or derive:
 - `pose_pretrain_ok`: the frame may teach pose labels.
 - `action_supervision_ok`: the frame may teach candidate trajectory labels.
 - `robot_frame_truth`: the frame is true in the robot action frame, or a controlled robot-frame proxy.
+- `robot_frame_truth_candidate`: the dataset contains enough pose/transform evidence to attempt robot-frame action review.
 - `control_safe`: always `false` for current replay artifacts.
 
-DA3/phone BEVs and TUM/public RGB-D labels are not automatically robot-frame action truth. They may be marked geometry-only for action learning even when their geometry labels are structurally valid.
+DA3/phone BEVs and TUM/public RGB-D labels are not automatically robot-frame action truth. Public robot-mounted BEVs are also not automatically action truth: only frames with true robot-frame transforms and passing robot-center/footprint/corridor/candidate sanity may set `action_supervision_ok=true`. They may be marked geometry-only for action learning even when their geometry labels are structurally valid.

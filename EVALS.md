@@ -319,6 +319,45 @@ Old vs calibrated comparison: DA3 labels old/calibrated stop_fraction=1.0/1.0; T
 
 Gate interpretation: Goal 9B repairs the action contract and filtering path, not the real BEV labels themselves. Controlled maps are usable replay-only action-supervision proxies after sanity filtering; current DA3/TUM reviewed labels and modeld BEVs remain geometry-only for action learning until robot-frame origin/footprint semantics are repaired.
 
+## Gate 3.3: public robot-frame dataset bridge
+
+Required before learned trajectory scoring:
+- public robot-mounted dataset setup/import adapters exist and record official source URLs plus license review status
+- imported robot datasets write normal HomeBrain route logs with only available sensors, never faked sensors
+- robot-frame BEV projection requires depth, intrinsics, camera-to-base transform, and robot/base pose or odometry evidence
+- assumed extrinsics require explicit review override and must keep `robot_frame_truth=false` and `action_supervision_ok=false`
+- public robot-mounted frames enter ActionLabelPack v2 only after `audit_bev_action_sanity` passes
+- DA3/phone and TUM camera-pose geometry-only frames remain excluded from action supervision
+- every action/policy/comparison output remains `replay_only=true`, `not_executed=true`, and `control_safe=false`
+
+Public robot-frame commands:
+```bash
+python -m homebrain.datasets.setup_openloris_scene --out data/public/openloris_scene --sequence cafe1-1 --download --max-download-gb 2
+python -m homebrain.datasets.setup_tum_rgbd --out data/public/tum_rgbd --sequence freiburg2_pioneer_slam --download --max-download-gb 0.25
+python -m homebrain.policies.build_action_label_pack --source runs/goal9_controlled_bev_maps --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal10a_action_label_pack_v2 --pack-version 2
+python -m homebrain.policies.qa_action_label_pack --pack runs/goal10a_action_label_pack_v2 --out runs/goal10a_action_label_pack_v2_qa.json
+```
+
+Robot-frame bridge implementation outputs:
+```text
+homebrain.datasets.setup_openloris_scene
+homebrain.datasets.openloris_to_route
+homebrain.geometry.robot_rgbd_to_bev
+homebrain.policies.compare_robot_frame_action_sources
+ActionLabelPack v2 schema: homebrain.action_label_pack.v2
+```
+
+Current Goal 10A results:
+```text
+OpenLORIS setup discovered the official Hugging Face package list and selected package/cafe1-1_2-package.tar, size 6.95 GB. The bounded setup blocked before download at max_download_gb=2.00 and wrote data/public/openloris_scene/openloris_scene_setup_status.json.
+TUM Pioneer fallback resolved freiburg2_pioneer_slam to a 1.51 GB archive. The bounded setup blocked before download at max_download_gb=0.25 and wrote data/public/tum_rgbd/freiburg2_pioneer_slam/dataset_metadata.json.
+ActionLabelPack v2 QA: example_count=906, excluded_frame_count=393, selected_stop_fraction=0.18322295805739514, selected_motion_fraction=0.8167770419426048, action_entropy=1.7035377080351073, action_label_pack_qa_pass=true.
+Excluded geometry-only sources in v2: room_walk_001_route_short60=59, tum_freiburg1_xyz_route=120.
+Full pytest: 51 passed.
+```
+
+Gate interpretation: Goal 10A adds the bridge and verifies the contract path with synthetic robot-frame fixtures, but no real public robot-mounted frames were imported under the bounded download caps. The next gate should stage/download a robot-mounted sequence or reduce the adapter to a smaller officially available package before learned scorer v0.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

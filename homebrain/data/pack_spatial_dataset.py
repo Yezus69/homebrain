@@ -144,6 +144,15 @@ def pack_spatial_dataset(
             "action_label_mask": scalar_float(0.0),
             "imu_label_mask": scalar_float(0.0),
             "wheel_label_mask": scalar_float(0.0),
+            "source_name": scalar_str(_source_name(bev_manifest, frame_record)),
+            "source_family": scalar_str(_source_family(bev_manifest, frame_record)),
+            "supervision_grade": scalar_str(_robot_supervision_grade(bev_manifest)),
+            "dataset_frame_type": scalar_str(_dataset_frame_type(bev_manifest, frame_record)),
+            "robot_frame_truth": scalar_bool(_robot_frame_truth(bev_manifest, frame_record)),
+            "robot_frame_truth_candidate": scalar_bool(_robot_frame_truth_candidate(bev_manifest, frame_record)),
+            "geometry_pretrain_ok": scalar_bool(_flag_bool(bev_manifest, frame_record, "geometry_pretrain_ok")),
+            "pose_pretrain_ok": scalar_bool(_flag_bool(bev_manifest, frame_record, "pose_pretrain_ok")),
+            "source_action_supervision_status": scalar_str(str(frame_record.get("action_supervision_ok", bev_manifest.get("action_supervision_ok", "unknown")))),
         }
         if "bev_height" in arrays:
             example_arrays["bev_height"] = arrays["bev_height"]
@@ -178,6 +187,17 @@ def pack_spatial_dataset(
                 "pose_label_target_frame_id": pose_label.target_frame_id,
                 "source_bev_metadata_path": frame_record.get("metadata_path"),
                 "source_bev_stats": dict(stats),
+                "source_name": _source_name(bev_manifest, frame_record),
+                "source_family": _source_family(bev_manifest, frame_record),
+                "supervision_grade": _robot_supervision_grade(bev_manifest),
+                "dataset_frame_type": _dataset_frame_type(bev_manifest, frame_record),
+                "robot_frame_truth": _robot_frame_truth(bev_manifest, frame_record),
+                "robot_frame_truth_candidate": _robot_frame_truth_candidate(bev_manifest, frame_record),
+                "geometry_pretrain_ok": _flag_bool(bev_manifest, frame_record, "geometry_pretrain_ok"),
+                "pose_pretrain_ok": _flag_bool(bev_manifest, frame_record, "pose_pretrain_ok"),
+                "source_action_supervision_status": str(
+                    frame_record.get("action_supervision_ok", bev_manifest.get("action_supervision_ok", "unknown"))
+                ),
             }
         )
 
@@ -199,6 +219,15 @@ def pack_spatial_dataset(
         "source_depth_mock": bool(bev_manifest.get("source_depth_mock", False)),
         "source_depth_real_perception": bool(bev_manifest.get("source_depth_real_perception", False)),
         "robot_supervision_grade": _robot_supervision_grade(bev_manifest),
+        "source_name": str(bev_manifest.get("source_name") or route_manifest.segment_id),
+        "source_family": _source_family(bev_manifest, {}),
+        "dataset_frame_type": str(bev_manifest.get("dataset_frame_type", "unknown")),
+        "frame_type": str(bev_manifest.get("frame_type", "unknown")),
+        "robot_frame_truth": bool(bev_manifest.get("robot_frame_truth", False)),
+        "robot_frame_truth_candidate": bool(bev_manifest.get("robot_frame_truth_candidate", False)),
+        "geometry_pretrain_ok": bool(bev_manifest.get("geometry_pretrain_ok", True)),
+        "pose_pretrain_ok": bool(bev_manifest.get("pose_pretrain_ok", pose_label_count > 0)),
+        "source_action_supervision_status": str(bev_manifest.get("action_supervision_ok", "unknown")),
         "teacher_artifacts": Path(teacher_artifacts).as_posix() if teacher_artifacts is not None else None,
         "teacher_manifest_hash": teacher_manifest_hash,
         "camera_config_hash": camera_config_hash,
@@ -233,6 +262,15 @@ def pack_spatial_dataset(
             "action_label_mask",
             "imu_label_mask",
             "wheel_label_mask",
+            "source_name",
+            "source_family",
+            "supervision_grade",
+            "dataset_frame_type",
+            "robot_frame_truth",
+            "robot_frame_truth_candidate",
+            "geometry_pretrain_ok",
+            "pose_pretrain_ok",
+            "source_action_supervision_status",
         ],
         "weak_label": True,
         "control_safe": False,
@@ -581,6 +619,10 @@ def _example_provenance(
 
 
 def _robot_supervision_grade(bev_manifest: JsonDict) -> str:
+    if bool(bev_manifest.get("robot_frame_truth")) and str(bev_manifest.get("frame_type")) == "public_robot_frame_geometry":
+        return "public_robot_frame_geometry"
+    if bool(bev_manifest.get("robot_frame_truth")) and str(bev_manifest.get("dataset_frame_type")) == "public_robot_mounted":
+        return "public_robot_frame_geometry"
     source_name = str(bev_manifest.get("source_depth_teacher_name", "")).lower()
     source_backend = str(bev_manifest.get("source_depth_backend", "")).lower()
     source_path = str(bev_manifest.get("source_log", "")).lower()
@@ -596,6 +638,62 @@ def _robot_supervision_grade(bev_manifest: JsonDict) -> str:
     if source_name in {"da3", "depth_pro"} or source_backend in {"real", "fake"}:
         return "weak_visual_geometry"
     return "unknown"
+
+
+def _source_name(bev_manifest: JsonDict, frame_record: JsonDict) -> str:
+    value = frame_record.get("source_name")
+    if isinstance(value, str) and value:
+        return value
+    value = bev_manifest.get("source_name")
+    if isinstance(value, str) and value:
+        return value
+    return str(bev_manifest.get("source_segment_id") or bev_manifest.get("source_depth_teacher_name") or "unknown")
+
+
+def _source_family(bev_manifest: JsonDict, frame_record: JsonDict) -> str:
+    value = frame_record.get("source_family")
+    if isinstance(value, str) and value:
+        return value
+    value = bev_manifest.get("source_family")
+    if isinstance(value, str) and value:
+        return value
+    if str(bev_manifest.get("dataset_frame_type")) == "public_robot_mounted":
+        return "public_robot_mounted"
+    return "unknown"
+
+
+def _dataset_frame_type(bev_manifest: JsonDict, frame_record: JsonDict) -> str:
+    value = frame_record.get("dataset_frame_type")
+    if isinstance(value, str) and value:
+        return value
+    value = bev_manifest.get("dataset_frame_type")
+    if isinstance(value, str) and value:
+        return value
+    return "unknown"
+
+
+def _robot_frame_truth(bev_manifest: JsonDict, frame_record: JsonDict) -> bool:
+    value = frame_record.get("robot_frame_truth")
+    if isinstance(value, bool):
+        return value
+    return bool(bev_manifest.get("robot_frame_truth", False))
+
+
+def _robot_frame_truth_candidate(bev_manifest: JsonDict, frame_record: JsonDict) -> bool:
+    value = frame_record.get("robot_frame_truth_candidate")
+    if isinstance(value, bool):
+        return value
+    return bool(bev_manifest.get("robot_frame_truth_candidate", False))
+
+
+def _flag_bool(bev_manifest: JsonDict, frame_record: JsonDict, field: str) -> bool:
+    value = frame_record.get(field)
+    if isinstance(value, bool):
+        return value
+    value = bev_manifest.get(field)
+    if isinstance(value, bool):
+        return value
+    return field == "geometry_pretrain_ok"
 
 
 def main(argv: list[str] | None = None) -> int:

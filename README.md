@@ -22,13 +22,3 @@ Start here:
 3. Read `CODEX_GOALS.md`.
 4. Run one Codex goal at a time.
 5. After every goal, inspect or share `CURRENT_STATUS.md`, not the whole codebase.
-
-Core command shape after Goal 0:
-```bash
-pytest -q
-python -m homebrain.replay.generate_dummy_log --out runs/dummy_route
-python -m homebrain.replay.replayd --log runs/dummy_route
-python -m homebrain.eval.run_eval --log runs/dummy_route --out runs/dummy_eval.json
-```
-
-If those commands do not work yet, the repo is not ready for ML work.

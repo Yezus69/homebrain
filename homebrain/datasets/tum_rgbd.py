@@ -17,9 +17,13 @@ TUM_RGBD_ROUTE_ASSOCIATIONS_FILE = "tum_rgbd_associations.json"
 TUM_RGBD_SOURCE_URL = "https://cvg.cit.tum.de/data/datasets/rgbd-dataset"
 TUM_RGBD_DOWNLOADS: dict[str, str] = {
     "freiburg1_xyz": "https://cvg.cit.tum.de/rgbd/dataset/freiburg1/rgbd_dataset_freiburg1_xyz.tgz",
+    "freiburg2_pioneer_slam": "https://cvg.cit.tum.de/rgbd/dataset/freiburg2/rgbd_dataset_freiburg2_pioneer_slam.tgz",
+    "freiburg2_pioneer_slam2": "https://cvg.cit.tum.de/rgbd/dataset/freiburg2/rgbd_dataset_freiburg2_pioneer_slam2.tgz",
 }
 TUM_RGBD_ARCHIVE_ROOTS: dict[str, str] = {
     "freiburg1_xyz": "rgbd_dataset_freiburg1_xyz",
+    "freiburg2_pioneer_slam": "rgbd_dataset_freiburg2_pioneer_slam",
+    "freiburg2_pioneer_slam2": "rgbd_dataset_freiburg2_pioneer_slam2",
 }
 TUM_RGBD_LICENSE_NAME = "CC BY 4.0"
 TUM_RGBD_LICENSE_REVIEW_STATUS = "pending_human_review"
@@ -32,6 +36,22 @@ TUM_RGBD_INTRINSICS: dict[str, JsonDict] = {
         "cy": 255.3,
         "depth_scale": TUM_RGBD_DEPTH_SCALE,
         "source": "TUM_RGBD_freiburg1_calibration_table",
+    },
+    "freiburg2_pioneer_slam": {
+        "fx": 520.9,
+        "fy": 521.0,
+        "cx": 325.1,
+        "cy": 249.7,
+        "depth_scale": TUM_RGBD_DEPTH_SCALE,
+        "source": "TUM_RGBD_freiburg2_calibration_table",
+    },
+    "freiburg2_pioneer_slam2": {
+        "fx": 520.9,
+        "fy": 521.0,
+        "cx": 325.1,
+        "cy": 249.7,
+        "depth_scale": TUM_RGBD_DEPTH_SCALE,
+        "source": "TUM_RGBD_freiburg2_calibration_table",
     },
 }
 
@@ -77,7 +97,7 @@ def tum_sequence_dir(out_dir: str | Path, sequence: str) -> Path:
     return Path(out_dir) / sequence
 
 
-def download_and_extract_sequence(out_dir: str | Path, sequence: str) -> Path:
+def download_and_extract_sequence(out_dir: str | Path, sequence: str, *, max_download_gb: float | None = None) -> Path:
     if sequence not in TUM_RGBD_DOWNLOADS:
         raise ValueError(f"unsupported TUM RGB-D sequence {sequence!r}")
     root = Path(out_dir)
@@ -90,6 +110,15 @@ def download_and_extract_sequence(out_dir: str | Path, sequence: str) -> Path:
     archive_dir.mkdir(parents=True, exist_ok=True)
     archive_path = archive_dir / f"{TUM_RGBD_ARCHIVE_ROOTS[sequence]}.tgz"
     if not archive_path.exists():
+        if max_download_gb is not None:
+            size = remote_file_size(TUM_RGBD_DOWNLOADS[sequence])
+            if size is not None:
+                size_gb = size / (1024.0**3)
+                if size_gb > max_download_gb:
+                    raise RuntimeError(
+                        f"TUM RGB-D sequence {sequence} archive is {size_gb:.2f} GB, "
+                        f"exceeding max_download_gb={max_download_gb:.2f}"
+                    )
         download_url(TUM_RGBD_DOWNLOADS[sequence], archive_path)
 
     extract_root = root / "_extracting" / sequence
@@ -115,6 +144,21 @@ def download_url(url: str, out_path: str | Path) -> Path:
         with target.open("wb") as handle:
             shutil.copyfileobj(response, handle)
     return target
+
+
+def remote_file_size(url: str) -> int | None:
+    request = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(request, context=_ssl_context(), timeout=45) as response:
+            value = response.headers.get("Content-Length")
+    except Exception:
+        return None
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def validate_sequence_dir(sequence_dir: str | Path) -> None:
@@ -290,6 +334,8 @@ def sequence_intrinsics(sequence: str) -> JsonDict:
         return dict(TUM_RGBD_INTRINSICS[sequence])
     if sequence.startswith("freiburg1"):
         return dict(TUM_RGBD_INTRINSICS["freiburg1_xyz"])
+    if sequence.startswith("freiburg2"):
+        return dict(TUM_RGBD_INTRINSICS["freiburg2_pioneer_slam"])
     return {
         "fx": 0.0,
         "fy": 0.0,

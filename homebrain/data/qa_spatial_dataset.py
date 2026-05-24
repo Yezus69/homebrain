@@ -33,6 +33,7 @@ MIN_EXAMPLES_FOR_TRAINING_GATE = 10
 ROBOT_SUPERVISION_GRADES = {
     "weak_visual_geometry",
     "public_rgbd_anchor",
+    "public_robot_frame_geometry",
     "robot_frame_metric",
     "unknown",
 }
@@ -448,6 +449,13 @@ def _robot_supervision_grade(manifest: dict[str, Any]) -> str:
     existing = manifest.get("robot_supervision_grade")
     if isinstance(existing, str) and existing in ROBOT_SUPERVISION_GRADES:
         return existing
+
+    frame_type = str(manifest.get("frame_type", "")).lower()
+    dataset_frame_type = str(manifest.get("dataset_frame_type", "")).lower()
+    if bool(manifest.get("robot_frame_truth")) and (
+        frame_type == "public_robot_frame_geometry" or dataset_frame_type == "public_robot_mounted"
+    ):
+        return "public_robot_frame_geometry"
 
     source_name = str(manifest.get("source_depth_teacher_name", "")).lower()
     source_backend = str(manifest.get("source_depth_backend", "")).lower()

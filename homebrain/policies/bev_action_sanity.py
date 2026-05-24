@@ -235,6 +235,20 @@ def contract_flags_for_frame(frame: LoadedBevFrame) -> JsonDict:
         robot_frame_truth = True
         geometry_pretrain_ok = True
         pose_pretrain_ok = False
+    elif (
+        source_family == "public_robot_mounted"
+        or frame.frame_record.get("dataset_frame_type") == "public_robot_mounted"
+        or manifest.get("dataset_frame_type") == "public_robot_mounted"
+        or frame.frame_record.get("frame_type") == "public_robot_frame_geometry"
+        or manifest.get("frame_type") == "public_robot_frame_geometry"
+    ):
+        frame_type = "public_robot_frame_geometry"
+        explicit_robot_truth = bool(manifest.get("robot_frame_truth", False)) or bool(frame.frame_record.get("robot_frame_truth", False))
+        not_robot_truth = bool(manifest.get("not_robot_frame_truth", False)) or bool(frame.frame_record.get("not_robot_frame_truth", False))
+        robot_frame_truth = explicit_robot_truth and not not_robot_truth
+        status = "public_robot_frame_truth" if robot_frame_truth else "public_robot_mounted_not_robot_frame_truth"
+        geometry_pretrain_ok = bool(manifest.get("geometry_pretrain_ok", True))
+        pose_pretrain_ok = bool(manifest.get("pose_pretrain_ok", False)) or bool(frame.frame_record.get("pose_pretrain_ok", False))
     elif source_kind == "modeld_output" or source_kind == "policy":
         frame_type = "model_prediction"
         status = "model_prediction_not_truth"

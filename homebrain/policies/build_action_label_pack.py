@@ -38,6 +38,7 @@ from homebrain.teachers.artifacts import file_sha256, relative_to_root
 
 ACTION_LABEL_PACK_SCHEMA_VERSION = "homebrain.action_label_pack.v0"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V1 = "homebrain.action_label_pack.v1"
+ACTION_LABEL_PACK_SCHEMA_VERSION_V2 = "homebrain.action_label_pack.v2"
 ACTION_LABEL_EXAMPLE_SCHEMA_VERSION = "homebrain.action_label_example.v0"
 COLLISION_THRESHOLD = RISKY_CANDIDATE_THRESHOLD
 UNKNOWN_BLOCK_THRESHOLD = 0.95
@@ -172,7 +173,7 @@ def build_action_label_pack(
         )
 
     manifest: JsonDict = {
-        "schema_version": ACTION_LABEL_PACK_SCHEMA_VERSION_V1 if pack_version >= 1 else ACTION_LABEL_PACK_SCHEMA_VERSION,
+        "schema_version": _pack_schema_version(pack_version),
         "example_schema_version": ACTION_LABEL_EXAMPLE_SCHEMA_VERSION,
         "created_at_utc": DETERMINISTIC_CREATED_AT_UTC,
         "package_type": "ActionLabelPack",
@@ -190,12 +191,16 @@ def build_action_label_pack(
         "meters_per_cell": round(float(meters_per_cell), 6),
         "robot_radius_m": round(float(robot_radius_m), 6),
         "source_distribution": dict(sorted(source_distribution.items())),
+        "excluded_source_distribution": _excluded_source_distribution(excluded_frames),
+        "source_frame_counts": _source_frame_counts(frames, excluded_frames),
         "selected_distribution": dict(sorted(selected_distribution.items())),
         "scoring": _scoring_description(),
         "action_sanity_filter": {
             "enabled": bool(pack_version >= 1),
             "schema_version": "homebrain.bev_action_sanity.v0",
             "excluded_frame_count": len(excluded_frames),
+            "excluded_by_source": _excluded_source_distribution(excluded_frames),
+            "included_by_source": dict(sorted(source_distribution.items())),
             "policy": "v1 includes only action_supervision_ok frames; excluded frames are retained as manifest audit records",
         },
         "excluded_frames": excluded_frames,
@@ -209,6 +214,36 @@ def build_action_label_pack(
     }
     write_json(output / "manifest.json", manifest, pretty=True)
     return output / "manifest.json"
+
+
+def _pack_schema_version(pack_version: int) -> str:
+    if pack_version >= 2:
+        return ACTION_LABEL_PACK_SCHEMA_VERSION_V2
+    if pack_version >= 1:
+        return ACTION_LABEL_PACK_SCHEMA_VERSION_V1
+    return ACTION_LABEL_PACK_SCHEMA_VERSION
+
+
+def _excluded_source_distribution(excluded_frames: list[JsonDict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for frame in excluded_frames:
+        source = str(frame.get("source_name", "unknown"))
+        counts[source] = counts.get(source, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _source_frame_counts(frames: list[SourceFrame], excluded_frames: list[JsonDict]) -> dict[str, JsonDict]:
+    counts: dict[str, JsonDict] = {}
+    for frame in frames:
+        record = counts.setdefault(frame.source_name, {"included": 0, "excluded": 0, "total": 0})
+        record["included"] = int(record["included"]) + 1
+        record["total"] = int(record["total"]) + 1
+    for frame in excluded_frames:
+        source = str(frame.get("source_name", "unknown"))
+        record = counts.setdefault(source, {"included": 0, "excluded": 0, "total": 0})
+        record["excluded"] = int(record["excluded"]) + 1
+        record["total"] = int(record["total"]) + 1
+    return dict(sorted(counts.items()))
 
 
 def expert_labels_for_frame(
@@ -579,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", action="append", required=True, help="Input controlled/reviewed BEV pack.")
     parser.add_argument("--out", required=True, help="Output ActionLabelPack directory.")
     parser.add_argument("--max-examples", type=int, default=None)
-    parser.add_argument("--pack-version", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--pack-version", type=int, choices=(0, 1, 2), default=0)
     args = parser.parse_args(argv)
     manifest = build_action_label_pack(
         sources=[Path(source) for source in args.source],

@@ -104,6 +104,13 @@ def _vec3(data: JsonDict, key: str) -> tuple[float, float, float]:
     return (_number(value[0], key), _number(value[1], key), _number(value[2], key))
 
 
+def _vec4(data: JsonDict, key: str) -> tuple[float, float, float, float]:
+    value = data.get(key)
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError(f"{key} must be a length-4 list")
+    return (_number(value[0], key), _number(value[1], key), _number(value[2], key), _number(value[3], key))
+
+
 def _optional_vec3(data: JsonDict, key: str) -> tuple[float, float, float] | None:
     value = data.get(key)
     if value is None:
@@ -111,6 +118,15 @@ def _optional_vec3(data: JsonDict, key: str) -> tuple[float, float, float] | Non
     if not isinstance(value, list) or len(value) != 3:
         raise ValueError(f"{key} must be a length-3 list or null")
     return (_number(value[0], key), _number(value[1], key), _number(value[2], key))
+
+
+def _optional_vec4(data: JsonDict, key: str) -> tuple[float, float, float, float] | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) != 4:
+        raise ValueError(f"{key} must be a length-4 list or null")
+    return (_number(value[0], key), _number(value[1], key), _number(value[2], key), _number(value[3], key))
 
 
 def _number(value: Any, key: str) -> float:
@@ -236,6 +252,66 @@ class WheelEvent:
 
 
 @dataclass(frozen=True)
+class OdomEvent:
+    timestamp_ns: int
+    sequence_id: str
+    source: str
+    position_m: tuple[float, float, float]
+    orientation_xyzw: tuple[float, float, float, float]
+    linear_velocity_mps: tuple[float, float, float] | None = None
+    angular_velocity_radps: tuple[float, float, float] | None = None
+    event_type: Literal["odom"] = field(default="odom", init=False)
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: JsonDict) -> "OdomEvent":
+        _require_event_type(data, "odom")
+        return cls(
+            timestamp_ns=_require_int(data, "timestamp_ns"),
+            sequence_id=_require_str(data, "sequence_id"),
+            source=_require_str(data, "source"),
+            position_m=_vec3(data, "position_m"),
+            orientation_xyzw=_vec4(data, "orientation_xyzw"),
+            linear_velocity_mps=_optional_vec3(data, "linear_velocity_mps"),
+            angular_velocity_radps=_optional_vec3(data, "angular_velocity_radps"),
+        )
+
+
+@dataclass(frozen=True)
+class PoseEvent:
+    timestamp_ns: int
+    sequence_id: str
+    source: str
+    position_m: tuple[float, float, float]
+    orientation_xyzw: tuple[float, float, float, float]
+    frame_id: str
+    child_frame_id: str
+    pose_kind: str
+    covariance: JsonDict | None = None
+    event_type: Literal["pose"] = field(default="pose", init=False)
+
+    def to_dict(self) -> JsonDict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: JsonDict) -> "PoseEvent":
+        _require_event_type(data, "pose")
+        return cls(
+            timestamp_ns=_require_int(data, "timestamp_ns"),
+            sequence_id=_require_str(data, "sequence_id"),
+            source=_require_str(data, "source"),
+            position_m=_vec3(data, "position_m"),
+            orientation_xyzw=_vec4(data, "orientation_xyzw"),
+            frame_id=_require_str(data, "frame_id"),
+            child_frame_id=_require_str(data, "child_frame_id"),
+            pose_kind=_require_str(data, "pose_kind"),
+            covariance=_optional_dict(data, "covariance"),
+        )
+
+
+@dataclass(frozen=True)
 class CommandEvent:
     timestamp_ns: int
     sequence_id: str
@@ -338,6 +414,8 @@ Event = Union[
     FrameEvent,
     ImuEvent,
     WheelEvent,
+    OdomEvent,
+    PoseEvent,
     CommandEvent,
     BrainOutputEvent,
     EvalEvent,
@@ -347,6 +425,8 @@ _EVENT_BY_TYPE = {
     "frame": FrameEvent,
     "imu": ImuEvent,
     "wheel": WheelEvent,
+    "odom": OdomEvent,
+    "pose": PoseEvent,
     "command": CommandEvent,
     "brain_output": BrainOutputEvent,
     "eval": EvalEvent,
@@ -412,4 +492,6 @@ def event_identity(event: Event) -> str:
         return f"{base}:camera={event.camera_id}:frame={event.frame_id}"
     if isinstance(event, CommandEvent):
         return f"{base}:command={event.command_id}"
+    if isinstance(event, PoseEvent):
+        return f"{base}:pose={event.pose_kind}:{event.frame_id}->{event.child_frame_id}"
     return base

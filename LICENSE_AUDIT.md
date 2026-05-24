@@ -28,6 +28,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | ARKitScenes | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | ScanNet / ScanNet++ | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | TUM RGB-D SLAM Dataset | public RGB-D / pose geometry anchor | UNVERIFIED / pending_human_review | No | Official page lists CC BY 4.0; keep pending human review before product/training approval. |
+| OpenLORIS-Scene | public robot-mounted indoor RGB-D/IMU/odom/pose bridge | UNVERIFIED / pending_human_review | No | Official dataset page lists CC BY-ND 4.0; Goal 10A inspected official docs/tools and blocked bounded download before importing real data. |
 | Ego4D / EPIC-KITCHENS | visual clutter/dynamics data | UNVERIFIED | No | Verify dataset terms. |
 
 ## Rule
@@ -113,3 +114,25 @@ Goal 7B did not add new external dependencies, models, datasets, or product-runt
 - DA3 weak geometry labels were reused only as `weak_visual_geometry`; status remains `pending_human_review`.
 - TUM pose deltas are stored as `camera_relative_dataset_pose`, explicitly not robot odometry or robot-frame truth.
 - All new checkpoints, metrics, replay outputs, and contact sheets are `representation_pretraining_only=true` and `control_safe=false`.
+
+## Goal 10A dependency update
+
+Goal 10A added dataset bridge code for public robot-mounted data and attempted bounded public-data setup. It did not import a real OpenLORIS/TUM Pioneer sequence because both selected archives exceeded the configured caps.
+
+- OpenLORIS-Scene source URL: https://lifelong-robotic-vision.github.io/dataset/scene.html
+- OpenLORIS official download docs: https://github.com/lifelong-robotic-vision/OpenLORIS-Scene/blob/master/download.md
+- OpenLORIS Hugging Face package mirror inspected: https://huggingface.co/datasets/shixuesong/openloris-scene/tree/main/package
+- OpenLORIS tools inspected: https://github.com/lifelong-robotic-vision/openloris-scene-tools at commit `ce6a4839f618bf036d3f3dbae14561bfc7413641`.
+- OpenLORIS license name/status in HomeBrain: `CC BY-ND 4.0` observed on the official dataset page, with `license_review_status=pending_human_review`.
+- Intended use: offline public robot-mounted RGB-D/IMU/odom/pose bridge for robot-frame BEV and action-sanity review.
+- Required at runtime: no.
+- Required for normal tests: no; tests use a tiny synthetic OpenLORIS-style fixture generated locally and explicitly remain replay-only.
+- Mock/fallback status: no fake public dataset is substituted for missing real data. Synthetic fixtures test adapter semantics only and must not be reported as real dataset performance.
+- Risk: CC BY-ND terms need human/legal review before training/product use, and public robot-mounted geometry is not action supervision unless calibrated robot-frame transforms and action sanity pass.
+
+TUM RGB-D was also extended to try the robot-mounted `freiburg2_pioneer_slam` fallback.
+
+- TUM source URL: https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+- Fallback sequence/download attempted: `freiburg2_pioneer_slam`, `rgbd_dataset_freiburg2_pioneer_slam.tgz`.
+- License name/status in HomeBrain: `CC BY 4.0` observed previously, with `license_review_status=pending_human_review`.
+- Risk: TUM Pioneer is robot-mounted, but HomeBrain still must not mark it action-valid without robot/base pose and camera-to-base semantics passing the robot-frame action contract.

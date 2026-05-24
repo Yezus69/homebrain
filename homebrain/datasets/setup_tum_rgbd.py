@@ -19,7 +19,13 @@ from homebrain.datasets.tum_rgbd import (
 )
 
 
-def setup_tum_rgbd(*, out_dir: str | Path, sequence: str, download: bool) -> tuple[Path, int]:
+def setup_tum_rgbd(
+    *,
+    out_dir: str | Path,
+    sequence: str,
+    download: bool,
+    max_download_gb: float | None = None,
+) -> tuple[Path, int]:
     root = Path(out_dir)
     sequence_path = tum_sequence_dir(root, sequence)
     metadata_path = sequence_path / "dataset_metadata.json"
@@ -32,6 +38,7 @@ def setup_tum_rgbd(*, out_dir: str | Path, sequence: str, download: bool) -> tup
         "official_page": TUM_RGBD_SOURCE_URL,
         "download_url": TUM_RGBD_DOWNLOADS.get(sequence),
         "download_requested": download,
+        "max_download_gb": max_download_gb,
         "license_name": TUM_RGBD_LICENSE_NAME,
         "license_review_status": TUM_RGBD_LICENSE_REVIEW_STATUS,
         "required_runtime": False,
@@ -40,7 +47,7 @@ def setup_tum_rgbd(*, out_dir: str | Path, sequence: str, download: bool) -> tup
     }
     try:
         if download:
-            sequence_path = download_and_extract_sequence(root, sequence)
+            sequence_path = download_and_extract_sequence(root, sequence, max_download_gb=max_download_gb)
         validate_sequence_dir(sequence_path)
         metadata["sequence_dir"] = sequence_path.as_posix()
         metadata["status"] = "ready"
@@ -74,8 +81,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Output dataset root, e.g. data/public/tum_rgbd.")
     parser.add_argument("--sequence", required=True, help="TUM sequence name, e.g. freiburg1_xyz.")
     parser.add_argument("--download", action="store_true", help="Download and extract the sequence archive.")
+    parser.add_argument("--max-download-gb", type=float, default=None, help="Refuse download above this size.")
     args = parser.parse_args(argv)
-    metadata_path, return_code = setup_tum_rgbd(out_dir=args.out, sequence=args.sequence, download=args.download)
+    metadata_path, return_code = setup_tum_rgbd(
+        out_dir=args.out,
+        sequence=args.sequence,
+        download=args.download,
+        max_download_gb=args.max_download_gb,
+    )
     print(f"wrote TUM RGB-D setup metadata to {metadata_path.as_posix()}")
     if return_code != 0:
         print("TUM RGB-D setup blocked; see dataset_metadata.json for details.", file=sys.stderr)
@@ -84,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

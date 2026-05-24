@@ -73,3 +73,17 @@ Likely cause: not applicable as a goal failure. The audit confirmed the stop-hea
 Minimal next repair action: repair or regenerate real BEV labels with correct robot-origin/footprint semantics, or collect true robot-frame action logs. Until then, keep DA3/TUM reviewed labels and modeld BEVs geometry-only for action learning.
 
 Command output summary: `python -m pytest -q` reported 49 passed. Controlled action sanity reported `action_supervision_ok_fraction=0.8089285714285714` and open-room `action_supervision_ok_fraction=1.0`. DA3 and TUM action sanity both reported `action_supervision_ok_fraction=0.0`, `robot_center_blocked_rate=1.0`, and `footprint_blocked_rate=1.0`. The scorer sweep selected a transparent config with controlled gates passing: `controlled_open_motion_rate=1.0` and `blocked_map_stop_rate=1.0`; reviewed motion remained low at `0.09497206703910614`. ActionLabelPack v1 QA passed with `example_count=906`, `excluded_frame_count=393`, and all outputs `replay_only=true`, `not_executed=true`, `control_safe=false`. Policy comparison marked DA3 labels, TUM labels, short60 modeld, and TUM modeld as `geometry_only` for action learning.
+
+## 2026-05-24 - Goal 10A public robot-frame dataset setup blocked by bounded downloads
+
+Exact failure: `python -m homebrain.datasets.setup_openloris_scene --out data\public\openloris_scene --sequence cafe1-1 --download --max-download-gb 2` discovered the official Hugging Face mirror but refused to download `package/cafe1-1_2-package.tar` because it is 6.95 GB, exceeding `max_download_gb=2.00`.
+
+Likely cause: OpenLORIS-Scene is packaged as multi-GB tar archives; the bounded Codex setup intentionally avoids a large unattended download.
+
+Minimal next repair action: stage/extract the OpenLORIS `cafe1-1_2` package manually or rerun setup with `--allow-large-download` when disk/network budget is approved, then run `python -m homebrain.datasets.openloris_to_route` followed by `python -m homebrain.geometry.robot_rgbd_to_bev`.
+
+Command output summary: setup wrote `data/public/openloris_scene/openloris_scene_setup_status.json` with official source URLs, selected package size `6.954` GB, local free disk `118.925` GB, license `CC BY-ND 4.0`, and `license_review_status=pending_human_review`. No real OpenLORIS route, robot-frame BEV, or public robot-frame action labels were generated.
+
+Fallback attempt: `python -m homebrain.datasets.setup_tum_rgbd --out data\public\tum_rgbd --sequence freiburg2_pioneer_slam --download --max-download-gb 0.25` resolved the TUM Pioneer robot-mounted archive but refused to download it because it is 1.51 GB, exceeding `max_download_gb=0.25`.
+
+Fallback minimal next repair action: approve a larger bounded TUM Pioneer download or stage `rgbd_dataset_freiburg2_pioneer_slam.tgz`; then import it and keep it geometry-only unless robot/base pose and camera-to-base semantics pass the BEV action contract.

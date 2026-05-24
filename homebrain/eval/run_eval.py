@@ -64,19 +64,23 @@ def imported_route_metrics(log_dir: str | Path, ordered_events: list[Event]) -> 
             "missing_sensor_notice_count": 0,
             "imported_route_metadata_error": str(exc),
         }
-    if metadata is None or metadata.get("source_type") not in {"image_sequence", "video"}:
+    if metadata is None or metadata.get("source_type") not in {"image_sequence", "video", "openloris_scene", "tum_rgbd"}:
         return {}
 
     frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
     expected_interval = int(metadata.get("expected_timestamp_interval_ns", 0))
     notices = metadata.get("missing_sensor_notices", [])
+    if expected_interval <= 0 and metadata.get("source_type") in {"openloris_scene", "tum_rgbd"}:
+        interval_errors = 0
+    else:
+        interval_errors = count_timestamp_interval_errors(
+            frames,
+            expected_interval,
+        )
     return {
         "imported_frame_count": int(metadata.get("imported_frame_count", len(frames))),
         "image_load_error_count": int(metadata.get("image_load_error_count", 0)),
-        "timestamp_interval_error_count": count_timestamp_interval_errors(
-            frames,
-            expected_interval,
-        ),
+        "timestamp_interval_error_count": interval_errors,
         "missing_sensor_notice_count": len(notices) if isinstance(notices, list) else 0,
     }
 

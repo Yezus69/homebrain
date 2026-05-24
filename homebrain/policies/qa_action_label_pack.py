@@ -10,7 +10,11 @@ from typing import Any
 import numpy as np
 
 from homebrain.data.spatial_dataset import load_example_npz, mean, np_scalar_to_bool, np_scalar_to_str, read_json, write_json
-from homebrain.policies.build_action_label_pack import ACTION_LABEL_PACK_SCHEMA_VERSION, ACTION_LABEL_PACK_SCHEMA_VERSION_V1
+from homebrain.policies.build_action_label_pack import (
+    ACTION_LABEL_PACK_SCHEMA_VERSION,
+    ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
+    ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
+)
 
 ACTION_LABEL_QA_SCHEMA_VERSION = "homebrain.action_label_pack_qa.v0"
 DOMINANT_ACTION_FRACTION = 0.90
@@ -25,9 +29,13 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         return _failed_metrics(root, f"missing_or_malformed_manifest: {exc}")
 
     schema_version = manifest.get("schema_version")
-    if schema_version not in {ACTION_LABEL_PACK_SCHEMA_VERSION, ACTION_LABEL_PACK_SCHEMA_VERSION_V1}:
+    if schema_version not in {
+        ACTION_LABEL_PACK_SCHEMA_VERSION,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
+    }:
         errors.append(f"unsupported schema_version={manifest.get('schema_version')!r}")
-    is_v1 = schema_version == ACTION_LABEL_PACK_SCHEMA_VERSION_V1
+    is_v1 = schema_version in {ACTION_LABEL_PACK_SCHEMA_VERSION_V1, ACTION_LABEL_PACK_SCHEMA_VERSION_V2}
     example_records = manifest.get("examples")
     if not isinstance(example_records, list):
         return _failed_metrics(root, "manifest examples must be a list")
@@ -133,6 +141,10 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         source_name: _distribution(values)
         for source_name, values in sorted(selected_by_source.items())
     }
+    source_action_entropy = {
+        source_name: _entropy(_distribution(values))
+        for source_name, values in sorted(selected_by_source.items())
+    }
     source_selected_stop_fraction = {
         source_name: float(sum(1 for value in values if value == "stop") / max(len(values), 1))
         for source_name, values in sorted(selected_by_source.items())
@@ -149,15 +161,21 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         source_name: mean([float(value) for value in values])
         for source_name, values in sorted(weight_by_source.items())
     }
+    excluded_by_source = {}
+    action_filter = manifest.get("action_sanity_filter")
+    if isinstance(action_filter, dict) and isinstance(action_filter.get("excluded_by_source"), dict):
+        excluded_by_source = {str(key): int(value) for key, value in action_filter["excluded_by_source"].items()}
     per_source = {
         source_name: {
             "example_count": len(selected_by_source.get(source_name, [])),
+            "excluded_frame_count": int(excluded_by_source.get(source_name, 0)),
             "selected_stop_fraction": source_selected_stop_fraction.get(source_name, 0.0),
             "selected_motion_fraction": source_selected_motion_fraction.get(source_name, 0.0),
             "action_supervision_ok_fraction": source_action_supervision_ok_fraction.get(source_name, 0.0),
             "source_weight_mean": source_weight_mean.get(source_name, 0.0),
+            "action_entropy": source_action_entropy.get(source_name, 0.0),
         }
-        for source_name in sorted(source_distribution)
+        for source_name in sorted(set(source_distribution) | set(excluded_by_source))
     }
     dominant_fraction = max(selected_distribution.values(), default=0) / max(example_count, 1)
     flags: list[str] = []
@@ -188,8 +206,10 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "source_selected_stop_fraction": source_selected_stop_fraction,
         "source_selected_motion_fraction": source_selected_motion_fraction,
         "source_action_supervision_ok_fraction": source_action_supervision_ok_fraction,
+        "source_action_entropy": source_action_entropy,
         "source_weight_mean": source_weight_mean,
         "per_source": per_source,
+        "excluded_by_source": excluded_by_source,
         "excluded_frame_count": int(manifest.get("action_sanity_filter", {}).get("excluded_frame_count", 0))
         if isinstance(manifest.get("action_sanity_filter"), dict)
         else 0,
