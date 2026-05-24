@@ -20,7 +20,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | Depth Anything family | geometry/depth teacher | UNVERIFIED / pending_human_review | No | DA3-SMALL setup added for offline teacher use; verify exact code/model card/license before product use. |
 | Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
 | MoGe / point-map model | geometry teacher | UNVERIFIED | No | Verify official license. |
-| VGGT-family | offline multi-view geometry teacher | UNVERIFIED | No | Some checkpoints may differ in license. Verify exact checkpoint. |
+| VGGT-family | offline multi-view geometry teacher | UNVERIFIED / pending_human_review | No | Goal 15A added an optional local VGGT-style scene-teacher adapter plus fake backend tests. No real code/checkpoint was downloaded or approved. Verify exact repo/checkpoint license before real use. |
 | SAM-family video segmentation | mask/dynamic-object teacher | UNVERIFIED | No | Verify exact version. |
 | GNM / ViNT / NoMaD | navigation prior / baseline | UNVERIFIED | No | Verify code/checkpoint/dataset license. |
 | AI2-THOR / ProcTHOR | synthetic control data | UNVERIFIED | No | Use only after license check. |
@@ -196,3 +196,31 @@ Goal 12C did not add new external datasets, model families, simulator/middleware
 - Required at runtime: no.
 - Redistribution: OpenLORIS-derived generated datasets/artifacts/checkpoints/reports are not approved for redistribution and should remain under ignored generated-data paths such as `runs/` or local `data/public/`.
 - Risk: this policy does not approve OpenLORIS for product training, runtime dependency, control safety, or distribution of derived datasets. Any product use still requires human/legal review.
+
+## Goal 15A dependency update
+
+Goal 15A added a SceneTeacherPack v0 interface and an optional VGGT-style backend
+adapter. It did not add product-runtime dependencies, download real model weights,
+or install external repositories.
+
+- VGGT-family source/provenance: operator-supplied local `external/vggt`
+  checkout or `HOMEBRAIN_VGGT_ADAPTER=module:function`; no official repo or
+  checkpoint is selected by HomeBrain in this goal.
+- License name/status in HomeBrain: `pending_human_review`; do not mark as
+  runtime-safe, product-safe, or product-training-approved.
+- Intended use: offline scene/geometry teacher for depth, point maps, camera
+  parameters, point tracks, confidence/validity masks, and placeholder
+  traversable/risk/dynamic masks.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Mock/fallback status: fake VGGT-style backend exists only when explicitly
+  selected with `--backend fake`; artifacts are marked `mock=true`,
+  `synthetic=true`, `real_perception=false`, `replay_only=true`,
+  `not_executed=true`, `control_safe=false`, and
+  `product_training_approved=false`.
+- Real backend setup status: optional real check reported local VGGT unavailable
+  because no local checkout/checkpoint/adapter was configured. HomeBrain does
+  not clone repositories or auto-download weights during scene-teacher runs.
+- Risk: SceneTeacherPack and derived scene-teacher BEVs are weak review geometry,
+  not robot-frame action truth or control-safety evidence. Exact real
+  model/checkpoint licenses must be audited before any training/product use.

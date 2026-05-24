@@ -73,3 +73,28 @@ Likely cause: v5 labels are non-collapsed, but the learned scorer still maps v0/
 Minimal next repair action: widen robot-frame data before more memory work or policy claims. Add more diverse robot-frame routes/logs, then rebuild v5 labels and train/evaluate the scorer under route-out/scene-out splits.
 
 Command output summary: v5 QA passed with `action_entropy=2.3334583564283053`, `dominant_action_fraction=0.4644091223220456`, and synthetic-oracle agreement `0.0`. V5 scorer eval beat random with `top1_action_agreement=0.49568221070811747` and `distribution_collapse_flag=false`. Goal 14 shadow eval had normal memory action changed fraction `0.0` and no future-motion agreement gain; audit primary root cause was `memory_delta_too_small_for_action`.
+
+## 2026-05-24 - Goal 15A optional real VGGT setup not configured
+
+Exact failure: optional real-backend check
+`python -m homebrain.teachers.run_scene_teacher --teacher vggt --backend real --log runs\goal15a_scene_teacher_fake_route --out runs\goal15a_scene_teacher_fake_route\teacher_artifacts\scene_v0_real_optional`
+reported `VGGT scene teacher unavailable: Real VGGT backend requires a local
+external/vggt checkout or --model-dir. HomeBrain does not clone repositories or
+download weights during teacher runs.`
+
+Likely cause: this workspace does not have a local `external/vggt` checkout,
+local checkpoint, or `HOMEBRAIN_VGGT_ADAPTER` callable configured. Goal 15A
+intentionally made real foundation-model backends optional and kept tests on the
+fake backend.
+
+Minimal next repair action: install or clone the selected VGGT/MoGe/SAM2 teacher
+outside normal tests, place checkpoints locally, set `HOMEBRAIN_VGGT_DIR`,
+`HOMEBRAIN_VGGT_CHECKPOINT`, and `HOMEBRAIN_VGGT_ADAPTER=module:function` (or
+pass `--model-dir`/`--checkpoint`), then rerun the real scene teacher on an owned
+or license-approved route.
+
+Command output summary: fake SceneTeacherPack v0 verification completed and full
+pytest passed. The optional real VGGT unavailability is not a Goal 15A failure.
+All fake and review BEV artifacts remain `replay_only=true`,
+`not_executed=true`, `control_safe=false`, `product_training_approved=false`,
+and no `cmd_vel` or raw PWM was emitted.

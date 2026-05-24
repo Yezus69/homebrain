@@ -12,6 +12,13 @@ from homebrain.teachers.artifacts import (
     write_teacher_manifest,
 )
 from homebrain.teachers.base import Teacher, TeacherRunConfig, TeacherRunSummary
+from homebrain.teachers.scene_teacher import (
+    SCENE_TEACHER_FRAME_ARTIFACT_KINDS,
+    SCENE_TEACHER_MANIFEST_FILE,
+    SCENE_TEACHER_PACK_SCHEMA_VERSION,
+    SCENE_TEACHER_WINDOW_ARTIFACT_KINDS,
+    load_scene_teacher_manifest,
+)
 
 _LAZY_EXPORTS = {
     "DA3Teacher": ("homebrain.teachers.da3_teacher", "DA3Teacher"),
@@ -24,8 +31,12 @@ _LAZY_EXPORTS = {
     "RealDA3Backend": ("homebrain.teachers.da3_teacher", "RealDA3Backend"),
     "RealDepthProBackend": ("homebrain.teachers.depth_pro_teacher", "RealDepthProBackend"),
     "RealDINOBackend": ("homebrain.teachers.dino_teacher", "RealDINOBackend"),
+    "FakeVGGTSceneBackend": ("homebrain.teachers.vggt_scene_teacher", "FakeVGGTSceneBackend"),
+    "RealVGGTSceneBackend": ("homebrain.teachers.vggt_scene_teacher", "RealVGGTSceneBackend"),
+    "VGGTSceneTeacher": ("homebrain.teachers.vggt_scene_teacher", "VGGTSceneTeacher"),
     "TEACHER_NAMES": ("homebrain.teachers.registry", "TEACHER_NAMES"),
     "create_teacher": ("homebrain.teachers.registry", "create_teacher"),
+    "create_vggt_scene_teacher": ("homebrain.teachers.vggt_scene_teacher", "create_vggt_scene_teacher"),
 }
 
 
@@ -56,12 +67,21 @@ __all__ = [
     "RealDA3Backend",
     "RealDepthProBackend",
     "RealDINOBackend",
+    "FakeVGGTSceneBackend",
+    "RealVGGTSceneBackend",
+    "VGGTSceneTeacher",
+    "SCENE_TEACHER_FRAME_ARTIFACT_KINDS",
+    "SCENE_TEACHER_MANIFEST_FILE",
+    "SCENE_TEACHER_PACK_SCHEMA_VERSION",
+    "SCENE_TEACHER_WINDOW_ARTIFACT_KINDS",
     "TEACHER_NAMES",
     "Teacher",
     "TeacherArtifactValidation",
     "TeacherRunConfig",
     "TeacherRunSummary",
     "create_teacher",
+    "create_vggt_scene_teacher",
+    "load_scene_teacher_manifest",
     "load_teacher_manifest",
     "validate_teacher_artifacts",
     "write_teacher_manifest",

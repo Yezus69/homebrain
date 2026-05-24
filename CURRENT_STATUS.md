@@ -6,16 +6,16 @@ default read-list.
 
 ## Current objective
 
-Goal 14 completed: replace the collapsed synthetic-oracle action-label path with
-future-motion behavior-cloning labels, build ActionLabelPack v5, train/evaluate a
-v5 TrajectoryScorerNet entry point, rerun Goal 13A with the v5 scorer, and reuse
-the Goal 13B audit.
+Goal 15A completed: stop policy/scorer training and add a foundation scene-teacher
+layer for raw indoor video. The new SceneTeacherPack v0 path writes richer
+depth/point-map/camera/track/mask artifacts, QA metrics, and review-only BEV
+targets while keeping all outputs replay-only and not control-safe.
 
 ## Last completed goal
 
-Goal 14: behavior-cloning action labels from dataset future motion. The v5 label
-pack is non-collapsed, but memory still does not improve learned scorer decisions
-on current OpenLORIS-only data.
+Goal 15A: foundation scene-teacher stack for raw indoor video. Fake VGGT-style
+backend tests and fake route end-to-end verification pass; real VGGT remains an
+optional local setup item, not a required test dependency.
 
 ## Current implementation status
 
@@ -41,10 +41,78 @@ on current OpenLORIS-only data.
 - Goal 14 updated Goal 13A shadow eval with `--scorer-checkpoint`; in scorer mode
   `oracle_bev` is the v5 behavior-cloning label oracle, while v0/v1 current and
   memory BEVs are scored by the learned checkpoint.
+- Goal 15A added `SceneTeacherPack` v0 as a separate teacher artifact family for
+  scene/geometry supervision. The fake VGGT-style backend writes deterministic
+  depth, point maps, intrinsics, extrinsics, point tracks, confidence/validity
+  masks, and floor/risk/dynamic placeholders for tests.
+- Goal 15A added scene-teacher QA and a review-only scene-teacher-to-BEV
+  conversion stub. The converter preserves `weak_label=true`,
+  `robot_frame_truth=false`, `action_supervision_ok=false`, `replay_only=true`,
+  `not_executed=true`, `control_safe=false`, and
+  `product_training_approved=false`.
 - Active blockers are tracked in `BLOCKERS.md`; resolved old blockers are archived
   under `docs/blockers_archive/`.
 
 ## Goal completion log
+
+### 025 - Goal 15A foundation scene-teacher stack
+
+Objective attempted: build a foundation-model teacher layer that turns raw indoor
+video route logs into richer spatial-memory supervision artifacts, without
+training a new action scorer, training a new spatial model, emitting `cmd_vel`, or
+claiming control safety.
+
+Files changed: added `homebrain/teachers/scene_teacher.py`,
+`homebrain/teachers/vggt_scene_teacher.py`,
+`homebrain/teachers/run_scene_teacher.py`,
+`homebrain/teachers/qa_scene_teacher.py`,
+`homebrain/geometry/scene_teacher_to_bev.py`, and
+`tests/test_goal15a_scene_teacher.py`; updated `homebrain/teachers/__init__.py`,
+`CURRENT_STATUS.md`, `EVALS.md`, `BLOCKERS.md`, and `LICENSE_AUDIT.md`.
+
+Commands run: required context reads; `python -m py_compile
+homebrain\teachers\scene_teacher.py homebrain\teachers\vggt_scene_teacher.py
+homebrain\teachers\run_scene_teacher.py homebrain\teachers\qa_scene_teacher.py
+homebrain\geometry\scene_teacher_to_bev.py
+tests\test_goal15a_scene_teacher.py`; targeted tests `python -m pytest
+tests\test_goal15a_scene_teacher.py -q`; fake route generation; fake scene
+teacher run; scene-teacher QA; scene-teacher-to-BEV conversion; BEV validation;
+optional real VGGT availability check; full `python -m pytest -q`.
+
+Pass/fail results: py_compile passed. Targeted tests passed with `4 passed`.
+Full pytest passed with `90 passed`. Fake scene-teacher route ran end to end.
+Optional real VGGT returned a clear unavailable setup message because no local
+`external/vggt` checkout/checkpoint is configured; this is recorded as optional
+setup, not a goal failure.
+
+Artifacts created: `runs/goal15a_scene_teacher_fake_route/`,
+`runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0/`,
+`runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0_qa.json`,
+`runs/goal15a_scene_teacher_fake_route/geometry/scene_teacher_bev/`, and
+`runs/goal15a_scene_teacher_fake_route/geometry/scene_teacher_bev_qa.json`.
+
+Metrics observed: scene-teacher QA reported `frame_count=6`,
+`missing_artifact_count=0`, `artifact_shape_error_count=0`,
+`depth_valid_ratio=1.0`, `pose_valid_ratio=1.0`, `track_valid_ratio=1.0`,
+`temporal_geometry_consistency=0.9835878353227269`,
+`scale_status=synthetic_metric_test_scale`, `control_safe=false`, and
+`promotable_to_spatial_pack=false` with quarantine reasons
+`mock_or_synthetic_teacher` and `relative_or_unknown_scale`. Review BEV QA
+reported `bev_frame_count=6`, zero missing/shape/nan errors,
+`free_ratio_mean=0.5`, `obstacle_ratio_mean=0.25`,
+`unknown_ratio_mean=0.25`, `confidence_mean=0.8550000190734863`,
+`temporal_jitter_mean=0.0`, `weak_label=true`, and `control_safe=false`.
+
+Blockers/risks: real VGGT integration is not configured and requires a local
+checkout/checkpoint plus an operator-supplied adapter; HomeBrain still does not
+download weights automatically. Scene-teacher BEV outputs are weak review
+geometry only, not robot-frame action truth. All artifacts remain
+`replay_only=true`, `not_executed=true`, `control_safe=false`,
+`product_training_approved=false`, and no `cmd_vel` or raw PWM was emitted.
+
+Recommended next goal: integrate a real local VGGT/MoGe/SAM2 teacher stack for
+owned or approved indoor video, or collect a minimal owned route log with
+calibrated camera/IMU/odometry before returning to policy training.
 
 ### 024 - Goal 14 future-motion behavior-cloning action labels
 

@@ -1046,3 +1046,81 @@ python -m homebrain.teachers.run_teacher --teacher depth_pro --backend real --lo
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_depth_pro_viz
 python -m homebrain.eval.run_eval --log runs/room_walk_route --teacher-artifacts runs/room_walk_route/teacher_artifacts/depth_pro --out runs/room_walk_eval_with_depth_pro.json
 ```
+
+## Gate 1.10: SceneTeacherPack v0 foundation geometry teacher
+
+SceneTeacherPack v0 is separate from ActionLabelPack. It exists to move raw
+indoor video toward spatial-memory supervision using foundation scene/geometry
+teachers, not to train or execute a trajectory scorer.
+
+Required fake/backend verification:
+```bash
+python -m homebrain.teachers.run_scene_teacher --teacher vggt --backend fake --log runs/goal15a_scene_teacher_fake_route --out runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0
+python -m homebrain.teachers.qa_scene_teacher --artifacts runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0 --out runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0_qa.json
+python -m homebrain.geometry.scene_teacher_to_bev --log runs/goal15a_scene_teacher_fake_route --scene-teacher runs/goal15a_scene_teacher_fake_route/teacher_artifacts/scene_v0 --out runs/goal15a_scene_teacher_fake_route/geometry/scene_teacher_bev
+python -m homebrain.geometry.validate_bev --bev runs/goal15a_scene_teacher_fake_route/geometry/scene_teacher_bev --out runs/goal15a_scene_teacher_fake_route/geometry/scene_teacher_bev_qa.json
+```
+
+SceneTeacherPack v0 per-frame artifacts:
+```text
+depth.npy
+point_map.npy
+intrinsics.npy
+extrinsics.npy
+confidence.npy
+validity_mask.npy
+floor_traversable_mask.npy
+obstacle_risk_mask.npy
+dynamic_motion_mask.npy
+metadata.json
+scene_teacher_manifest.json
+```
+
+Per-window artifacts when available:
+```text
+point_tracks.npy
+track_validity.npy
+```
+
+Scene-teacher QA metrics:
+```text
+frame_count
+missing_artifact_count
+artifact_shape_error_count
+depth_valid_ratio
+pose_valid_ratio
+track_valid_ratio
+temporal_geometry_consistency
+confidence_valid_ratio
+scale_status
+control_safe
+promotable_to_spatial_pack
+quarantine_reasons
+```
+
+Every SceneTeacherPack manifest and derived BEV frame must keep:
+```text
+replay_only=true
+not_executed=true
+control_safe=false
+product_training_approved=false
+raw_pwm_emitted=false
+```
+
+Derived scene-teacher BEV targets must additionally keep:
+```text
+weak_label=true
+review_only=true
+robot_frame_truth=false unless measured robot-frame transforms are present
+action_supervision_ok=false
+trainable_for=geometry_pretrain_review_only
+```
+
+Current Goal 15A outcome: fake VGGT-style SceneTeacherPack verification passed
+with `frame_count=6`, `missing_artifact_count=0`, `depth_valid_ratio=1.0`,
+`pose_valid_ratio=1.0`, `track_valid_ratio=1.0`,
+`temporal_geometry_consistency=0.9835878353227269`, `control_safe=false`, and
+`promotable_to_spatial_pack=false` because the backend is mock/synthetic and
+uses synthetic test scale. Review BEV validation passed with `bev_frame_count=6`,
+zero missing/shape/nan errors, `weak_label=true`, and `control_safe=false`.
+Optional real VGGT remains a local setup item and is not required for tests.
