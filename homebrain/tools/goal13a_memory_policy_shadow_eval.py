@@ -801,6 +801,7 @@ def _decision_summary(
     return {
         "selected_candidate_id": selected,
         "selected_score": selected_score.to_dict(),
+        "scores": [score.to_dict() for score in decision.scores],
         "oracle_collision_proxy": float(oracle_label.collision_proxy),
         "oracle_unknown_penalty": float(oracle_label.unknown_penalty),
         "oracle_coverage_gain": float(oracle_label.coverage_gain),

@@ -617,6 +617,48 @@ memory_action_benefit_pass=false
 
 Gate interpretation: Goal 13A proves v1 memory can slightly reduce selected unknown penalty in the transparent trajectory scorer, but it does not yet improve trajectory decisions enough to train a learned memory-aware scorer. V1 memory remains distribution-collapsed beyond Goal 11B thresholds in normal, hidden-cell, and occlusion modes, and it worsens the `corridor1-1` true route-out fold. The correct next action is scorer/data diagnosis, not model training or control integration.
 
+## Gate 3.8: Goal 13A collapse audit
+
+Required before adding a learned memory-aware scorer after Goal 13A failure:
+- consume serialized Goal 13A decisions without training a model
+- audit `oracle_bev`, `v0_current_bev`, `v1_current_bev`, and `v1_memory_bev` by mode and route
+- report selected-action distributions, collapse flags, top1-vs-top2 margins, score component means, future-motion label agreement, current-vs-memory deltas, deterministic ablations, candidate-order sensitivity, and explicit root-cause buckets
+- keep all outputs `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`
+
+Goal 13B command:
+```bash
+python -m homebrain.policies.audit_goal13a_collapse --goal13a-decisions runs/goal13a_memory_policy_shadow_eval_decisions.jsonl --out-json runs/goal13b_policy_collapse_audit.json --out-md runs/goal13b_policy_collapse_audit.md --contact-sheet runs/goal13b_policy_collapse_worst.ppm
+```
+
+Goal 13B artifacts:
+```text
+runs/goal13b_policy_collapse_audit.json
+runs/goal13b_policy_collapse_audit.md
+runs/goal13b_policy_collapse_worst.ppm
+```
+
+Goal 13B metrics:
+```text
+normal frame_count=472
+primary_root_cause=oracle_labels_collapsed
+oracle selected_action_distribution: rotate_left=450, straight_short=22
+oracle action_entropy=0.2718188297480972
+oracle dominant_action_fraction=0.9533898305084746
+future_motion_label entropy=2.2840547173754913
+future_motion_label dominant_label_fraction=0.2711864406779661
+oracle agreement_with_future_motion_label=0.01694915254237288
+v1_memory selected_action_distribution: arc_right_medium=2, rotate_left=461, straight_short=9
+v1_memory action_entropy=0.17555724310992266
+v1_memory dominant_action_fraction=0.9766949152542372
+top1_vs_top2 exact_tie_fraction: oracle=0.9533898305084746, v1_current=0.972457627118644, v1_memory=0.9766949152542372
+reversed_candidate_order_changed_fraction: oracle=0.9533898305084746, v1_current=0.972457627118644, v1_memory=0.9766949152542372
+memory_vs_current_action_changed_fraction=0.00847457627118644
+memory_changes_scores_but_not_actions_fraction=0.3326271186440678
+root_cause_buckets_present=oracle_labels_collapsed,candidate_set_too_weak,scorer_tie_break_dominates,model_bev_collapsed,memory_delta_too_small_for_action
+```
+
+Gate interpretation: Goal 13B explains the Goal 13A collapse as a replay-label/scorer problem before a memory-model problem. The oracle labels themselves are collapsed and dominated by exact score ties resolved by candidate order, while future-motion labels are diverse and disagree with the oracle action. The next goal should repair action-label generation and candidate/scorer tie behavior, then rerun Goal 13A/13B before any learned memory-aware scorer.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:
@@ -651,6 +693,7 @@ python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --lo
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz
 python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json
 python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64
+python -m homebrain.policies.audit_goal13a_collapse --goal13a-decisions runs/goal13a_memory_policy_shadow_eval_decisions.jsonl --out-json runs/goal13b_policy_collapse_audit.json --out-md runs/goal13b_policy_collapse_audit.md --contact-sheet runs/goal13b_policy_collapse_worst.ppm
 ```
 
 As new features are added, Codex must update this file with exact current commands.

@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 13A added memory-aware trajectory shadow evaluation for SpatialMemoryNetV1 current BEV versus fused-memory BEV. The report shows v1 memory reduces unknown penalty but does not pass the action-benefit gate because decisions remain Goal 11B-collapsed and one true route-out fold worsens. No learned memory-aware trajectory scorer was trained.
+Goal 13B completed a deterministic replay-only audit of the Goal 13A action collapse. The primary root cause is `oracle_labels_collapsed`, with supporting buckets `candidate_set_too_weak`, `scorer_tie_break_dominates`, `model_bev_collapsed`, and `memory_delta_too_small_for_action`. No model was trained and no learned memory-aware scorer was added.
 
 ## Last completed goal
 
-Goal 13A: SpatialMemoryV1 memory-to-trajectory shadow evaluation, comparing oracle labels, v0 current BEV, v1 current BEV, and v1 fused-memory BEV under normal, future-hidden-cell, deterministic occlusion, and true route-out shadow-eval modes.
+Goal 13B: replay-only diagnosis of Goal 13A policy collapse from serialized shadow decisions, including action distributions, top1-vs-top2 margins, score components, current-vs-memory deltas, deterministic ablations, candidate-order sensitivity, and root-cause classification.
 
 ## Current implementation status
 
@@ -87,8 +87,12 @@ Goal 13A: SpatialMemoryV1 memory-to-trajectory shadow evaluation, comparing orac
 - Goal 12C hard validation passed: deployment memory IoU `0.6969542382284999` vs current IoU `0.6947728270664811`; hidden-cell IoU `0.1083006834350748` vs hidden current IoU `0.046022046640116186`; occlusion recovery delta `0.270266732025336`; true route-out completed for `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; all safety/product flags remain false.
 - `homebrain.policies.run_trajectory_scorer` can now load explicit v1 modeld BEV sources as `v1_current_bev` or `v1_memory_bev` LocalBev records; fused memory is never treated as oracle.
 - `homebrain.tools.goal13a_memory_policy_shadow_eval` writes memory-aware replay-only trajectory shadow reports at `runs/goal13a_memory_policy_shadow_eval_report.json` and `.md`, plus per-frame decisions at `runs/goal13a_memory_policy_shadow_eval_decisions.jsonl`.
+- Goal 13A decision JSONL now includes full per-candidate score records in addition to each selected score, so replay-only audits can compute margins, candidate-order sensitivity, and deterministic score ablations without rerunning the production scorer.
 - Goal 13A action gate failed: normal v1 memory selected actions had lower unknown penalty than v1 current (`0.0125395347506313` vs `0.01476968648069996`) with unchanged unsafe/collision rates, but memory action entropy/dominance stayed collapsed (`action_entropy=0.17555724310992266`, `dominant_action_fraction=0.9766949152542372`) and true route-out worsened on `corridor1-1` (`memory_quality_delta=-0.010013379889019429`).
 - Because `memory_action_benefit_pass=false`, no learned memory-aware trajectory scorer was trained or promoted.
+- `homebrain.policies.audit_goal13a_collapse` audits Goal 13A decisions by mode and route, reports collapse flags, top1-vs-top2 score margins, per-action score components, future-motion agreement, current-vs-memory deltas, deterministic score ablations, candidate-order sensitivity, and explicit root-cause buckets. Goal 13B artifacts exist at `runs/goal13b_policy_collapse_audit.json`, `runs/goal13b_policy_collapse_audit.md`, and `runs/goal13b_policy_collapse_worst.ppm`.
+- Goal 13B root cause is `oracle_labels_collapsed`: normal oracle actions are collapsed to `rotate_left` on 450 of 472 frames (`action_entropy=0.2718188297480972`, `dominant_action_fraction=0.9533898305084746`) while future-motion labels are diverse (`entropy=2.2840547173754913`, dominant fraction `0.2711864406779661`) and oracle/future agreement is only `0.01694915254237288`.
+- Goal 13B also diagnosed scorer tie/order dominance: normal exact top1-vs-top2 tie fractions are `0.9533898305084746` for oracle, `0.972457627118644` for v1 current, and `0.9766949152542372` for v1 memory; reversed candidate order changes the same fractions of decisions. Memory changes selected scores but not actions on `0.3326271186440678` of normal frames and changes actions on only `0.00847457627118644`.
 - First real student checkpoint exists at `runs/spatial_v0_overfit/checkpoint.pt`; it is a tiny 8-example overfit artifact only, not a navigation/control model.
 - Goal 7B real train/val checkpoints exist at `runs/spatial_v0_goal7b_da3_only/checkpoint.pt`, `runs/spatial_v0_goal7b_tum_only/checkpoint.pt`, and `runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt`; all are representation-pretraining-only and not control-safe.
 - SpatialTrainPack splits are now deterministic sequence-aware contiguous blocks with review embargo frames between train and val for contiguous windows.
@@ -138,6 +142,24 @@ Goal 13A: SpatialMemoryV1 memory-to-trajectory shadow evaluation, comparing orac
 - Goal 11A modeld/replay outputs exist at `runs/goal11a_modeld_openloris_spatial_scorer/` and `runs/goal11a_replayed_openloris_spatial_scorer/`; scored BrainOutputEvents keep `cmd_vel=null`, `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.
 
 ## Goal completion log
+
+### 023 - Goal 13B replay-only Goal 13A collapse diagnosis
+
+Objective attempted: diagnose why Goal 13A memory-aware trajectory decisions remain collapsed without training a new model, adding teachers, adding ROS/sim/hardware control, emitting `cmd_vel`, or promoting any control/product-safety claim.
+
+Files changed: added `homebrain/policies/audit_goal13a_collapse.py` and `tests/test_goal13b_policy_collapse_audit.py`; updated `homebrain/tools/goal13a_memory_policy_shadow_eval.py` to serialize full per-candidate scores in replay-only decision records; updated `CURRENT_STATUS.md`, `EVALS.md`, and `BLOCKERS.md`.
+
+Commands run: required context reads for `AGENTS.md`, `PROJECT_BRIEF.md`, `ARCHITECTURE.md`, `CURRENT_STATUS.md`, `EVALS.md`, `DECISIONS.md`, `BLOCKERS.md`, `docs/BEV_ACTION_CONTRACT.md`, `homebrain/policies/candidate_trajectories.py`, `homebrain/policies/trajectory_scorer.py`, and `homebrain/tools/goal13a_memory_policy_shadow_eval.py`; `python -m py_compile homebrain\policies\audit_goal13a_collapse.py`; `python -m pytest tests\test_goal13b_policy_collapse_audit.py -q`; `python -m py_compile homebrain\tools\goal13a_memory_policy_shadow_eval.py homebrain\policies\audit_goal13a_collapse.py`; `python -m pytest tests\test_goal13a_memory_policy_shadow_eval.py tests\test_goal13b_policy_collapse_audit.py -q`; `python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64`; `python -m homebrain.policies.audit_goal13a_collapse --goal13a-decisions runs/goal13a_memory_policy_shadow_eval_decisions.jsonl --out-json runs/goal13b_policy_collapse_audit.json --out-md runs/goal13b_policy_collapse_audit.md --contact-sheet runs/goal13b_policy_collapse_worst.ppm`; `python -m pytest -q`.
+
+Pass/fail results: py_compile passed. New Goal 13B targeted tests passed with `4 passed`; combined Goal 13A/13B targeted tests passed with `10 passed`. Full pytest passed with `83 passed in 100.40s`. The refreshed Goal 13A command still correctly failed the action-benefit gate with `memory_action_benefit_pass=false`; no learned memory scorer was trained.
+
+Artifacts created: refreshed full-score Goal 13A decisions at `runs/goal13a_memory_policy_shadow_eval_decisions.jsonl`; Goal 13B report `runs/goal13b_policy_collapse_audit.json`; Goal 13B markdown `runs/goal13b_policy_collapse_audit.md`; Goal 13B contact sheet `runs/goal13b_policy_collapse_worst.ppm`.
+
+Metrics observed: normal audit frame count is `472`. Primary root cause is `oracle_labels_collapsed`: oracle action distribution is `rotate_left=450`, `straight_short=22`, with `action_entropy=0.2718188297480972` and `dominant_action_fraction=0.9533898305084746`. Future-motion labels are much more diverse (`entropy=2.2840547173754913`, dominant label fraction `0.2711864406779661`), and oracle/future agreement is only `0.01694915254237288`, so `candidate_set_too_weak=true`. V1 memory remains model-BEV collapsed with distribution `rotate_left=461`, `straight_short=9`, `arc_right_medium=2`, `action_entropy=0.17555724310992266`, and `dominant_action_fraction=0.9766949152542372`. Full-score margin audit reports exact top1-vs-top2 tie fractions of `0.9533898305084746` for oracle, `0.972457627118644` for v1 current, and `0.9766949152542372` for v1 memory; reversed candidate order changes the same fractions, so `scorer_tie_break_dominates=true`. Memory changes scores but not selected actions on `0.3326271186440678` of normal frames, while memory-vs-current action changes occur on only `0.00847457627118644`, so `memory_delta_too_small_for_action=true`.
+
+Blockers/risks: Goal 13A remains blocked for learned memory-aware scorer training. The collapse is not robot behavior progress and does not improve action diversity or route-out behavior. Root-cause buckets present are `oracle_labels_collapsed`, `candidate_set_too_weak`, `scorer_tie_break_dominates`, `model_bev_collapsed`, and `memory_delta_too_small_for_action`; absent buckets are `risk_or_unknown_dominates`, `coverage_gain_not_discriminative`, `route_out_data_too_small`, and `implementation_bug_suspected`. All outputs remain `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`; `cmd_vel` and raw PWM remain absent; OpenLORIS remains PoC-only and not product-training-approved.
+
+Recommended next goal: repair action labels/scorer before training. Specifically, fix the oracle/action-label collapse and candidate-order tie behavior, then rerun Goal 13A/13B. Only after oracle labels and transparent scoring stop collapsing should SpatialMemory/data repair or a learned memory-aware scorer be considered.
 
 ### 022 - Goal 13A SpatialMemoryV1 memory-to-trajectory shadow evaluation
 
