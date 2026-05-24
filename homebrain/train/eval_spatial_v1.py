@@ -20,6 +20,7 @@ from homebrain.train.spatial_dataset import (
 from homebrain.train.spatial_temporal_dataset import SpatialTemporalMultiPackDataset, SpatialTemporalTrainDataset
 from homebrain.train.spatial_v0_common import batch_to_device
 from homebrain.train.spatial_v1_common import (
+    current_bev_parity_result,
     evaluate_spatial_v1,
     memory_benefit_result,
     memory_disabled_baseline_metrics,
@@ -77,7 +78,12 @@ def eval_spatial_v1(
         if baseline_checkpoint_v0 is not None
         else memory_disabled_baseline_metrics(eval_metrics)
     )
-    benefit = memory_benefit_result(v1_metrics=eval_metrics, baseline_metrics=baseline)
+    parity = current_bev_parity_result(v1_metrics=eval_metrics, v0_baseline_metrics=baseline)
+    benefit = memory_benefit_result(
+        v1_metrics=eval_metrics,
+        baseline_metrics=baseline,
+        current_bev_parity_pass=parity["current_bev_parity_pass"],
+    )
     failure_flags = list(train_metrics.get("failure_flags", [])) if isinstance(train_metrics.get("failure_flags"), list) else []
     failure_flags.extend(benefit["failure_reasons"])
     if float(eval_metrics["memory_warp_valid_fraction"]) <= 0.0 and resolved_window_length > 1:
@@ -113,10 +119,16 @@ def eval_spatial_v1(
         "uncertainty_calibration_proxy": float(eval_metrics["uncertainty_calibration_proxy"]),
         "inference_fps": float(eval_metrics["inference_fps"]),
         "memory_warp_valid_fraction": float(eval_metrics["memory_warp_valid_fraction"]),
+        "valid_warp_fraction": float(eval_metrics["valid_warp_fraction"]),
         "memory_reset_fraction": float(eval_metrics["memory_reset_fraction"]),
+        "update_mask_coverage_mean": float(eval_metrics["update_mask_coverage_mean"]),
+        "memory_overwrite_fraction": float(eval_metrics["memory_overwrite_fraction"]),
+        "pose_warp_source": str(eval_metrics["pose_warp_source"]),
+        "predicted_pose_warp_ablation": bool(eval_metrics["predicted_pose_warp_ablation"]),
         "baseline_comparison": {
             "baseline_checkpoint_v0": Path(baseline_checkpoint_v0).as_posix() if baseline_checkpoint_v0 is not None else None,
             "baseline_metrics": baseline,
+            **parity,
             **benefit,
         },
         "failure_flags": sorted(set(failure_flags)),
@@ -224,7 +236,10 @@ def _source_metrics(
                 "temporal_reprojection_consistency_iou": float(values["temporal_reprojection_consistency_iou"]),
                 "pose_delta_rmse": values["pose_delta_rmse"],
                 "memory_warp_valid_fraction": float(values["memory_warp_valid_fraction"]),
+                "valid_warp_fraction": float(values["valid_warp_fraction"]),
                 "memory_reset_fraction": float(values["memory_reset_fraction"]),
+                "update_mask_coverage_mean": float(values["update_mask_coverage_mean"]),
+                "memory_overwrite_fraction": float(values["memory_overwrite_fraction"]),
                 "control_safe": False,
             }
         )
@@ -364,13 +379,18 @@ def _goal_report(
         "eval_command": metrics.get("eval_command"),
         "metrics": metrics,
         "baseline_comparison": metrics["baseline_comparison"],
+        "current_bev_parity_pass": metrics["baseline_comparison"]["current_bev_parity_pass"],
         "memory_benefit_pass": metrics["baseline_comparison"]["memory_benefit_pass"],
         "failure_flags": metrics["failure_flags"],
         "skipped_artifacts": skipped,
         "blockers": [
-            "memory benefit gate did not pass"
-            if not metrics["baseline_comparison"]["memory_benefit_pass"]
-            else "none"
+            "current BEV parity gate did not pass"
+            if not metrics["baseline_comparison"]["current_bev_parity_pass"]
+            else (
+                "memory benefit gate did not pass"
+                if not metrics["baseline_comparison"]["memory_benefit_pass"]
+                else "none"
+            )
         ],
         "safety_flags": {
             "control_safe": False,
@@ -389,6 +409,7 @@ def _write_report_md(path: str | Path, report: dict[str, Any]) -> None:
     lines = [
         "# Goal 12A SpatialMemoryNetV1 Report",
         "",
+        f"- current_bev_parity_pass: `{str(report['current_bev_parity_pass']).lower()}`",
         f"- memory_benefit_pass: `{str(report['memory_benefit_pass']).lower()}`",
         f"- sources: `{report['route_frame_window_counts']['source_count']}`",
         f"- frames: `{report['route_frame_window_counts']['frame_count']}`",
@@ -396,6 +417,9 @@ def _write_report_md(path: str | Path, report: dict[str, Any]) -> None:
         f"- current_bev_iou_or_proxy: `{report['metrics']['current_bev_iou_or_proxy']}`",
         f"- fused_memory_bev_iou_or_proxy: `{report['metrics']['fused_memory_bev_iou_or_proxy']}`",
         f"- temporal_reprojection_consistency_iou: `{report['metrics']['temporal_reprojection_consistency_iou']}`",
+        f"- update_mask_coverage_mean: `{report['metrics']['update_mask_coverage_mean']}`",
+        f"- memory_overwrite_fraction: `{report['metrics']['memory_overwrite_fraction']}`",
+        f"- pose_warp_source: `{report['metrics']['pose_warp_source']}`",
         f"- pose_delta_rmse: `{report['metrics']['pose_delta_rmse']}`",
         f"- control_safe: `false`",
         f"- cmd_vel_emitted: `false`",

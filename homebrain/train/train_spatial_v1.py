@@ -10,7 +10,12 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
-from homebrain.brain.spatial_memory_v1 import SpatialMemoryNetV1, SpatialMemoryNetV1Config, save_checkpoint
+from homebrain.brain.spatial_memory_v1 import (
+    SpatialMemoryNetV1,
+    SpatialMemoryNetV1Config,
+    save_checkpoint,
+    warm_start_current_bev_from_v0,
+)
 from homebrain.data.spatial_dataset import read_json, write_json
 from homebrain.train.spatial_dataset import (
     SpatialPackSpec,
@@ -40,6 +45,8 @@ def train_spatial_v1(
     seed: int = 12,
     sensor_context_mode: str = "masks",
     missing_pose_behavior: str = "reset",
+    warm_start_v0_checkpoint: str | Path | None = None,
+    freeze_current_bev: bool = False,
     command: str | None = None,
 ) -> dict[str, Any]:
     torch.manual_seed(seed)
@@ -78,7 +85,19 @@ def train_spatial_v1(
         missing_pose_behavior=missing_pose_behavior,  # type: ignore[arg-type]
     )
     model = SpatialMemoryNetV1(config).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    warm_start_summary: dict[str, Any] | None = None
+    if warm_start_v0_checkpoint is not None:
+        warm_start_summary = warm_start_current_bev_from_v0(
+            model,
+            warm_start_v0_checkpoint,
+            map_location=device,
+        )
+    if freeze_current_bev:
+        _freeze_current_bev_modules(model)
+    trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    if not trainable_parameters:
+        raise ValueError("no trainable parameters remain after freeze options")
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=learning_rate, weight_decay=1e-4)
 
     initial_train = evaluate_spatial_v1(model, train_eval_loader, device=device)
     initial_val = evaluate_spatial_v1(model, val_loader, device=device)
@@ -133,6 +152,9 @@ def train_spatial_v1(
         "seed": int(seed),
         "sensor_context_mode": sensor_context_mode,
         "missing_pose_behavior": missing_pose_behavior,
+        "warm_start_v0_checkpoint": Path(warm_start_v0_checkpoint).as_posix() if warm_start_v0_checkpoint is not None else None,
+        "warm_start_summary": warm_start_summary,
+        "freeze_current_bev": freeze_current_bev,
         "window_count": len(train_dataset),
         "val_window_count": len(val_dataset),
         "frame_count": int(len(train_dataset) * window_length),
@@ -156,7 +178,12 @@ def train_spatial_v1(
         "uncertainty_calibration_proxy": float(final_val["uncertainty_calibration_proxy"]),
         "inference_fps": float(final_val["inference_fps"]),
         "memory_warp_valid_fraction": float(final_val["memory_warp_valid_fraction"]),
+        "valid_warp_fraction": float(final_val["valid_warp_fraction"]),
         "memory_reset_fraction": float(final_val["memory_reset_fraction"]),
+        "update_mask_coverage_mean": float(final_val["update_mask_coverage_mean"]),
+        "memory_overwrite_fraction": float(final_val["memory_overwrite_fraction"]),
+        "pose_warp_source": str(final_val["pose_warp_source"]),
+        "predicted_pose_warp_ablation": bool(final_val["predicted_pose_warp_ablation"]),
         "failure_flags": failure_flags,
         "feature_alignment": train_dataset.feature_alignment,
         "data_manifest_hashes": data_hashes,
@@ -189,6 +216,9 @@ def train_spatial_v1(
             "seed": int(seed),
             "sensor_context_mode": sensor_context_mode,
             "missing_pose_behavior": missing_pose_behavior,
+            "warm_start_v0_checkpoint": Path(warm_start_v0_checkpoint).as_posix() if warm_start_v0_checkpoint is not None else None,
+            "warm_start_summary": warm_start_summary,
+            "freeze_current_bev": freeze_current_bev,
             "device": str(device),
             "representation_pretraining_only": True,
             "control_safe": False,
@@ -214,6 +244,9 @@ def train_spatial_v1(
             "data_manifest_hashes": data_hashes,
             "sensor_context_mode": sensor_context_mode,
             "missing_pose_behavior": missing_pose_behavior,
+            "warm_start_v0_checkpoint": Path(warm_start_v0_checkpoint).as_posix() if warm_start_v0_checkpoint is not None else None,
+            "warm_start_summary": warm_start_summary,
+            "freeze_current_bev": freeze_current_bev,
             "train_command": command,
         },
         metrics=metrics,
@@ -298,7 +331,10 @@ def _source_metrics(
                 "temporal_reprojection_consistency_iou": float(values["temporal_reprojection_consistency_iou"]),
                 "pose_delta_rmse": values["pose_delta_rmse"],
                 "memory_warp_valid_fraction": float(values["memory_warp_valid_fraction"]),
+                "valid_warp_fraction": float(values["valid_warp_fraction"]),
                 "memory_reset_fraction": float(values["memory_reset_fraction"]),
+                "update_mask_coverage_mean": float(values["update_mask_coverage_mean"]),
+                "memory_overwrite_fraction": float(values["memory_overwrite_fraction"]),
                 "control_safe": False,
             }
         )
@@ -313,6 +349,12 @@ def _meters_per_cell(dataset: SpatialTemporalTrainDataset | SpatialTemporalMulti
         if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0.0:
             return float(value)
     return 0.05
+
+
+def _freeze_current_bev_modules(model: SpatialMemoryNetV1) -> None:
+    for module in (model.encoder, model.sensor_adapter, model.current_bev_head):
+        for parameter in module.parameters():
+            parameter.requires_grad = False
 
 
 def _pack_spec_record(spec: SpatialPackSpec) -> dict[str, Any]:
@@ -344,6 +386,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=12)
     parser.add_argument("--sensor-context-mode", choices=("masks", "odom"), default="masks")
     parser.add_argument("--missing-pose-behavior", choices=("reset", "no_warp", "masked_update"), default="reset")
+    parser.add_argument("--warm-start-v0", default=None, help="Optional SpatialMemoryNet v0 checkpoint for current-BEV warm start.")
+    parser.add_argument("--freeze-current-bev", action="store_true", help="Freeze the v0-warm-started current-frame path.")
     args = parser.parse_args(argv)
     command = "python -m homebrain.train.train_spatial_v1 " + " ".join(sys.argv[1:])
     metrics = train_spatial_v1(
@@ -360,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         sensor_context_mode=args.sensor_context_mode,
         missing_pose_behavior=args.missing_pose_behavior,
+        warm_start_v0_checkpoint=args.warm_start_v0,
+        freeze_current_bev=args.freeze_current_bev,
         command=command,
     )
     print(json.dumps(metrics, sort_keys=True))

@@ -125,12 +125,20 @@ Do not rely only on hidden recurrent/transformer state.
 
 Current SpatialMemoryNet v1 implements the first local egocentric memory path:
 per-frame DINO features produce current BEV logits, a persistent BEV memory
-state is warped by robot-relative SE(2) pose deltas, and current observations
-are fused into memory with explicit missing-pose behavior (`reset`, `no_warp`,
-or `masked_update`). The v1 modeld/replay path resets memory on sequence
-boundaries and writes current BEV, memory BEV, uncertainty, observed-mask, and
-memory debug artifacts. This is still representation pretraining and replay
-evaluation only; it is not a control-safe planner and it emits no `cmd_vel`.
+state is initialized as semantic unknown, warped by robot-relative SE(2) pose
+deltas, and fused with current observations through explicit update masks. When
+trusted observation masks are unavailable, v1 derives a conservative mask from
+current BEV confidence/unknown rather than trusting the full grid. Training and
+replay report update-mask coverage and memory-overwrite fraction.
+
+The default v1 modeld/replay warp source is route pose or odometry when the log
+contains it. Predicted pose warp is an explicit ablation, not the default. If
+route pose/odom is unavailable, behavior is explicit through the configured
+missing-pose mode (`reset`, `no_warp`, or `masked_update`). The v1 modeld/replay
+path resets memory on sequence boundaries and writes current BEV, memory BEV,
+uncertainty, update-mask, and memory debug artifacts. This is still
+representation pretraining and replay evaluation only; it is not a control-safe
+planner and it emits no `cmd_vel`.
 
 ## Simulation philosophy
 

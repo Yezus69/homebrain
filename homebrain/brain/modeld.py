@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from math import atan2, cos, sin
 from pathlib import Path
 from typing import Iterable
 
@@ -14,7 +16,7 @@ from homebrain.brain.spatial_memory_v1 import (
     load_checkpoint as load_v1_checkpoint,
 )
 from homebrain.data.spatial_dataset import write_deterministic_npz
-from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, event_identity
+from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, OdomEvent, PoseEvent, event_identity
 from homebrain.policies.candidate_trajectories import generate_default_candidates
 from homebrain.policies.trajectory_scorer import CoverageMemory, LocalBev
 from homebrain.policies.trajectory_scorer_net_v0 import (
@@ -28,6 +30,13 @@ from homebrain.replay.segment_log import load_manifest, read_events, write_segme
 from homebrain.train.spatial_dataset import BEV_OUTPUT_CHANNELS, DINOFeatureStore
 
 DUMMY_MODELD_SOURCE = "modeld_dummy_v0"
+V1_POSE_WARP_SOURCES = ("route_pose", "predicted_pose", "none")
+
+
+@dataclass(frozen=True)
+class RoutePoseDelta:
+    delta: tuple[float, float, float]
+    source: str
 
 
 def dummy_brain_output_for_frame(frame: FrameEvent) -> BrainOutputEvent:
@@ -91,6 +100,7 @@ def replay_events_with_spatial_model(
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
+    v1_pose_warp_source: str = "route_pose",
 ) -> tuple[list[Event], list[str]]:
     ordered_events = list(events)
     outputs, artifacts = spatial_model_outputs(
@@ -101,6 +111,7 @@ def replay_events_with_spatial_model(
         feature_dir=feature_dir,
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
         device_name=device_name,
+        v1_pose_warp_source=v1_pose_warp_source,
     )
     by_identity = {event.input_event_ids[0]: event for event in outputs}
     replayed: list[Event] = []
@@ -133,6 +144,7 @@ def write_spatial_model_outputs(
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
+    v1_pose_warp_source: str = "route_pose",
 ) -> None:
     manifest = load_manifest(log_dir)
     events = read_events(log_dir)
@@ -144,6 +156,7 @@ def write_spatial_model_outputs(
         feature_dir=feature_dir,
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
         device_name=device_name,
+        v1_pose_warp_source=v1_pose_warp_source,
     )
     suffix = "spatial-v1-model" if outputs and outputs[0].source == SPATIAL_MEMORY_V1_SOURCE else "spatial-v0-model"
     write_segment(
@@ -163,6 +176,7 @@ def spatial_model_outputs(
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
+    v1_pose_warp_source: str = "route_pose",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
         if trajectory_scorer_checkpoint is not None:
@@ -173,6 +187,7 @@ def spatial_model_outputs(
             checkpoint=checkpoint,
             feature_dir=feature_dir,
             device_name=device_name,
+            pose_warp_source=v1_pose_warp_source,
         )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -239,7 +254,11 @@ def _spatial_v1_model_outputs(
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     device_name: str | None = None,
+    pose_warp_source: str = "route_pose",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
+    if pose_warp_source not in V1_POSE_WARP_SOURCES:
+        raise ValueError(f"v1_pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
+    ordered_events = list(events)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_v1_checkpoint(checkpoint, map_location=device)
     model.to(device)
@@ -249,16 +268,36 @@ def _spatial_v1_model_outputs(
         raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
     feature_store = DINOFeatureStore(resolved_feature_dir)
     output_root = Path(out_dir)
-    frames = [event for event in events if isinstance(event, FrameEvent)]
+    frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
     start_timestamp_ns = min((frame.timestamp_ns for frame in frames), default=0)
     brain_outputs: list[BrainOutputEvent] = []
     artifact_files: list[str] = []
     state: SpatialMemoryState | None = None
-    previous_pose_delta: torch.Tensor | None = None
+    previous_predicted_pose_delta: torch.Tensor | None = None
     previous_sequence_camera: tuple[str, str] | None = None
+    route_pose_deltas = _route_pose_deltas(frames, ordered_events)
     for frame in frames:
         current_key = (frame.sequence_id, frame.camera_id)
         reset = previous_sequence_camera is None or current_key != previous_sequence_camera
+        selected_pose_delta: torch.Tensor | None = None
+        selected_pose_source = pose_warp_source
+        route_pose_available = False
+        if not reset and pose_warp_source == "route_pose":
+            route_delta = route_pose_deltas.get(event_identity(frame))
+            if route_delta is not None:
+                selected_pose_delta = torch.tensor(route_delta.delta, dtype=torch.float32)
+                selected_pose_source = route_delta.source
+                route_pose_available = True
+            else:
+                selected_pose_source = "route_pose_missing"
+        elif not reset and pose_warp_source == "predicted_pose":
+            selected_pose_delta = previous_predicted_pose_delta
+            route_pose_available = selected_pose_delta is not None
+            selected_pose_source = "predicted_pose" if selected_pose_delta is not None else "predicted_pose_missing"
+        elif reset:
+            selected_pose_source = "sequence_reset"
+        else:
+            selected_pose_source = "none"
         output, artifact, state, previous_pose_delta = _spatial_v1_output_for_frame(
             model=model,
             frame=frame,
@@ -267,11 +306,16 @@ def _spatial_v1_model_outputs(
             checkpoint=Path(checkpoint),
             feature_dir=Path(resolved_feature_dir),
             start_timestamp_ns=start_timestamp_ns,
-            previous_pose_delta=previous_pose_delta if not reset else None,
+            pose_delta_to_current=selected_pose_delta,
+            pose_warp_source=selected_pose_source,
+            pose_warp_source_requested=pose_warp_source,
+            route_pose_delta_available=route_pose_available,
+            predicted_pose_warp_ablation=pose_warp_source == "predicted_pose",
             reset_memory=reset,
             state=None if reset else state,
             device=device,
         )
+        previous_predicted_pose_delta = previous_pose_delta
         previous_sequence_camera = current_key
         brain_outputs.append(output)
         artifact_files.append(artifact)
@@ -422,7 +466,11 @@ def _spatial_v1_output_for_frame(
     checkpoint: Path,
     feature_dir: Path,
     start_timestamp_ns: int,
-    previous_pose_delta: torch.Tensor | None,
+    pose_delta_to_current: torch.Tensor | None,
+    pose_warp_source: str,
+    pose_warp_source_requested: str,
+    route_pose_delta_available: bool,
+    predicted_pose_warp_ablation: bool,
     reset_memory: bool,
     state: SpatialMemoryState | None,
     device: torch.device,
@@ -436,8 +484,8 @@ def _spatial_v1_output_for_frame(
     )
     sensor_context_dim = max(0, int(getattr(model.config, "sensor_dim", 5)) - 1)
     sensor_mask = torch.zeros((1, sensor_context_dim), dtype=torch.float32, device=device)
-    pose_to_current = previous_pose_delta.view(1, 3).to(device) if previous_pose_delta is not None else None
-    pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if previous_pose_delta is not None else None
+    pose_to_current = pose_delta_to_current.view(1, 3).to(device) if pose_delta_to_current is not None else None
+    pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if pose_delta_to_current is not None else None
     model.eval()
     with torch.no_grad():
         outputs = model.step(
@@ -463,6 +511,9 @@ def _spatial_v1_output_for_frame(
     pose_warp_used = bool(debug["pose_warp_used"][0].detach().cpu())
     pose_warp_valid = bool(debug["pose_warp_valid"][0].detach().cpu())
     memory_reset = bool(debug["memory_reset"][0].detach().cpu())
+    update_mask_coverage = float(debug["update_mask_coverage"][0].detach().cpu())
+    memory_overwrite_fraction = float(debug["memory_overwrite_fraction"][0].detach().cpu())
+    observation_mask_source = str(debug.get("observation_mask_source", "unknown"))
 
     relative_artifact = f"brain_outputs/spatial_v1/{frame.camera_id}_{frame.frame_id:06d}.npz"
     artifact_path = output_root / relative_artifact
@@ -480,11 +531,14 @@ def _spatial_v1_output_for_frame(
         "memory_bev_traversable_prob": memory_probabilities[3].astype(np.float32),
         "memory_bev_risky_prob": memory_probabilities[4].astype(np.float32),
         "uncertainty_grid": uncertainty_grid,
+        "update_mask": outputs["update_mask"][0, 0].detach().cpu().numpy().astype(np.float32),
         "memory_observed_mask": next_state.observed_mask[0, 0].detach().cpu().numpy().astype(np.float32),
         "memory_used": np.asarray([memory_used], dtype=np.bool_),
         "pose_warp_used": np.asarray([pose_warp_used], dtype=np.bool_),
         "pose_warp_valid": np.asarray([pose_warp_valid], dtype=np.bool_),
         "memory_reset": np.asarray([memory_reset], dtype=np.bool_),
+        "update_mask_coverage": np.asarray([update_mask_coverage], dtype=np.float32),
+        "memory_overwrite_fraction": np.asarray([memory_overwrite_fraction], dtype=np.float32),
     }
     write_deterministic_npz(artifact_path, arrays)
     input_id = event_identity(frame)
@@ -513,7 +567,15 @@ def _spatial_v1_output_for_frame(
                 "memory_used": memory_used,
                 "pose_warp_used": pose_warp_used,
                 "pose_warp_valid": pose_warp_valid,
+                "valid_warp_fraction": 1.0 if pose_warp_valid else 0.0,
+                "pose_warp_source_requested": pose_warp_source_requested,
+                "pose_warp_source": pose_warp_source,
+                "pose_warp_source_available": bool(route_pose_delta_available),
+                "predicted_pose_warp_ablation": bool(predicted_pose_warp_ablation),
                 "memory_reset": memory_reset,
+                "update_mask_coverage": update_mask_coverage,
+                "memory_overwrite_fraction": memory_overwrite_fraction,
+                "observation_mask_source": observation_mask_source,
                 "missing_pose_behavior": str(getattr(model.config, "missing_pose_behavior", "unknown")),
                 "representation_pretraining_only": True,
                 "control_safe": False,
@@ -528,6 +590,92 @@ def _spatial_v1_output_for_frame(
         next_state,
         next_pose_delta,
     )
+
+
+def _route_pose_deltas(frames: list[FrameEvent], events: Iterable[Event]) -> dict[str, RoutePoseDelta]:
+    pose_samples = _route_pose_samples(events)
+    deltas: dict[str, RoutePoseDelta] = {}
+    previous_frame: FrameEvent | None = None
+    for frame in frames:
+        if (
+            previous_frame is None
+            or previous_frame.sequence_id != frame.sequence_id
+            or previous_frame.camera_id != frame.camera_id
+        ):
+            previous_frame = frame
+            continue
+        previous_sample = _sample_for_frame(previous_frame, pose_samples)
+        current_sample = _sample_for_frame(frame, pose_samples)
+        if previous_sample is None or current_sample is None:
+            previous_frame = frame
+            continue
+        deltas[event_identity(frame)] = RoutePoseDelta(
+            delta=_relative_planar_delta(previous_sample, current_sample),
+            source=current_sample["source"],
+        )
+        previous_frame = frame
+    return deltas
+
+
+def _route_pose_samples(events: Iterable[Event]) -> dict[tuple[str, int], dict[str, object]]:
+    samples: dict[tuple[str, int], dict[str, object]] = {}
+    for event in events:
+        if isinstance(event, OdomEvent):
+            samples[(event.sequence_id, event.timestamp_ns)] = {
+                "x": float(event.position_m[0]),
+                "y": float(event.position_m[1]),
+                "yaw": _yaw_from_quaternion_xyzw(event.orientation_xyzw),
+                "source": "route_odom",
+            }
+    for event in events:
+        if isinstance(event, PoseEvent):
+            samples[(event.sequence_id, event.timestamp_ns)] = {
+                "x": float(event.position_m[0]),
+                "y": float(event.position_m[1]),
+                "yaw": _yaw_from_quaternion_xyzw(event.orientation_xyzw),
+                "source": "route_pose",
+            }
+    return samples
+
+
+def _sample_for_frame(frame: FrameEvent, samples: dict[tuple[str, int], dict[str, object]]) -> dict[str, object] | None:
+    exact = samples.get((frame.sequence_id, frame.timestamp_ns))
+    if exact is not None:
+        return exact
+    candidates = [
+        (abs(timestamp_ns - frame.timestamp_ns), sample)
+        for (sequence_id, timestamp_ns), sample in samples.items()
+        if sequence_id == frame.sequence_id
+    ]
+    if not candidates:
+        return None
+    distance_ns, sample = min(candidates, key=lambda item: item[0])
+    if distance_ns > 100_000_000:
+        return None
+    return sample
+
+
+def _relative_planar_delta(previous: dict[str, object], current: dict[str, object]) -> tuple[float, float, float]:
+    dx_world = float(current["x"]) - float(previous["x"])
+    dy_world = float(current["y"]) - float(previous["y"])
+    yaw_prev = float(previous["yaw"])
+    dx = cos(yaw_prev) * dx_world + sin(yaw_prev) * dy_world
+    dy = -sin(yaw_prev) * dx_world + cos(yaw_prev) * dy_world
+    dyaw = _wrap_angle(float(current["yaw"]) - yaw_prev)
+    return (float(dx), float(dy), float(dyaw))
+
+
+def _yaw_from_quaternion_xyzw(quaternion: tuple[float, float, float, float]) -> float:
+    qx, qy, qz, qw = (float(value) for value in quaternion)
+    return atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+
+
+def _wrap_angle(value: float) -> float:
+    while value > np.pi:
+        value -= 2.0 * float(np.pi)
+    while value < -np.pi:
+        value += 2.0 * float(np.pi)
+    return float(value)
 
 
 def _checkpoint_model_name(checkpoint: str | Path) -> str:
@@ -552,6 +700,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet v0 checkpoint.")
     parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
     parser.add_argument("--trajectory-scorer-checkpoint", default=None, help="Optional TrajectoryScorerNet v0 checkpoint.")
+    parser.add_argument(
+        "--v1-pose-warp-source",
+        choices=V1_POSE_WARP_SOURCES,
+        default="route_pose",
+        help="Pose source for SpatialMemoryNet v1 memory warp; predicted_pose is an explicit ablation.",
+    )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
     if args.checkpoint:
@@ -562,6 +716,7 @@ def main(argv: list[str] | None = None) -> int:
             feature_dir=args.features,
             trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
             device_name=args.device,
+            v1_pose_warp_source=args.v1_pose_warp_source,
         )
     else:
         write_dummy_model_outputs(args.log, args.out)

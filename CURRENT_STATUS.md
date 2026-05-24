@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 12A implemented SpatialMemoryNet v1 as explicit temporal egocentric memory with persistent state, SE(2) pose-aware warp, temporal SpatialTrainPack windows, online-style fused-memory supervision, train/eval CLIs, v1 modeld/replay integration, and reports. The v1 PoC is replay/eval infrastructure only: the memory-benefit gate is false versus the stronger Goal 11B v0 baseline because current-BEV IoU regressed beyond tolerance. No control claims are made; OpenLORIS license review remains pending.
+Goal 12B repaired SpatialMemoryNet v1 memory semantics and parity evaluation. v1 memory now initializes as semantic unknown, update masks no longer trust the full grid when observations are missing, modeld/replay default to route pose/odom warp when available, and the v1 current BEV path can shape-safely warm start from the Goal 11B v0 checkpoint. Multi-route OpenLORIS replay/eval reports now pass current-BEV parity before claiming memory benefit. No control claims are made; OpenLORIS license review remains pending.
 
 ## Last completed goal
 
-Goal 12A: SpatialMemoryNetV1 real temporal egocentric memory, including SE(2) warp tests, temporal dataset/supervision, train/eval CLIs, modeld/replay v1 artifacts, reports, and full verification. The memory-benefit blocker is documented and remains active.
+Goal 12B: SpatialMemoryNetV1 parity plus memory-sanity repair, including unknown-prior memory init, conservative update-mask semantics, route pose/odom warp defaults, shape-safe v0 warm start, window1 parity eval, multi-route window4/window8 route-pose sweeps, modeld/replay safety verification, reports, docs, and full verification. The previous Goal 12A current-BEV regression blocker is resolved for replay/eval representation pretraining.
 
 ## Current implementation status
 
@@ -76,6 +76,11 @@ Goal 12A: SpatialMemoryNetV1 real temporal egocentric memory, including SE(2) wa
 - `homebrain.brain.modeld` and `homebrain.replay.replayd` now auto-load SpatialMemoryNet v1 checkpoints, persist memory across frames, reset memory on sequence/camera boundaries, write current BEV/memory BEV/uncertainty/debug arrays, and keep `cmd_vel=null`.
 - Goal 12A reports exist at `runs/goal12a_spatial_memory_v1_report.json` and `runs/goal12a_spatial_memory_v1_report.md`; v1 modeld/replay artifacts exist under `runs/goal12a_modeld_openloris_spatial_v1/` and `runs/goal12a_replayed_openloris_spatial_v1/`.
 - Goal 12A memory-benefit gate is currently false: the tiny v1 PoC improves temporal consistency/unknown reduction but regresses current-BEV IoU versus the stronger Goal 11B v0 baseline, so it remains replay/eval infrastructure rather than a better spatial model.
+- SpatialMemoryNet v1 now initializes memory with semantic unknown logits, derives conservative update masks when trusted observation masks are absent, reports `update_mask_coverage_mean` and `memory_overwrite_fraction`, and avoids blind full-grid overwrites in training and replay.
+- v1 modeld/replay now defaults to route pose/odom warp when available, keeps predicted pose warp as an explicit ablation, reports pose-warp source and valid-warp fraction, and exposes missing-pose behavior explicitly through `reset`, `no_warp`, or `masked_update`.
+- v1 train/eval now supports shape-safe warm start from a SpatialMemoryNet v0 checkpoint for matching encoder/current-BEV-head tensors, plus a memory-disabled/window1 parity path gated against the same validation split.
+- Goal 12B reports exist at `runs/goal12b_spatial_memory_v1_parity_report.json` and `runs/goal12b_spatial_memory_v1_parity_report.md`; multi-route v1 artifacts exist under `runs/goal12b_spatial_memory_v1/`.
+- Goal 12B passes current-BEV parity and memory-benefit gates in replay/eval: v1 window1 current IoU matches v0 at `0.6922143800184131`, window4 route-pose fused-memory IoU is `0.9757767224311829`, `fused_memory_iou_delta=0.2297759104147553`, `temporal_consistency_delta=0.9620874587694804`, and no `cmd_vel` is emitted.
 - First real student checkpoint exists at `runs/spatial_v0_overfit/checkpoint.pt`; it is a tiny 8-example overfit artifact only, not a navigation/control model.
 - Goal 7B real train/val checkpoints exist at `runs/spatial_v0_goal7b_da3_only/checkpoint.pt`, `runs/spatial_v0_goal7b_tum_only/checkpoint.pt`, and `runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt`; all are representation-pretraining-only and not control-safe.
 - SpatialTrainPack splits are now deterministic sequence-aware contiguous blocks with review embargo frames between train and val for contiguous windows.
@@ -123,6 +128,43 @@ Goal 12A: SpatialMemoryNetV1 real temporal egocentric memory, including SE(2) wa
 - Goal 11A TrajectoryScorerNet checkpoint exists at `runs/goal11a_trajectory_scorer_v0/checkpoint.pt`; it was trained on the OpenLORIS `cafe1-1_2` ActionLabelPack v3 subset only, with DA3/TUM geometry-only excluded sources recorded but not used.
 - Learned scorer eval JSONs exist for oracle label BEV and model-predicted BEV at `runs/goal11a_trajectory_scorer_openloris_oracle_all_eval.json` and `runs/goal11a_trajectory_scorer_openloris_model_bev_all_eval.json`; both report `distribution_collapse_flag=true`.
 - Goal 11A modeld/replay outputs exist at `runs/goal11a_modeld_openloris_spatial_scorer/` and `runs/goal11a_replayed_openloris_spatial_scorer/`; scored BrainOutputEvents keep `cmd_vel=null`, `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.
+
+## Goal completion log
+
+### 020 - Goal 12B SpatialMemoryNetV1 parity and memory-sanity repair
+
+Objective attempted: repair v1 current-frame parity before memory-benefit claims, initialize memory as semantic unknown, stop blind overwrites from missing observations, use route pose/odom as the default replay warp source, warm start v1 current BEV tensors from the Goal 11B v0 checkpoint, and run a real multi-route v1 sweep on `cafe1-1_2`, `office1-1_7`, and `corridor1-1`.
+
+Files changed: `homebrain/brain/spatial_memory_v1.py`, `homebrain/brain/modeld.py`, `homebrain/replay/replayd.py`, `homebrain/train/spatial_v1_common.py`, `homebrain/train/train_spatial_v1.py`, `homebrain/train/eval_spatial_v1.py`, `homebrain/tools/goal12b_report.py`, `tests/test_goal12a_spatial_memory_v1.py`, `ARCHITECTURE.md`, `EVALS.md`, `BLOCKERS.md`, and `CURRENT_STATUS.md`.
+
+Commands run:
+```bash
+python -m py_compile homebrain\brain\spatial_memory_v1.py homebrain\train\spatial_v1_common.py homebrain\train\train_spatial_v1.py homebrain\train\eval_spatial_v1.py homebrain\brain\modeld.py homebrain\replay\replayd.py homebrain\tools\goal12b_report.py
+python -m homebrain.train.train_spatial_v1 --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window1_memory_disabled_warm_start --max-steps 0 --window-length 1 --batch-size 64 --device cuda:0 --warm-start-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt --freeze-current-bev --missing-pose-behavior masked_update
+python -m homebrain.train.eval_spatial_v1 --checkpoint runs\goal12b_spatial_memory_v1\v1_window1_memory_disabled_warm_start\checkpoint.pt --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window1_memory_disabled_eval.json --split val --window-length 1 --batch-size 64 --device cuda:0 --baseline-checkpoint-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt
+python -m homebrain.train.train_spatial_v1 --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start --max-steps 300 --window-length 4 --batch-size 48 --device cuda:1 --warm-start-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt --freeze-current-bev --missing-pose-behavior masked_update --learning-rate 0.0005 --seed 22
+python -m homebrain.train.eval_spatial_v1 --checkpoint runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start\checkpoint.pt --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window4_route_pose_eval.json --split val --window-length 4 --batch-size 48 --device cuda:1 --baseline-checkpoint-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt
+python -m homebrain.train.train_spatial_v1 --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window8_route_pose_warm_start --max-steps 150 --window-length 8 --batch-size 32 --device cuda:0 --warm-start-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt --freeze-current-bev --missing-pose-behavior masked_update --learning-rate 0.0005 --seed 23
+python -m homebrain.train.eval_spatial_v1 --checkpoint runs\goal12b_spatial_memory_v1\v1_window8_route_pose_warm_start\checkpoint.pt --dataset-manifest runs\goal12b_spatial_memory_v1\spatial_dataset_manifest_goal12b.json --out runs\goal12b_spatial_memory_v1\v1_window8_route_pose_eval.json --split val --window-length 8 --batch-size 32 --device cuda:0 --baseline-checkpoint-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt
+python -m homebrain.brain.modeld --log runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --checkpoint runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start\checkpoint.pt --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12b_spatial_memory_v1\modeld_cafe1_1_2_v1_window4_route_pose --device cuda:1
+python -m homebrain.replay.replayd --log runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --checkpoint runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start\checkpoint.pt --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12b_spatial_memory_v1\replayed_cafe1_1_2_v1_window4_route_pose --device cuda:0
+python -m homebrain.eval.run_eval --log runs\goal12b_spatial_memory_v1\replayed_cafe1_1_2_v1_window4_route_pose --out runs\goal12b_spatial_memory_v1\replayed_cafe1_1_2_v1_window4_route_pose_eval.json
+python -m homebrain.tools.goal12b_report --memory-disabled runs\goal12b_spatial_memory_v1\v1_window1_memory_disabled_eval.json --memory runs\goal12b_spatial_memory_v1\v1_window4_route_pose_eval.json --memory-window8 runs\goal12b_spatial_memory_v1\v1_window8_route_pose_eval.json --out-json runs\goal12b_spatial_memory_v1_parity_report.json --out-md runs\goal12b_spatial_memory_v1_parity_report.md
+python -m pytest tests\test_goal12a_spatial_memory_v1.py -q
+python -m pytest tests\test_goal7_spatial_v0.py tests\test_goal10a_robot_frame_bridge.py -q
+python -m pytest -q
+git diff --check
+```
+
+Pass/fail results: py_compile passed; targeted v1 tests passed with `11 passed`; adjacent regression tests passed with `8 passed`; full pytest passed with `67 passed`; `git diff --check` passed with CRLF line-ending warnings only. CUDA inventory found three GPUs, including two RTX 4090s, and the real sweep used `cuda:0` and `cuda:1`.
+
+Artifacts created: `runs/goal12b_spatial_memory_v1/spatial_dataset_manifest_goal12b.json`, `runs/goal12b_spatial_memory_v1/v1_window1_memory_disabled_warm_start/`, `runs/goal12b_spatial_memory_v1/v1_window1_memory_disabled_eval.json`, `runs/goal12b_spatial_memory_v1/v1_window4_route_pose_warm_start/`, `runs/goal12b_spatial_memory_v1/v1_window4_route_pose_eval.json`, `runs/goal12b_spatial_memory_v1/v1_window8_route_pose_warm_start/`, `runs/goal12b_spatial_memory_v1/v1_window8_route_pose_eval.json`, `runs/goal12b_spatial_memory_v1/modeld_cafe1_1_2_v1_window4_route_pose/`, `runs/goal12b_spatial_memory_v1/replayed_cafe1_1_2_v1_window4_route_pose/`, `runs/goal12b_spatial_memory_v1/modeld_cafe1_1_2_v1_window4_route_pose_flags.json`, `runs/goal12b_spatial_memory_v1/replay_cafe1_1_2_v1_window4_route_pose_flags.json`, `runs/goal12b_spatial_memory_v1_parity_report.json`, and `runs/goal12b_spatial_memory_v1_parity_report.md`.
+
+Metrics observed: v0 baseline current IoU `0.6922143800184131`; v1 memory-disabled/window1 current IoU `0.6922143800184131`; `current_bev_parity_pass=true`; window4 route-pose v1 current IoU `0.6780947460234166`; window4 fused-memory IoU `0.9757767224311829`; `current_bev_iou_delta_vs_memory_disabled=-0.014119633994996494`; `fused_memory_iou_delta=0.2297759104147553`; `temporal_consistency_delta=0.9620874587694804`; `unknown_reduction_vs_current=0.07892640698701144`; `update_mask_coverage_mean=0.1667717546224594`; `memory_overwrite_fraction=0.1193264801055193`; `pose_warp_source=route_pose_labels`; `valid_warp_fraction=0.75`; `memory_benefit_pass=true`. Window8 also passed with current IoU `0.687859903126955`, fused-memory IoU `0.8957979504267375`, and `valid_warp_fraction=0.875`. Modeld/replay safety flags on `cafe1-1_2` reported `brain_output_count=1200`, `cmd_vel_count=0`, `bad_safety_flag_count=0`, `valid_warp_count=1199`, `memory_reset_count=1`, and `predicted_pose_warp_ablation_count=0`.
+
+Blockers/risks: no Goal 12B gate blocker remains. Residual risks are that OpenLORIS license review is still pending, route-out metrics are per-source eval proxies rather than retrained leave-one-route-out models, the zero-step warm-start parity baseline naturally reports training-progress failure flags that are not gate blockers, and all artifacts remain replay/eval only with `control_safe=false`, `not_executed=true`, `product_training_approved=false`, and no `cmd_vel`.
+
+Recommended next goal: run longer route-out and leave-one-scene v1 sweeps with current-BEV parity kept frozen or guarded, then tune fusion/update-alpha only after parity remains stable.
 
 ## Commands that should work
 

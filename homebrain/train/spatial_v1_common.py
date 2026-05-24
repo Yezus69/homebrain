@@ -78,6 +78,8 @@ def evaluate_spatial_v1(
     pose_count = 0
     warp_valid_count = 0
     reset_count = 0
+    update_mask_coverages: list[float] = []
+    memory_overwrite_fractions: list[float] = []
     frame_count = 0
     started = time.perf_counter()
 
@@ -132,10 +134,13 @@ def evaluate_spatial_v1(
         debug = outputs["debug"]
         warp_valid_count += int(torch.count_nonzero(debug["pose_warp_valid"]).detach().cpu())
         reset_count += int(torch.count_nonzero(debug["memory_reset"]).detach().cpu())
+        update_mask_coverages.append(float(debug["update_mask_coverage"].float().mean().detach().cpu()))
+        memory_overwrite_fractions.append(float(debug["memory_overwrite_fraction"].float().mean().detach().cpu()))
         frame_count += int(batch["features"].shape[0] * batch["features"].shape[1])
 
     elapsed = max(time.perf_counter() - started, 1e-9)
     pose_rmse = (pose_sq_error_sum / pose_count) ** 0.5 if pose_count else None
+    valid_warp_fraction = warp_valid_count / float(frame_count) if frame_count else 0.0
     return {
         "loss": _mean(losses),
         "current_bev_loss": _mean(current_losses),
@@ -147,8 +152,13 @@ def evaluate_spatial_v1(
         "pose_delta_rmse": pose_rmse,
         "uncertainty_calibration_proxy": _mean(uncertainty_errors),
         "inference_fps": frame_count / elapsed,
-        "memory_warp_valid_fraction": warp_valid_count / float(frame_count) if frame_count else 0.0,
+        "memory_warp_valid_fraction": valid_warp_fraction,
+        "valid_warp_fraction": valid_warp_fraction,
         "memory_reset_fraction": reset_count / float(frame_count) if frame_count else 0.0,
+        "update_mask_coverage_mean": _mean(update_mask_coverages),
+        "memory_overwrite_fraction": _mean(memory_overwrite_fractions),
+        "pose_warp_source": "route_pose_labels",
+        "predicted_pose_warp_ablation": False,
         "frame_count": frame_count,
     }
 
@@ -167,6 +177,7 @@ def memory_benefit_result(
     *,
     v1_metrics: dict[str, Any],
     baseline_metrics: dict[str, Any],
+    current_bev_parity_pass: bool | None = None,
     current_regression_tolerance: float = 0.02,
 ) -> dict[str, Any]:
     fused_delta = float(v1_metrics["fused_memory_bev_iou_or_proxy"]) - float(
@@ -178,19 +189,46 @@ def memory_benefit_result(
     current_delta = float(v1_metrics["current_bev_iou_or_proxy"]) - float(
         baseline_metrics.get("current_bev_iou_or_proxy", v1_metrics["current_bev_iou_or_proxy"])
     )
-    pass_gate = (fused_delta > 0.0 or temporal_delta > 0.0) and current_delta >= -current_regression_tolerance
+    parity_pass = (
+        current_delta >= -current_regression_tolerance
+        if current_bev_parity_pass is None
+        else bool(current_bev_parity_pass)
+    )
+    pass_gate = parity_pass and (fused_delta > 0.0 or temporal_delta > 0.0) and current_delta >= -current_regression_tolerance
     reasons: list[str] = []
+    if not parity_pass:
+        reasons.append("current_bev_parity_failed")
     if fused_delta <= 0.0 and temporal_delta <= 0.0:
         reasons.append("no_fused_iou_or_temporal_consistency_improvement")
     if current_delta < -current_regression_tolerance:
         reasons.append("current_bev_regressed_beyond_tolerance")
     return {
         "memory_benefit_pass": bool(pass_gate),
+        "current_bev_parity_pass": bool(parity_pass),
         "fused_memory_iou_delta": fused_delta,
+        "temporal_consistency_delta": temporal_delta,
         "temporal_consistency_iou_delta": temporal_delta,
         "current_bev_iou_delta": current_delta,
         "current_regression_tolerance": current_regression_tolerance,
         "failure_reasons": reasons,
+    }
+
+
+def current_bev_parity_result(
+    *,
+    v1_metrics: dict[str, Any],
+    v0_baseline_metrics: dict[str, Any],
+    tolerance: float = 0.02,
+) -> dict[str, Any]:
+    v1_current = float(v1_metrics["current_bev_iou_or_proxy"])
+    v0_current = float(v0_baseline_metrics["current_bev_iou_or_proxy"])
+    delta = v1_current - v0_current
+    return {
+        "current_bev_parity_pass": bool(delta >= -tolerance),
+        "current_bev_iou_delta": delta,
+        "current_bev_parity_tolerance": tolerance,
+        "v1_current_bev_iou_or_proxy": v1_current,
+        "v0_current_bev_iou_or_proxy": v0_current,
     }
 
 

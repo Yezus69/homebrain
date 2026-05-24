@@ -27,6 +27,10 @@ class SpatialMemoryNetV1Config:
     memory_update_alpha: float = 0.65
     memory_decay: float = 1.0
     missing_pose_behavior: MissingPoseBehavior = "reset"
+    unknown_prior_logit: float = 4.0
+    known_prior_logit: float = -4.0
+    predicted_observation_confidence_threshold: float = 0.65
+    predicted_observation_unknown_threshold: float = 0.45
     schema_version: str = SPATIAL_MEMORY_V1_SCHEMA_VERSION
     model_version: str = "SpatialMemoryNetV1"
 
@@ -41,6 +45,12 @@ class SpatialMemoryNetV1Config:
             raise ValueError("memory_decay must be in [0, 1]")
         if self.missing_pose_behavior not in MISSING_POSE_BEHAVIORS:
             raise ValueError(f"missing_pose_behavior must be one of {MISSING_POSE_BEHAVIORS}")
+        if self.unknown_prior_logit <= self.known_prior_logit:
+            raise ValueError("unknown_prior_logit must be greater than known_prior_logit")
+        if not 0.0 <= self.predicted_observation_confidence_threshold <= 1.0:
+            raise ValueError("predicted_observation_confidence_threshold must be in [0, 1]")
+        if not 0.0 <= self.predicted_observation_unknown_threshold <= 1.0:
+            raise ValueError("predicted_observation_unknown_threshold must be in [0, 1]")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +64,10 @@ class SpatialMemoryNetV1Config:
             "memory_update_alpha": self.memory_update_alpha,
             "memory_decay": self.memory_decay,
             "missing_pose_behavior": self.missing_pose_behavior,
+            "unknown_prior_logit": self.unknown_prior_logit,
+            "known_prior_logit": self.known_prior_logit,
+            "predicted_observation_confidence_threshold": self.predicted_observation_confidence_threshold,
+            "predicted_observation_unknown_threshold": self.predicted_observation_unknown_threshold,
             "output_channels": list(BEV_OUTPUT_CHANNELS),
             "memory_channels": list(BEV_OUTPUT_CHANNELS),
         }
@@ -75,6 +89,12 @@ class SpatialMemoryNetV1Config:
             memory_update_alpha=float(data.get("memory_update_alpha", 0.65)),
             memory_decay=float(data.get("memory_decay", 1.0)),
             missing_pose_behavior=behavior,  # type: ignore[arg-type]
+            unknown_prior_logit=float(data.get("unknown_prior_logit", 4.0)),
+            known_prior_logit=float(data.get("known_prior_logit", -4.0)),
+            predicted_observation_confidence_threshold=float(
+                data.get("predicted_observation_confidence_threshold", 0.65)
+            ),
+            predicted_observation_unknown_threshold=float(data.get("predicted_observation_unknown_threshold", 0.45)),
         )
 
 
@@ -230,6 +250,8 @@ class SpatialMemoryNetV1(nn.Module):
             nn.GELU(),
             nn.Conv2d(hidden, len(BEV_OUTPUT_CHANNELS), kernel_size=1),
         )
+        nn.init.zeros_(self.memory_refine[-1].weight)
+        nn.init.zeros_(self.memory_refine[-1].bias)
         self.uncertainty_head = nn.Sequential(
             nn.Conv2d(hidden + len(BEV_OUTPUT_CHANNELS) + 1, hidden, kernel_size=3, padding=1),
             nn.GELU(),
@@ -258,14 +280,46 @@ class SpatialMemoryNetV1(nn.Module):
         resolved_dtype = dtype or param.dtype
         height, width = self.config.bev_shape
         return SpatialMemoryState(
-            memory_logits=torch.zeros(
-                (batch_size, len(BEV_OUTPUT_CHANNELS), height, width),
-                dtype=resolved_dtype,
+            memory_logits=self.unknown_prior_logits(
+                batch_size,
                 device=resolved_device,
+                dtype=resolved_dtype,
             ),
             observed_mask=torch.zeros((batch_size, 1, height, width), dtype=resolved_dtype, device=resolved_device),
             step_index=torch.zeros((batch_size,), dtype=torch.int64, device=resolved_device),
         )
+
+    def unknown_prior_logits(
+        self,
+        batch_size: int,
+        *,
+        device: torch.device | str,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        height, width = self.config.bev_shape
+        memory = torch.full(
+            (batch_size, len(BEV_OUTPUT_CHANNELS), height, width),
+            fill_value=float(self.config.known_prior_logit),
+            dtype=dtype,
+            device=device,
+        )
+        memory[:, BEV_OUTPUT_CHANNELS.index("unknown")] = float(self.config.unknown_prior_logit)
+        return memory
+
+    def derive_predicted_observation_mask(self, current_bev_logits: torch.Tensor) -> torch.Tensor:
+        probs = torch.sigmoid(current_bev_logits)
+        unknown_index = BEV_OUTPUT_CHANNELS.index("unknown")
+        evidence_indices = [
+            index
+            for index, channel in enumerate(BEV_OUTPUT_CHANNELS)
+            if channel != "unknown"
+        ]
+        evidence_confidence = probs[:, evidence_indices].amax(dim=1, keepdim=True)
+        unknown_prob = probs[:, unknown_index : unknown_index + 1]
+        return (
+            (evidence_confidence >= float(self.config.predicted_observation_confidence_threshold))
+            & (unknown_prob <= float(self.config.predicted_observation_unknown_threshold))
+        ).to(dtype=current_bev_logits.dtype)
 
     def forward(
         self,
@@ -354,13 +408,12 @@ class SpatialMemoryNetV1(nn.Module):
         )
         warped_memory = warp.tensor * self.config.memory_decay
         warped_observed = observed_warp.tensor.clamp(0.0, 1.0)
+        unknown_prior = self.unknown_prior_logits(batch, device=features.device, dtype=features.dtype)
+        warped_memory = torch.where(warped_observed > 0.0, warped_memory, unknown_prior)
 
         if observation_mask is None:
-            current_observed = torch.ones(
-                (batch, 1, self.config.bev_shape[0], self.config.bev_shape[1]),
-                dtype=features.dtype,
-                device=features.device,
-            )
+            current_observed = self.derive_predicted_observation_mask(current_bev_logits)
+            observation_mask_source = "predicted_current_bev_confidence"
         else:
             current_observed = observation_mask.to(device=features.device, dtype=features.dtype).view(
                 batch,
@@ -368,12 +421,15 @@ class SpatialMemoryNetV1(nn.Module):
                 self.config.bev_shape[0],
                 self.config.bev_shape[1],
             ).clamp(0.0, 1.0)
+            observation_mask_source = "trusted_observation_mask"
 
         old_known = warped_observed > 0.0
         current_known = current_observed > 0.0
         alpha = torch.tensor(self.config.memory_update_alpha, dtype=features.dtype, device=features.device)
         blended = (1.0 - alpha) * warped_memory + alpha * current_bev_logits
         memory_logits = torch.where(old_known & current_known, blended, torch.where(current_known, current_bev_logits, warped_memory))
+        update_mask_coverage = current_known.to(features.dtype).mean(dim=(1, 2, 3))
+        memory_overwrite_fraction = (old_known & current_known).to(features.dtype).mean(dim=(1, 2, 3))
         if self.config.missing_pose_behavior == "masked_update":
             invalid_pose = (~warp.pose_warp_valid).view(batch, 1, 1, 1)
             memory_logits = torch.where(
@@ -383,7 +439,8 @@ class SpatialMemoryNetV1(nn.Module):
             )
             warped_observed = torch.where(invalid_pose & ~current_known, memory_state.observed_mask, warped_observed)
         observed_mask = torch.maximum(warped_observed, current_observed)
-        refined_memory_logits = memory_logits + self.memory_refine(memory_logits)
+        refinement = self.memory_refine(memory_logits)
+        refined_memory_logits = torch.where(current_known, memory_logits + refinement, memory_logits)
         uncertainty_input = torch.cat([bev_latent, refined_memory_logits, observed_mask], dim=1)
         uncertainty_logits = self.uncertainty_head(uncertainty_input)
         uncertainty_scalar = torch.sigmoid(self.uncertainty_scalar_head(pooled)).squeeze(1)
@@ -399,7 +456,10 @@ class SpatialMemoryNetV1(nn.Module):
             "pose_warp_used": warp.pose_warp_used,
             "pose_warp_valid": warp.pose_warp_valid,
             "memory_reset": memory_reset,
+            "update_mask_coverage": update_mask_coverage,
+            "memory_overwrite_fraction": memory_overwrite_fraction,
             "missing_pose_behavior": self.config.missing_pose_behavior,
+            "observation_mask_source": observation_mask_source,
         }
         return {
             "current_bev_logits": current_bev_logits,
@@ -410,6 +470,7 @@ class SpatialMemoryNetV1(nn.Module):
             "uncertainty_scalar": uncertainty_scalar,
             "pose_delta": pose_delta,
             "memory_state": next_state,
+            "update_mask": current_observed,
             "debug": debug,
         }
 
@@ -431,6 +492,7 @@ class SpatialMemoryNetV1(nn.Module):
         state = initial_state
         current_logits: list[torch.Tensor] = []
         memory_logits: list[torch.Tensor] = []
+        update_masks: list[torch.Tensor] = []
         uncertainty_logits: list[torch.Tensor] = []
         uncertainty_scalars: list[torch.Tensor] = []
         pose_deltas: list[torch.Tensor] = []
@@ -439,6 +501,8 @@ class SpatialMemoryNetV1(nn.Module):
             "pose_warp_used": [],
             "pose_warp_valid": [],
             "memory_reset": [],
+            "update_mask_coverage": [],
+            "memory_overwrite_fraction": [],
         }
         for index in range(steps):
             force_reset = reset_mask[:, index] if reset_mask is not None else None
@@ -457,6 +521,7 @@ class SpatialMemoryNetV1(nn.Module):
             state = result["memory_state"]
             current_logits.append(result["current_bev_logits"])
             memory_logits.append(result["fused_memory_bev_logits"])
+            update_masks.append(result["update_mask"])
             uncertainty_logits.append(result["uncertainty_logits"])
             uncertainty_scalars.append(result["uncertainty_scalar"])
             pose_deltas.append(result["pose_delta"])
@@ -466,6 +531,7 @@ class SpatialMemoryNetV1(nn.Module):
             "current_bev_logits": torch.stack(current_logits, dim=1),
             "fused_memory_bev_logits": torch.stack(memory_logits, dim=1),
             "bev_logits": torch.stack(memory_logits, dim=1),
+            "update_mask": torch.stack(update_masks, dim=1),
             "uncertainty_logits": torch.stack(uncertainty_logits, dim=1),
             "uncertainty_grid": torch.sigmoid(torch.stack(uncertainty_logits, dim=1)),
             "uncertainty_scalar": torch.stack(uncertainty_scalars, dim=1),
@@ -515,3 +581,66 @@ def load_checkpoint(path: str | Path, *, map_location: str | torch.device = "cpu
     model.load_state_dict(payload["state_dict"])
     model.eval()
     return model, payload
+
+
+def warm_start_current_bev_from_v0(
+    model: SpatialMemoryNetV1,
+    checkpoint: str | Path,
+    *,
+    map_location: str | torch.device = "cpu",
+) -> dict[str, Any]:
+    payload = torch.load(Path(checkpoint), map_location=map_location, weights_only=False)
+    if payload.get("model_name") != "SpatialMemoryNetV0":
+        raise ValueError(f"expected a SpatialMemoryNetV0 checkpoint, got {payload.get('model_name')!r}")
+    source_state = payload.get("state_dict")
+    if not isinstance(source_state, dict):
+        raise ValueError("v0 checkpoint is missing state_dict")
+    target_state = model.state_dict()
+    copied: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for source_key, source_tensor in source_state.items():
+        target_key = _v0_to_v1_key(str(source_key))
+        if target_key is None:
+            continue
+        target_tensor = target_state.get(target_key)
+        if target_tensor is None:
+            skipped.append({"source": str(source_key), "target": target_key, "reason": "missing_target_key"})
+            continue
+        if tuple(source_tensor.shape) != tuple(target_tensor.shape):
+            skipped.append(
+                {
+                    "source": str(source_key),
+                    "target": target_key,
+                    "reason": "shape_mismatch",
+                    "source_shape": list(source_tensor.shape),
+                    "target_shape": list(target_tensor.shape),
+                }
+            )
+            continue
+        target_state[target_key] = source_tensor.to(device=target_tensor.device, dtype=target_tensor.dtype)
+        copied.append({"source": str(source_key), "target": target_key, "shape": list(target_tensor.shape)})
+    model.load_state_dict(target_state, strict=True)
+    return {
+        "schema_version": "homebrain.spatial_memory_v1.warm_start.v0",
+        "source_checkpoint": Path(checkpoint).as_posix(),
+        "source_model_name": payload.get("model_name"),
+        "copied_count": len(copied),
+        "skipped_count": len(skipped),
+        "copied": copied,
+        "skipped": skipped,
+        "shape_safe": True,
+    }
+
+
+def _v0_to_v1_key(source_key: str) -> str | None:
+    if source_key.startswith("encoder."):
+        return source_key
+    if source_key.startswith("sensor_adapter."):
+        return source_key
+    if source_key.startswith("bev_head."):
+        return "current_bev_head." + source_key[len("bev_head.") :]
+    if source_key.startswith("pose_head."):
+        return source_key
+    if source_key.startswith("uncertainty_scalar_head."):
+        return source_key
+    return None
