@@ -16,15 +16,18 @@ from homebrain.policies.build_action_label_pack import (
     ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
+    ACTION_LABEL_PACK_SCHEMA_VERSION_V5,
 )
 
 ACTION_LABEL_QA_SCHEMA_VERSION = "homebrain.action_label_pack_qa.v0"
 DOMINANT_ACTION_FRACTION = 0.90
 DOMINANT_ACTION_FRACTION_V4 = 0.65
 MIN_ACTION_ENTROPY_V4 = 1.0
+DOMINANT_ACTION_FRACTION_V5 = 0.50
+MIN_ACTION_ENTROPY_V5 = 1.5
 
 
-def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
+def qa_action_label_pack(pack_dir: str | Path, *, bc_confidence_floor: float = 0.05) -> dict[str, Any]:
     root = Path(pack_dir)
     errors: list[str] = []
     try:
@@ -39,6 +42,7 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V5,
     }:
         errors.append(f"unsupported schema_version={manifest.get('schema_version')!r}")
     is_v1 = schema_version in {
@@ -46,8 +50,10 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V5,
     }
     is_v4 = schema_version == ACTION_LABEL_PACK_SCHEMA_VERSION_V4
+    is_v5 = schema_version == ACTION_LABEL_PACK_SCHEMA_VERSION_V5
     example_records = manifest.get("examples")
     if not isinstance(example_records, list):
         return _failed_metrics(root, "manifest examples must be a list")
@@ -59,6 +65,9 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     action_ok_by_source: dict[str, list[bool]] = {}
     weight_by_source: dict[str, list[float]] = {}
     label_source_types: list[str] = []
+    bc_confidences: list[float] = []
+    bc_margin_values: list[float] = []
+    synthetic_oracle_agreements: list[bool] = []
     future_label_valid_count = 0
     future_label_total_count = 0
     coverage_gains: list[float] = []
@@ -136,12 +145,20 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
             continue
 
         candidate_counts.append(float(next(iter(lengths))))
-        selected_ids.append(np_scalar_to_str(example["selected_candidate_id"]))
+        selected_id = np_scalar_to_str(example["selected_candidate_id"])
+        selected_ids.append(selected_id)
         source_name = np_scalar_to_str(example["source_name"])
         source_names.append(source_name)
         selected_by_source.setdefault(source_name, []).append(selected_ids[-1])
         if "label_source_type" in example:
             label_source_types.append(np_scalar_to_str(example["label_source_type"]))
+        if "bc_label_confidence" in example:
+            bc_confidences.append(float(np.asarray(example["bc_label_confidence"], dtype=np.float32).item()))
+        if "bc_label_margin" in example:
+            bc_margin_values.append(float(np.asarray(example["bc_label_margin"], dtype=np.float32).item()))
+        if "coverage_expert_selected_candidate_id" in example:
+            synthetic_id = np_scalar_to_str(example["coverage_expert_selected_candidate_id"])
+            synthetic_oracle_agreements.append(selected_id == synthetic_id)
         if "future_label_mask" in example:
             mask = np.asarray(example["future_label_mask"], dtype=np.float32)
             future_label_valid_count += int(np.count_nonzero(mask > np.float32(0.0)))
@@ -203,15 +220,25 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     flags: list[str] = []
     if example_count and selected_stop_count == example_count:
         flags.append("all_labels_are_stop")
-    if dominant_fraction >= (DOMINANT_ACTION_FRACTION_V4 if is_v4 else DOMINANT_ACTION_FRACTION):
+    dominant_limit = DOMINANT_ACTION_FRACTION_V5 if is_v5 else (DOMINANT_ACTION_FRACTION_V4 if is_v4 else DOMINANT_ACTION_FRACTION)
+    if dominant_fraction > dominant_limit or (not is_v5 and dominant_fraction >= dominant_limit):
         flags.append("one_action_dominates")
     if is_v4 and action_entropy < MIN_ACTION_ENTROPY_V4:
         flags.append("action_entropy_below_1.0")
+    if is_v5 and action_entropy < MIN_ACTION_ENTROPY_V5:
+        flags.append("action_entropy_below_1.5")
+    bc_confidence_mean = mean(bc_confidences)
+    if is_v5 and bc_confidence_mean < bc_confidence_floor:
+        flags.append("bc_label_confidence_mean_below_floor")
     if replay_only_false_count or not_executed_false_count or control_safe_true_count:
         flags.append("safety_flags_invalid")
     if selected_count_error_count:
         flags.append("selected_count_errors")
 
+    excluded_reason_distribution = {}
+    if isinstance(manifest.get("excluded_reason_distribution"), dict):
+        excluded_reason_distribution = {str(key): int(value) for key, value in manifest["excluded_reason_distribution"].items()}
+    excluded_reason_total = sum(excluded_reason_distribution.values())
     metrics: dict[str, Any] = {
         "schema_version": ACTION_LABEL_QA_SCHEMA_VERSION,
         "pack": root.as_posix(),
@@ -226,6 +253,7 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "action_entropy": action_entropy,
         "source_distribution": source_distribution,
         "selected_distribution": selected_distribution,
+        "selected_action_distribution": selected_distribution,
         "label_source_distribution": _distribution(label_source_types),
         "raw_selected_distribution": manifest.get("raw_selected_distribution", {}),
         "balanced_selected_distribution": manifest.get("balanced_selected_distribution", selected_distribution),
@@ -236,6 +264,7 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "future_motion_label_total_count": future_label_total_count,
         "future_motion_label_valid_fraction": float(future_label_valid_count / max(future_label_total_count, 1)),
         "source_selected_distribution": source_selected_distribution,
+        "per_route_action_distribution": source_selected_distribution,
         "source_selected_stop_fraction": source_selected_stop_fraction,
         "source_selected_motion_fraction": source_selected_motion_fraction,
         "source_action_supervision_ok_fraction": source_action_supervision_ok_fraction,
@@ -243,10 +272,33 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "source_weight_mean": source_weight_mean,
         "per_source": per_source,
         "excluded_by_source": excluded_by_source,
+        "excluded_reason_distribution": excluded_reason_distribution,
+        "excluded_reason_fraction": {
+            reason: float(count / max(excluded_reason_total, 1))
+            for reason, count in sorted(excluded_reason_distribution.items())
+        },
         "excluded_frame_count": int(manifest.get("action_sanity_filter", {}).get("excluded_frame_count", 0))
         if isinstance(manifest.get("action_sanity_filter"), dict)
         else 0,
         "dominant_action_fraction": float(dominant_fraction),
+        "bc_label_confidence_mean": bc_confidence_mean,
+        "bc_label_confidence_histogram": _histogram(
+            bc_confidences,
+            bins=(0.0, 0.25, 0.5, 0.75, 1.000001),
+            labels=("0.00_0.25", "0.25_0.50", "0.50_0.75", "0.75_1.00"),
+        ),
+        "bc_label_margin_mean": mean(bc_margin_values),
+        "v5_synthetic_oracle_overlap_count": len(synthetic_oracle_agreements),
+        "v5_synthetic_oracle_agreement_fraction": float(
+            sum(1 for value in synthetic_oracle_agreements if value) / max(len(synthetic_oracle_agreements), 1)
+        ),
+        "bc_confidence_floor": float(bc_confidence_floor),
+        "v5_noncollapse_gate_pass": bool(
+            is_v5
+            and action_entropy >= MIN_ACTION_ENTROPY_V5
+            and dominant_fraction <= DOMINANT_ACTION_FRACTION_V5
+            and bc_confidence_mean >= bc_confidence_floor
+        ),
         "deterministic_hash": _pack_hash(root, example_records),
         "missing_count": missing_count,
         "shape_error_count": shape_error_count,
@@ -306,6 +358,17 @@ def _entropy(counts: dict[str, int]) -> float:
     return float(entropy)
 
 
+def _histogram(values: list[float], *, bins: tuple[float, ...], labels: tuple[str, ...]) -> dict[str, int]:
+    counts = {label: 0 for label in labels}
+    for value in values:
+        number = float(value)
+        for index, label in enumerate(labels):
+            if bins[index] <= number < bins[index + 1]:
+                counts[label] += 1
+                break
+    return counts
+
+
 def _pack_hash(root: Path, example_records: list[Any]) -> str:
     digest = hashlib.sha256()
     manifest_path = root / "manifest.json"
@@ -329,8 +392,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QA deterministic replay-only ActionLabelPack v0.")
     parser.add_argument("--pack", required=True, help="Input ActionLabelPack directory.")
     parser.add_argument("--out", required=True, help="Output QA JSON path.")
+    parser.add_argument("--bc-confidence-floor", type=float, default=0.05)
     args = parser.parse_args(argv)
-    metrics = qa_action_label_pack(args.pack)
+    metrics = qa_action_label_pack(args.pack, bc_confidence_floor=args.bc_confidence_floor)
     write_json(args.out, metrics, pretty=True)
     print(json.dumps(metrics, sort_keys=True))
     return 0

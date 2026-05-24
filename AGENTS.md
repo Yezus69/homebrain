@@ -17,6 +17,11 @@ Before coding, read:
 4. `DECISIONS.md`
 5. The specific goal prompt or issue
 
+Do not treat archive paths as part of the required read-list unless a goal
+explicitly asks for historical details:
+- `docs/status_archive/`
+- `docs/blockers_archive/`
+
 If context was compacted, recover from those files instead of guessing.
 
 ## Non-negotiable principles

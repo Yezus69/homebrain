@@ -659,6 +659,30 @@ root_cause_buckets_present=oracle_labels_collapsed,candidate_set_too_weak,scorer
 
 Gate interpretation: Goal 13B explains the Goal 13A collapse as a replay-label/scorer problem before a memory-model problem. The oracle labels themselves are collapsed and dominated by exact score ties resolved by candidate order, while future-motion labels are diverse and disagree with the oracle action. The next goal should repair action-label generation and candidate/scorer tie behavior, then rerun Goal 13A/13B before any learned memory-aware scorer.
 
+## Gate 3.9: Goal 14 future-motion behavior-cloning labels
+
+Required before another memory-aware scorer claim:
+- build ActionLabelPack v5 from robot-frame dataset future motion, not the synthetic coverage/risk oracle
+- keep v3/v4 synthetic-oracle paths callable for ablation
+- record invalid BC labels as `future_horizon_truncated`, `pose_missing`, or `stationary_below_threshold`
+- QA reports BC action distribution, confidence, exclusions, and agreement with the synthetic oracle
+- train/eval TrajectoryScorerNet v1 from v5 labels with all replay/control safety flags false
+- rerun Goal 13A with the v5 scorer and reuse the Goal 13B audit
+
+Goal 14 commands:
+```bash
+python -m homebrain.policies.build_action_label_pack_v5 --source runs\goal11b_nightly\spatial_packs\openloris_cafe1_1_2_spatial_pack --source runs\goal11b_nightly\spatial_packs\openloris_office1_1_7_spatial_pack --source runs\goal11b_nightly\spatial_packs\openloris_corridor1_1_spatial_pack --out runs\goal14_action_label_pack_v5
+python -m homebrain.policies.qa_action_label_pack --pack runs\goal14_action_label_pack_v5 --out runs\goal14_action_label_pack_v5_qa.json
+python -m homebrain.policies.train_trajectory_scorer_v1 --action-pack runs\goal14_action_label_pack_v5 --out runs\goal14_trajectory_scorer_v1 --max-steps 800 --batch-size 64 --device cuda --learning-rate 0.0005
+python -m homebrain.policies.eval_trajectory_scorer_v1 --checkpoint runs\goal14_trajectory_scorer_v1\checkpoint.pt --action-pack runs\goal14_action_label_pack_v5 --out runs\goal14_trajectory_scorer_v1_eval.json --split val --device cuda --viz-out runs\goal14_trajectory_scorer_v1_viz
+python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64 --action-label-pack runs\goal14_action_label_pack_v5 --scorer-checkpoint runs\goal14_trajectory_scorer_v1\checkpoint.pt --out-json runs\goal14_memory_policy_shadow_eval_v5_report.json --out-md runs\goal14_memory_policy_shadow_eval_v5_report.md --decisions-jsonl runs\goal14_memory_policy_shadow_eval_v5_decisions.jsonl --contact-sheet runs\goal14_memory_policy_shadow_eval_v5_worst.ppm
+python -m homebrain.policies.audit_goal13a_collapse --goal13a-decisions runs\goal14_memory_policy_shadow_eval_v5_decisions.jsonl --out-json runs\goal14_policy_collapse_audit_v5.json --out-md runs\goal14_policy_collapse_audit_v5.md --contact-sheet runs\goal14_policy_collapse_worst_v5.ppm
+```
+
+Goal 14 result: ActionLabelPack v5 passed the non-collapse gate with `example_count=2894`, `action_entropy=2.3334583564283053`, `dominant_action_fraction=0.4644091223220456`, `bc_label_confidence_mean=0.25870618115853394`, and synthetic-oracle agreement `0.0`. The learned v1 scorer beat random on validation (`top1_action_agreement=0.49568221070811747`) and had `distribution_collapse_flag=false`, but it still leaned toward `straight_medium`. Goal 13A with the v5 scorer failed the memory-action gate: memory changed current decisions on `0.0` of normal held-out frames and did not improve future-motion agreement (`0.18764302059496568` for both current and memory). The reused Goal 13B audit now reports `oracle_labels_collapsed=false` and primary root cause `memory_delta_too_small_for_action`, with `model_bev_collapsed=true`.
+
+Gate interpretation: v5 labels are no longer the bottleneck. On current OpenLORIS-only data, memory still does not help the learned v5 scorer. This points to data/model signal bottlenecks before more memory work or control integration.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

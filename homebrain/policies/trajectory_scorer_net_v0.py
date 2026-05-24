@@ -430,6 +430,7 @@ def train_trajectory_scorer_v0(
     seed: int = 11,
     bev_source: str = "oracle",
     modeld_dir: str | Path | None = None,
+    class_balanced_loss: bool = False,
 ) -> JsonDict:
     torch.manual_seed(seed)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -457,6 +458,7 @@ def train_trajectory_scorer_v0(
     )
     model = TrajectoryScorerNetV0(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1.0e-4)
+    class_weights = _class_weights(train_dataset).to(device) if class_balanced_loss else None
     train_loader = DataLoader(
         train_dataset,
         batch_size=min(batch_size, len(train_dataset)),
@@ -474,7 +476,7 @@ def train_trajectory_scorer_v0(
         batch = _batch_to_device(next(iterator), device)
         optimizer.zero_grad(set_to_none=True)
         logits = model(batch["bev"], batch["candidate_features"], batch["candidate_mask"])
-        losses = trajectory_scorer_loss(logits, batch)
+        losses = trajectory_scorer_loss(logits, batch, class_weights=class_weights)
         losses["loss"].backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
@@ -497,6 +499,7 @@ def train_trajectory_scorer_v0(
         "seed": int(seed),
         "bev_source": bev_source,
         "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
+        "class_balanced_loss": bool(class_balanced_loss),
         "example_count": len(train_dataset),
         "val_example_count": len(val_dataset),
         "source_filters": {
@@ -543,6 +546,7 @@ def train_trajectory_scorer_v0(
             "seed": int(seed),
             "bev_source": bev_source,
             "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
+            "class_balanced_loss": bool(class_balanced_loss),
             "replay_only": True,
             "not_executed": True,
             "control_safe": False,
@@ -569,6 +573,7 @@ def train_trajectory_scorer_v0(
             "seed": int(seed),
             "bev_source": bev_source,
             "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
+            "class_balanced_loss": bool(class_balanced_loss),
         },
         metrics=metrics,
     )
@@ -669,14 +674,37 @@ def evaluate_trajectory_scorer_loader(
     }
 
 
-def trajectory_scorer_loss(logits: torch.Tensor, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    selected_loss = F.cross_entropy(logits, batch["selected_index"])
+def trajectory_scorer_loss(
+    logits: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+    *,
+    class_weights: torch.Tensor | None = None,
+) -> dict[str, torch.Tensor]:
+    selected_loss = F.cross_entropy(logits, batch["selected_index"], weight=class_weights)
     mask = batch["candidate_mask"]
     raw_score_loss = ((logits - batch["target_logits"]) ** 2 * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
     source_weight = batch["source_weight"].view(-1)
     score_loss = (raw_score_loss * source_weight).sum() / source_weight.sum().clamp_min(1.0)
     total = selected_loss + torch.tensor(0.10, dtype=selected_loss.dtype, device=selected_loss.device) * score_loss
     return {"loss": total, "selected_loss": selected_loss, "score_loss": score_loss}
+
+
+def _class_weights(dataset: ActionLabelScorerDataset) -> torch.Tensor:
+    counts = np.zeros((len(dataset.candidate_ids),), dtype=np.float32)
+    for sample in dataset.samples:
+        counts[int(sample.selected_index)] += 1.0
+    present = counts > 0.0
+    weights = np.zeros_like(counts, dtype=np.float32)
+    if np.count_nonzero(present) == 0:
+        weights[:] = 1.0
+    else:
+        total = float(np.sum(counts[present]))
+        weights[present] = total / (float(np.count_nonzero(present)) * counts[present])
+        weights[~present] = 0.0
+        mean_present = float(np.mean(weights[present]))
+        if mean_present > 0.0:
+            weights[present] /= mean_present
+    return torch.from_numpy(weights.astype(np.float32))
 
 
 def score_local_bev_with_model(
@@ -841,6 +869,10 @@ def _predict_dataset(
                     "source_name": sample.record.get("source_name"),
                     "source_family": sample.record.get("source_family"),
                     "source_ref": sample.record.get("source_ref"),
+                    "label_source_type": sample.record.get("label_source_type"),
+                    "future_motion_primary_candidate_id": sample.record.get("future_motion_primary_candidate_id"),
+                    "coverage_expert_selected_candidate_id": sample.record.get("coverage_expert_selected_candidate_id"),
+                    "bc_label_confidence": sample.record.get("bc_label_confidence"),
                     "bev_source": dataset.bev_source,
                     "learned_selected_candidate_id": learned_selected,
                     "expert_selected_candidate_id": expert_selected,
@@ -894,6 +926,34 @@ def _prediction_metrics(
     learned_ids = [str(item["learned_selected_candidate_id"]) for item in predictions]
     expert_ids = [str(item["expert_selected_candidate_id"]) for item in predictions]
     agreements = [1.0 if learned == expert else 0.0 for learned, expert in zip(learned_ids, expert_ids)]
+    future_ids = [
+        str(item.get("future_motion_primary_candidate_id"))
+        for item in predictions
+        if isinstance(item.get("future_motion_primary_candidate_id"), str)
+        and str(item.get("future_motion_primary_candidate_id")) not in {"", "missing", "None"}
+    ]
+    future_agreements = [
+        1.0
+        if str(item["learned_selected_candidate_id"]) == str(item.get("future_motion_primary_candidate_id"))
+        else 0.0
+        for item in predictions
+        if isinstance(item.get("future_motion_primary_candidate_id"), str)
+        and str(item.get("future_motion_primary_candidate_id")) not in {"", "missing", "None"}
+    ]
+    synthetic_ids = [
+        str(item.get("coverage_expert_selected_candidate_id"))
+        for item in predictions
+        if isinstance(item.get("coverage_expert_selected_candidate_id"), str)
+        and str(item.get("coverage_expert_selected_candidate_id")) not in {"", "missing", "None"}
+    ]
+    synthetic_agreements = [
+        1.0
+        if str(item["learned_selected_candidate_id"]) == str(item.get("coverage_expert_selected_candidate_id"))
+        else 0.0
+        for item in predictions
+        if isinstance(item.get("coverage_expert_selected_candidate_id"), str)
+        and str(item.get("coverage_expert_selected_candidate_id")) not in {"", "missing", "None"}
+    ]
     selected_distribution = _distribution(learned_ids)
     expert_distribution = _distribution(expert_ids)
     dominant_action_fraction = max(selected_distribution.values(), default=0) / max(len(predictions), 1)
@@ -950,6 +1010,15 @@ def _prediction_metrics(
         "heuristic_expert_action_entropy": _entropy(expert_distribution),
         "heuristic_expert_stop_fraction": float(sum(1 for value in expert_ids if value == "stop") / max(len(expert_ids), 1)),
         "per_source_top1_action_agreement": {
+            source: _mean(values) for source, values in sorted(per_source_agreements.items())
+        },
+        "agreement_with_future_motion_label": _mean(future_agreements),
+        "future_motion_label_count": len(future_agreements),
+        "future_motion_label_distribution": _distribution(future_ids),
+        "agreement_with_synthetic_oracle_label": _mean(synthetic_agreements),
+        "synthetic_oracle_label_count": len(synthetic_agreements),
+        "synthetic_oracle_label_distribution": _distribution(synthetic_ids),
+        "per_route_heldout_top1_action_agreement": {
             source: _mean(values) for source, values in sorted(per_source_agreements.items())
         },
         "train_metrics_summary": {

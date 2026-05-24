@@ -112,6 +112,14 @@ replan
 
 Avoid direct arbitrary motor PWM output.
 
+Current action-labeling status: ActionLabelPack v5 can derive replay-only
+behavior-cloning candidate labels from robot-frame dataset future motion. The
+older synthetic coverage/risk label path remains available for ablation, but it
+is no longer treated as the action oracle after Goal 13B showed it collapsed.
+The learned v5 scorer is still replay/eval only and not control-safe; Goal 14
+showed that v5 labels are non-collapsed, while current model-BEV memory still
+does not improve learned-scorer decisions.
+
 ## Memory philosophy
 
 Use explicit spatial memory:

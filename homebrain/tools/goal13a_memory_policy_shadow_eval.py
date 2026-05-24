@@ -25,6 +25,11 @@ from homebrain.policies.build_action_label_pack import (
 from homebrain.policies.candidate_trajectories import CandidateTrajectory, generate_default_candidates
 from homebrain.policies.run_trajectory_scorer import _record_from_model_event
 from homebrain.policies.trajectory_scorer import CoverageMemory, LocalBev, TrajectoryDecision, score_trajectories
+from homebrain.policies.trajectory_scorer_net_v0 import (
+    CANDIDATE_FEATURE_NAMES,
+    load_trajectory_scorer_checkpoint,
+    score_local_bev_with_model,
+)
 from homebrain.replay.segment_log import read_events
 from homebrain.train.spatial_dataset import (
     BEV_OUTPUT_CHANNELS,
@@ -95,6 +100,7 @@ def run_goal13a_shadow_eval(
     out_md: str | Path = "runs/goal13a_memory_policy_shadow_eval_report.md",
     decisions_jsonl: str | Path = "runs/goal13a_memory_policy_shadow_eval_decisions.jsonl",
     contact_sheet: str | Path = "runs/goal13a_memory_policy_shadow_eval_worst_disagreements.ppm",
+    scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     batch_size: int = 32,
     split: str = "val",
@@ -114,6 +120,11 @@ def run_goal13a_shadow_eval(
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model.to(device)
     model.eval()
+    learned_scorer = None
+    if scorer_checkpoint is not None:
+        learned_scorer, _scorer_payload = load_trajectory_scorer_checkpoint(scorer_checkpoint, map_location=device)
+        learned_scorer.to(device)
+        learned_scorer.eval()
 
     dataset = _build_temporal_dataset(
         specs=specs,
@@ -148,6 +159,8 @@ def run_goal13a_shadow_eval(
         candidates=candidates,
         meters_per_cell=meters_per_cell,
         mode="normal",
+        scorer_model=learned_scorer,
+        scorer_device=device,
     )
     hidden_frames = _collect_shadow_frames(
         model=model,
@@ -165,6 +178,8 @@ def run_goal13a_shadow_eval(
         candidates=candidates,
         meters_per_cell=meters_per_cell,
         mode="hidden_cell",
+        scorer_model=learned_scorer,
+        scorer_device=device,
     )
 
     occlusion_records_by_mode: dict[str, list[JsonDict]] = {}
@@ -186,6 +201,8 @@ def run_goal13a_shadow_eval(
             candidates=candidates,
             meters_per_cell=meters_per_cell,
             mode=f"occlusion:{occlusion_mode}",
+            scorer_model=learned_scorer,
+            scorer_device=device,
         )
     all_occlusion_records = [
         record for records in occlusion_records_by_mode.values() for record in records
@@ -200,6 +217,7 @@ def run_goal13a_shadow_eval(
         split=split,
         future_horizon=future_horizon,
         max_frames_per_mode=max_frames_per_mode,
+        scorer_checkpoint=scorer_checkpoint,
     )
 
     normal_metrics = summarize_decision_records(normal_records)
@@ -211,12 +229,18 @@ def run_goal13a_shadow_eval(
             for mode, records in sorted(occlusion_records_by_mode.items())
         },
     }
-    gate = memory_action_benefit_gate(
-        normal_metrics=normal_metrics,
-        hidden_metrics=hidden_metrics,
-        occlusion_metrics=occlusion_metrics,
-        route_out_metrics=route_out_metrics,
-    )
+    if learned_scorer is None:
+        gate = memory_action_benefit_gate(
+            normal_metrics=normal_metrics,
+            hidden_metrics=hidden_metrics,
+            occlusion_metrics=occlusion_metrics,
+            route_out_metrics=route_out_metrics,
+        )
+    else:
+        gate = learned_scorer_memory_action_gate(
+            normal_metrics=normal_metrics,
+            route_out_metrics=route_out_metrics,
+        )
     blockers = gate["failure_reasons"] if not gate["memory_action_benefit_pass"] else ["none"]
     if gate["memory_action_benefit_pass"]:
         next_goal = "Use this shadow-eval evidence to design a learned memory-aware trajectory scorer, still replay-only and not control-safe."
@@ -242,6 +266,8 @@ def run_goal13a_shadow_eval(
         "v0_modeld_frame_count": len(v0_map),
         "action_label_pack": Path(action_label_pack).as_posix() if action_label_pack is not None else None,
         "future_motion_label_count": len(future_map),
+        "scorer_checkpoint": Path(scorer_checkpoint).as_posix() if scorer_checkpoint is not None else None,
+        "learned_trajectory_scorer_used": bool(learned_scorer is not None),
         "goal12c_report": Path(goal12c_report).as_posix() if goal12c_report is not None else None,
         "goal12c_pass": goal12c_summary.get("pass_fail_gates", {}).get("goal12c_hard_validation_pass")
         if isinstance(goal12c_summary.get("pass_fail_gates"), dict)
@@ -253,6 +279,7 @@ def run_goal13a_shadow_eval(
         "data_sources": data_sources,
         "checkpoints": {
             "v1_checkpoint": v1_checkpoint.as_posix(),
+            "scorer_checkpoint": Path(scorer_checkpoint).as_posix() if scorer_checkpoint is not None else None,
             "v1_checkpoint_metadata": {
                 "model_name": payload.get("model_name"),
                 "window_length": window_length,
@@ -290,6 +317,7 @@ def run_goal13a_shadow_eval(
             "raw_pwm_emitted": False,
             "memory_bev_treated_as_oracle": False,
             "learned_memory_scorer_trained": False,
+            "learned_trajectory_scorer_used": bool(learned_scorer is not None),
         },
         "commands_run": [command] if command else [],
         "runtime_sec": float(time.perf_counter() - started),
@@ -306,6 +334,8 @@ def score_shadow_frames(
     candidates: list[CandidateTrajectory],
     meters_per_cell: float,
     mode: str,
+    scorer_model: torch.nn.Module | None = None,
+    scorer_device: torch.device | None = None,
 ) -> list[JsonDict]:
     coverage: dict[str, CoverageMemory] = {
         source: CoverageMemory(frames[0].oracle_bev.shape, meters_per_cell=meters_per_cell)
@@ -330,14 +360,33 @@ def score_shadow_frames(
                 raise ValueError("v1_memory_bev cannot be treated as oracle")
             memory = coverage[source]
             memory.align_with_pose_delta(frame.pose_delta)
-            decision = score_trajectories(bev=bev, candidates=candidates, coverage_memory=memory)
+            if scorer_model is not None and source == "oracle_bev" and frame.future_motion_label is not None:
+                summary = _bc_oracle_decision_summary(
+                    candidates=candidates,
+                    oracle_labels=oracle_labels,
+                    future_motion_label=frame.future_motion_label,
+                )
+            elif scorer_model is None:
+                decision = score_trajectories(bev=bev, candidates=candidates, coverage_memory=memory)
+                summary = _decision_summary(
+                    decision=decision,
+                    oracle_labels=oracle_labels,
+                    future_motion_label=frame.future_motion_label,
+                )
+            else:
+                summary = _learned_decision_summary(
+                    scorer_model=scorer_model,
+                    scorer_device=scorer_device or torch.device("cpu"),
+                    bev=bev,
+                    candidates=candidates,
+                    coverage_memory=memory,
+                    oracle_labels=oracle_labels,
+                    future_motion_label=frame.future_motion_label,
+                )
             memory.update_current_frame(bev)
-            raw_decisions[source] = decision
-            decisions[source] = _decision_summary(
-                decision=decision,
-                oracle_labels=oracle_labels,
-                future_motion_label=frame.future_motion_label,
-            )
+            if scorer_model is None:
+                raw_decisions[source] = decision  # type: ignore[assignment]
+            decisions[source] = summary
         oracle_action = decisions["oracle_bev"]["selected_candidate_id"]
         for source, summary in decisions.items():
             summary["agreement_with_oracle_action"] = bool(summary["selected_candidate_id"] == oracle_action)
@@ -471,6 +520,63 @@ def memory_action_benefit_gate(
         },
         "route_out_memory_quality_deltas": fold_deltas,
         "learned_memory_scorer_trained": False,
+    }
+
+
+def learned_scorer_memory_action_gate(
+    *,
+    normal_metrics: JsonDict,
+    route_out_metrics: JsonDict,
+) -> JsonDict:
+    reasons: list[str] = []
+    current, memory = _current_memory_metrics(normal_metrics)
+    comparison = normal_metrics.get("memory_vs_current", {}) if isinstance(normal_metrics.get("memory_vs_current"), dict) else {}
+    changed_fraction = float(comparison.get("memory_vs_current_action_changed_fraction", 0.0))
+    current_future = 0.0
+    memory_future = 0.0
+    if current is None or memory is None:
+        reasons.append("normal metrics missing v1_current_bev or v1_memory_bev")
+    else:
+        current_future = float(current.get("agreement_with_future_motion_label", 0.0))
+        memory_future = float(memory.get("agreement_with_future_motion_label", 0.0))
+        if changed_fraction < 0.05:
+            reasons.append("memory changed v1_current decisions on fewer than 5% of normal held-out frames")
+        if memory_future <= current_future + METRIC_TOLERANCE:
+            reasons.append("memory did not improve agreement with future_motion labels on normal held-out frames")
+        if _greater(memory, current, "collision_proxy_rate"):
+            reasons.append("normal v1_memory_bev increased collision_proxy_rate versus v1_current_bev")
+
+    route_out_future_deltas: list[float] = []
+    for fold in route_out_metrics.get("folds", []):
+        if not isinstance(fold, dict):
+            continue
+        metrics = fold.get("metrics")
+        if not isinstance(metrics, dict):
+            continue
+        fold_current, fold_memory = _current_memory_metrics(metrics)
+        if fold_current is None or fold_memory is None:
+            continue
+        route_out_future_deltas.append(
+            float(fold_memory.get("agreement_with_future_motion_label", 0.0))
+            - float(fold_current.get("agreement_with_future_motion_label", 0.0))
+        )
+
+    return {
+        "memory_action_benefit_pass": not reasons,
+        "failure_reasons": reasons,
+        "comparison_source": "v1_memory_bev_vs_v1_current_bev",
+        "gate_mode": "learned_v5_future_motion_behavior_cloning",
+        "required_memory_action_changed_fraction": 0.05,
+        "normal_memory_action_changed_fraction": changed_fraction,
+        "normal_current_future_motion_agreement": current_future,
+        "normal_memory_future_motion_agreement": memory_future,
+        "normal_future_motion_agreement_delta": float(memory_future - current_future),
+        "route_out_future_motion_agreement_deltas": route_out_future_deltas,
+        "learned_memory_scorer_trained": False,
+        "replay_only": True,
+        "not_executed": True,
+        "control_safe": False,
+        "product_training_approved": False,
     }
 
 
@@ -637,6 +743,7 @@ def _run_route_out_shadow_eval(
     split: str,
     future_horizon: int,
     max_frames_per_mode: int | None,
+    scorer_checkpoint: str | Path | None = None,
 ) -> JsonDict:
     root = Path(true_route_out_root)
     if not root.exists():
@@ -648,6 +755,12 @@ def _run_route_out_shadow_eval(
         }
     v0_map = _load_v0_modeld_map(v0_modeld_root) if v0_modeld_root is not None and Path(v0_modeld_root).exists() else {}
     future_map = _load_future_motion_map(action_label_pack) if action_label_pack is not None and Path(action_label_pack).exists() else {}
+    scorer_model = None
+    scorer_device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if scorer_checkpoint is not None:
+        scorer_model, _payload = load_trajectory_scorer_checkpoint(scorer_checkpoint, map_location=scorer_device)
+        scorer_model.to(scorer_device)
+        scorer_model.eval()
     folds: list[JsonDict] = []
     errors: list[JsonDict] = []
     for heldout_manifest in sorted(root.glob("*/heldout_manifest.json")):
@@ -663,7 +776,7 @@ def _run_route_out_shadow_eval(
             window_length = int(metadata.get("window_length", 4))
             sensor_context_mode = str(metadata.get("sensor_context_mode", "masks"))
             missing_pose_behavior = str(metadata.get("missing_pose_behavior", model.config.missing_pose_behavior))
-            device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+            device = scorer_device
             model.to(device)
             model.eval()
             dataset = _build_temporal_dataset(
@@ -696,6 +809,8 @@ def _run_route_out_shadow_eval(
                 candidates=candidates,
                 meters_per_cell=meters_per_cell,
                 mode=f"route_out:{fold_root.name}",
+                scorer_model=scorer_model,
+                scorer_device=scorer_device,
             )
             metrics = summarize_decision_records(records)
             comparison = metrics["memory_vs_current"]
@@ -812,6 +927,132 @@ def _decision_summary(
         "future_motion_label_valid": future_motion_label is not None,
         "agreement_with_future_motion_label": bool(future_motion_label is not None and selected == future_motion_label),
     }
+
+
+def _learned_decision_summary(
+    *,
+    scorer_model: torch.nn.Module,
+    scorer_device: torch.device,
+    bev: LocalBev,
+    candidates: list[CandidateTrajectory],
+    coverage_memory: CoverageMemory,
+    oracle_labels: tuple[ExpertCandidateLabel, ...],
+    future_motion_label: str | None,
+) -> JsonDict:
+    logits, selected, features = score_local_bev_with_model(
+        model=scorer_model,  # type: ignore[arg-type]
+        bev=bev,
+        candidates=candidates,
+        coverage_memory=coverage_memory,
+        device=scorer_device,
+    )
+    scores = _learned_score_records(candidates=candidates, logits=logits, candidate_features=features)
+    selected_score = next(score for score in scores if score["candidate_id"] == selected)
+    oracle_label = _label_for_candidate(oracle_labels, selected)
+    unsafe = oracle_label.collision_proxy >= COLLISION_THRESHOLD or oracle_label.unknown_penalty >= UNKNOWN_BLOCK_THRESHOLD
+    motion_scores = [score for score in scores if score["candidate_id"] != "stop"]
+    all_motion_risky = bool(motion_scores) and all(float(score["risk_score"]) >= COLLISION_THRESHOLD for score in motion_scores)
+    return {
+        "selected_candidate_id": selected,
+        "selected_score": selected_score,
+        "scores": scores,
+        "oracle_collision_proxy": float(oracle_label.collision_proxy),
+        "oracle_unknown_penalty": float(oracle_label.unknown_penalty),
+        "oracle_coverage_gain": float(oracle_label.coverage_gain),
+        "oracle_total_expert_score": float(oracle_label.total_expert_score),
+        "collision_proxy_positive": bool(oracle_label.collision_proxy >= COLLISION_THRESHOLD),
+        "unsafe_selected": bool(unsafe),
+        "all_motion_candidates_risky": bool(all_motion_risky),
+        "future_motion_label_valid": future_motion_label is not None,
+        "agreement_with_future_motion_label": bool(future_motion_label is not None and selected == future_motion_label),
+        "learned_scorer_used": True,
+    }
+
+
+def _bc_oracle_decision_summary(
+    *,
+    candidates: list[CandidateTrajectory],
+    oracle_labels: tuple[ExpertCandidateLabel, ...],
+    future_motion_label: str,
+) -> JsonDict:
+    candidate_ids = {candidate.id for candidate in candidates}
+    selected = future_motion_label if future_motion_label in candidate_ids else candidates[0].id
+    oracle_label = _label_for_candidate(oracle_labels, selected)
+    unsafe = oracle_label.collision_proxy >= COLLISION_THRESHOLD or oracle_label.unknown_penalty >= UNKNOWN_BLOCK_THRESHOLD
+    scores: list[JsonDict] = []
+    for index, candidate in enumerate(candidates):
+        label = _label_for_candidate(oracle_labels, candidate.id)
+        total = 0.0 if candidate.id == selected else 1.0 + 0.001 * index
+        scores.append(
+            {
+                "candidate_id": candidate.id,
+                "risk_score": float(label.collision_proxy),
+                "unknown_penalty": float(label.unknown_penalty),
+                "uncertainty_penalty": float(label.uncertainty_penalty),
+                "coverage_gain_proxy": float(label.coverage_gain),
+                "smoothness_penalty": float(label.smoothness_cost),
+                "total_score": float(total),
+                "risky": bool(label.collision_proxy >= COLLISION_THRESHOLD),
+                "label_source": "future_motion_behavior_cloning",
+                "replay_only": True,
+                "not_executed": True,
+                "control_safe": False,
+                "product_training_approved": False,
+            }
+        )
+    selected_score = next(score for score in scores if score["candidate_id"] == selected)
+    return {
+        "selected_candidate_id": selected,
+        "selected_score": selected_score,
+        "scores": scores,
+        "oracle_collision_proxy": float(oracle_label.collision_proxy),
+        "oracle_unknown_penalty": float(oracle_label.unknown_penalty),
+        "oracle_coverage_gain": float(oracle_label.coverage_gain),
+        "oracle_total_expert_score": float(oracle_label.total_expert_score),
+        "collision_proxy_positive": bool(oracle_label.collision_proxy >= COLLISION_THRESHOLD),
+        "unsafe_selected": bool(unsafe),
+        "all_motion_candidates_risky": False,
+        "future_motion_label_valid": True,
+        "agreement_with_future_motion_label": True,
+        "label_source": "future_motion_behavior_cloning",
+    }
+
+
+def _learned_score_records(
+    *,
+    candidates: list[CandidateTrajectory],
+    logits: np.ndarray,
+    candidate_features: np.ndarray,
+) -> list[JsonDict]:
+    feature_index = {name: index for index, name in enumerate(CANDIDATE_FEATURE_NAMES)}
+    records: list[JsonDict] = []
+    for index, candidate in enumerate(candidates):
+        risk = float(candidate_features[index, feature_index["occupied_max"]])
+        unknown = float(candidate_features[index, feature_index["unknown_mean"]])
+        uncertainty = float(candidate_features[index, feature_index["uncertainty_mean"]])
+        coverage = float(candidate_features[index, feature_index["coverage_gain_fraction"]])
+        smoothness = float(candidate_features[index, feature_index["smoothness_norm"]])
+        logit = float(logits[index])
+        records.append(
+            {
+                "candidate_id": candidate.id,
+                "risk_score": risk,
+                "unknown_penalty": unknown,
+                "uncertainty_penalty": uncertainty,
+                "coverage_gain_proxy": coverage,
+                "smoothness_penalty": smoothness,
+                "total_score": float(-logit),
+                "learned_logit": logit,
+                "higher_is_better": True,
+                "risky": bool(risk >= COLLISION_THRESHOLD),
+                "scorer": "trajectory_scorer_net_v1",
+                "replay_only": True,
+                "not_executed": True,
+                "control_safe": False,
+                "product_training_approved": False,
+            }
+        )
+    return records
 
 
 def _memory_vs_current(decisions: dict[str, JsonDict]) -> JsonDict:
@@ -1226,6 +1467,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-md", default="runs/goal13a_memory_policy_shadow_eval_report.md")
     parser.add_argument("--decisions-jsonl", default="runs/goal13a_memory_policy_shadow_eval_decisions.jsonl")
     parser.add_argument("--contact-sheet", default="runs/goal13a_memory_policy_shadow_eval_worst_disagreements.ppm")
+    parser.add_argument("--scorer-checkpoint", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--split", default="val")
@@ -1244,6 +1486,7 @@ def main(argv: list[str] | None = None) -> int:
         out_md=args.out_md,
         decisions_jsonl=args.decisions_jsonl,
         contact_sheet=args.contact_sheet,
+        scorer_checkpoint=args.scorer_checkpoint,
         device_name=args.device,
         batch_size=args.batch_size,
         split=args.split,

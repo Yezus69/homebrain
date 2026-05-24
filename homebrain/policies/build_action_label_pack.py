@@ -43,6 +43,7 @@ ACTION_LABEL_PACK_SCHEMA_VERSION_V1 = "homebrain.action_label_pack.v1"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V2 = "homebrain.action_label_pack.v2"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V3 = "homebrain.action_label_pack.v3"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V4 = "homebrain.action_label_pack.v4"
+ACTION_LABEL_PACK_SCHEMA_VERSION_V5 = "homebrain.action_label_pack.v5"
 ACTION_LABEL_EXAMPLE_SCHEMA_VERSION = "homebrain.action_label_example.v0"
 COLLISION_THRESHOLD = RISKY_CANDIDATE_THRESHOLD
 UNKNOWN_BLOCK_THRESHOLD = 0.95
