@@ -35,6 +35,7 @@ def replay_log(
     *,
     checkpoint: str | Path | None = None,
     feature_dir: str | Path | None = None,
+    trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
 ) -> None:
     source_path = Path(log_dir)
@@ -52,6 +53,7 @@ def replay_log(
             out_dir=output_path,
             checkpoint=checkpoint,
             feature_dir=feature_dir,
+            trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
             device_name=device_name,
         )
     else:
@@ -71,9 +73,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Output segment log directory.")
     parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet v0 checkpoint.")
     parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
+    parser.add_argument("--trajectory-scorer-checkpoint", default=None, help="Optional TrajectoryScorerNet v0 checkpoint.")
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
-    replay_log(args.log, args.out, checkpoint=args.checkpoint, feature_dir=args.features, device_name=args.device)
+    replay_log(
+        args.log,
+        args.out,
+        checkpoint=args.checkpoint,
+        feature_dir=args.features,
+        trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
+        device_name=args.device,
+    )
     return 0
 
 

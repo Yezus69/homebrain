@@ -159,3 +159,16 @@ Goal 10B approved bounded public dataset download/import and did not add product
 - OpenLORIS runtime requirement: no.
 - OpenLORIS mock/fallback status: no fake public data, camera-to-base transform, base pose, odom, IMU, or command stream was substituted. Setup used an existing local 7-Zip executable only to extract nested `.7z` package contents.
 - OpenLORIS risk: `CC BY-ND 4.0` needs human/legal review before any training/product use; action sanity passing is structural replay evidence only and remains `control_safe=false`.
+
+## Goal 11A dependency update
+
+Goal 11A did not add external datasets, model families, simulator/middleware, hardware-control libraries, or product-runtime dependencies.
+
+- DINOv2-small was reused as an offline frozen feature teacher and run on OpenLORIS `cafe1-1_2`; status remains `pending_human_review`.
+- PyTorch was reused for local SpatialMemoryNet and TrajectoryScorerNet training/inference; no new training framework was added.
+- OpenLORIS-Scene `cafe1-1_2` was reused for replay-only robot-frame BEV/action supervision review; license remains `CC BY-ND 4.0` with `license_review_status=pending_human_review`.
+- ActionLabelPack v3 deterministic expert labels were used only for local replay scorer training/eval; `product_training_approved=false`.
+- The learned trajectory scorer checkpoint is local HomeBrain code, not an external model/checkpoint dependency.
+- Required at runtime: no. DINO, SpatialMemoryNet, and TrajectoryScorerNet are used only in replay/modeld experiments in this goal.
+- Mock/fallback status: tests use fake DINO features and synthetic/controlled packs; fake features remain marked `mock=true`, `synthetic=true`, and `real_perception=false`.
+- Risk: the OpenLORIS action labels collapse to a single motion candidate (`straight_short`) in the learned-scorer subset, and OpenLORIS license terms still need human/legal review before any product training use.

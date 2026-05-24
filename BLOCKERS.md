@@ -109,3 +109,15 @@ Likely cause: not applicable. The fallback had the required RGB-D, camera-to-bas
 Minimal next repair action: not applicable for Goal 10B completion. Before learned scorer v0, decide whether OpenLORIS `CC BY-ND 4.0` can be used for local research replay labels, or collect/stage owned robot-frame logs with measured camera-to-base, wheel odom, and commands.
 
 Command output summary: OpenLORIS setup staged the `6.954` GB package under `max_download_gb=8.0`; route import wrote 300 frames with `robot_frame_truth=true`; BEV validation reported `bev_missing_count=0`, `bev_shape_error_count=0`, and `bev_nan_count=0`; action sanity reported `action_supervision_ok_fraction=1.0`; ActionLabelPack v3 QA reported `example_count=1206`, `cafe1-1_2=300`, `excluded_frame_count=393`, `action_label_pack_qa_pass=true`, and all safety flags `replay_only=true`, `not_executed=true`, `control_safe=false`.
+
+## 2026-05-24 - Goal 11A OpenLORIS learned scorer v0 status
+
+Exact failure: none active for Goal 11A. Real OpenLORIS DINO extraction, SpatialMemoryNet refresh, TrajectoryScorerNet v0 train/eval, modeld/replay scorer integration, contact sheets, and pytest completed.
+
+Likely cause: not applicable as a goal failure.
+
+Minimal next repair action: not applicable for Goal 11A completion. The next useful action is to add a richer teacher/source before treating learned action ranking as meaningful behavior: NoMaD/ViNT teacher priors, a dynamic-risk teacher, or owned robot logging with measured camera-to-base and commands.
+
+Command output summary: OpenLORIS DINO wrote 300 real feature frames; SpatialMemoryNet refresh reported `val_loss=0.11438632508118947`, `bev_iou_or_proxy=0.4798779853309194`, `pose_delta_rmse=null`, and `control_safe=false`; standalone spatial eval reported `failure_flags=["eval_loss_much_higher_than_train_loss"]`; TrajectoryScorerNet v0 trained on the OpenLORIS ActionLabelPack v3 subset and reported `val_top1_action_agreement=1.0` versus random `0.1111111111111111`; oracle and model-BEV evals both reported `distribution_collapse_flag=true` because the OpenLORIS expert subset selected `straight_short` for every evaluated frame; replay/modeld wrote 300 scored BrainOutputEvents with `bad_flags=0`; `python -m pytest -q` reported 55 passed.
+
+Residual risks: OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`, so the scorer is not product-approved training; the learned scorer inherited a single-action expert-label collapse; model-BEV rank correlation is lower than oracle BEV; the spatial refresh still has a train/val gap; no hardware control, raw PWM, ROS/Nav2/Isaac/Habitat, SAM/NoMaD/ViNT integration, or control-safe claim was added.

@@ -398,6 +398,46 @@ Source comparison: OpenLORIS action_supervision_ok_fraction=1.0; DA3 phone geome
 
 Gate interpretation: Goal 10B produces the first real public robot-mounted frames that pass the robot-frame action sanity contract, but they remain replay-only and `control_safe=false`. Learned scorer v0 is allowed only as a local research/replay experiment if OpenLORIS license risk is accepted; otherwise collect/stage owned robot-frame logs with measured camera-to-base and base odom/commands first.
 
+## Gate 3.5: OpenLORIS robot-frame learned scorer v0
+
+Required before any control-facing trajectory integration:
+- real DINO features align with every OpenLORIS frame used by the robot-frame SpatialTrainPack
+- SpatialMemoryNet refresh trains/evals on OpenLORIS robot-frame BEV and reports per-source metrics
+- TrajectoryScorerNet v0 trains only from ActionLabelPack v3 action-supervision examples, not DA3/TUM geometry-only excluded frames
+- scorer eval runs on both oracle label BEV and refreshed model-predicted BEV
+- modeld/replayd can emit learned candidate trajectory scores when both spatial and scorer checkpoints are supplied
+- every learned-scorer artifact remains `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`
+- distribution collapse is reported, not hidden
+
+Goal 11A commands:
+```bash
+python -m homebrain.tools.setup_dino_teacher --model-id dinov2_vits14 --device cuda
+python -m homebrain.teachers.run_teacher --teacher dino --backend real --device cuda --model-id dinov2_vits14 --log runs/openloris_cafe1_2_route --out runs/openloris_cafe1_2_route/teacher_artifacts/dino --image-size 224
+python -m homebrain.train.train_spatial_v0 --dataset runs/openloris_cafe1_2_robot_frame_spatial_pack --features runs/openloris_cafe1_2_route/teacher_artifacts/dino --out runs/goal11a_spatial_openloris_refresh --max-steps 80 --batch-size 8 --device cuda
+python -m homebrain.train.eval_spatial_v0 --checkpoint runs/goal11a_spatial_openloris_refresh/checkpoint.pt --dataset runs/openloris_cafe1_2_robot_frame_spatial_pack --features runs/openloris_cafe1_2_route/teacher_artifacts/dino --out runs/goal11a_spatial_openloris_refresh_eval.json --split val --batch-size 16 --device cuda
+python -m homebrain.policies.train_trajectory_scorer_v0 --action-pack runs/goal10b_action_label_pack_v3 --source-name cafe1-1_2 --out runs/goal11a_trajectory_scorer_v0 --max-steps 200 --batch-size 32 --device cuda
+python -m homebrain.policies.eval_trajectory_scorer_v0 --checkpoint runs/goal11a_trajectory_scorer_v0/checkpoint.pt --action-pack runs/goal10b_action_label_pack_v3 --source-name cafe1-1_2 --bev-source oracle --out runs/goal11a_trajectory_scorer_openloris_oracle_all_eval.json --viz-out runs/goal11a_trajectory_scorer_openloris_oracle_all_viz --split all --device cuda
+python -m homebrain.brain.modeld --log runs/openloris_cafe1_2_route --checkpoint runs/goal11a_spatial_openloris_refresh/checkpoint.pt --features runs/openloris_cafe1_2_route/teacher_artifacts/dino --trajectory-scorer-checkpoint runs/goal11a_trajectory_scorer_v0/checkpoint.pt --out runs/goal11a_modeld_openloris_spatial_scorer --device cuda
+python -m homebrain.replay.replayd --log runs/openloris_cafe1_2_route --checkpoint runs/goal11a_spatial_openloris_refresh/checkpoint.pt --features runs/openloris_cafe1_2_route/teacher_artifacts/dino --trajectory-scorer-checkpoint runs/goal11a_trajectory_scorer_v0/checkpoint.pt --out runs/goal11a_replayed_openloris_spatial_scorer --device cuda
+python -m homebrain.policies.eval_trajectory_scorer_v0 --checkpoint runs/goal11a_trajectory_scorer_v0/checkpoint.pt --action-pack runs/goal10b_action_label_pack_v3 --source-name cafe1-1_2 --bev-source model --modeld runs/goal11a_modeld_openloris_spatial_scorer --out runs/goal11a_trajectory_scorer_openloris_model_bev_all_eval.json --viz-out runs/goal11a_trajectory_scorer_openloris_model_bev_all_viz --split all --device cuda
+python -m homebrain.eval.run_eval --log runs/goal11a_replayed_openloris_spatial_scorer --out runs/goal11a_replayed_openloris_spatial_scorer_eval.json
+python -m pytest -q
+```
+
+Current Goal 11A results:
+```text
+DINO OpenLORIS: frame_count=300, source_frame_count=300, backend=real, feature_shape=[16,16,384], mock=false, real_perception=true, runtime_dependency=false, control_safe=false.
+Spatial refresh train: train_loss_start=0.7155767210892269, train_loss_end=0.04073466932667153, loss_reduction_ratio=0.9430743509030497, val_loss=0.11438632508118947, bev_iou_or_proxy=0.4798779853309194, pose_delta_rmse=null, uncertainty_calibration_proxy=0.03969770980377992, inference_fps=148.49809030822888, robot_supervision_grade=public_robot_frame_geometry.
+Spatial standalone eval: val_loss=0.11612379550933838, bev_iou_or_proxy=0.47885076587166014, pose_delta_rmse=null, uncertainty_calibration_proxy=0.039988345156113304, inference_fps=59.89621184407719, failure_flags=["eval_loss_much_higher_than_train_loss"].
+TrajectoryScorerNet v0 train: OpenLORIS train/val examples=240/60, train_loss_start=2.2950071692466736, train_loss_end=0.2735627815127373, val_loss=0.27464908361434937, val_top1_action_agreement=1.0, val_rank_correlation_or_proxy=0.778611111111111, beats_random=true.
+Oracle label-BEV all-OpenLORIS eval: top1_action_agreement=1.0, selected_motion_fraction=1.0, selected_stop_fraction=0.0, action_entropy=0.0, dominant_action_fraction=1.0, rank_correlation_or_proxy=0.7823888888888874, collision_proxy_rate=0.0, coverage_gain_mean=21.0, unsafe_selected_rate=0.0, distribution_collapse_flag=true.
+Model-BEV all-OpenLORIS eval: top1_action_agreement=1.0, selected_motion_fraction=1.0, selected_stop_fraction=0.0, action_entropy=0.0, dominant_action_fraction=1.0, rank_correlation_or_proxy=0.7044444444444451, collision_proxy_rate=0.0, coverage_gain_mean=21.0, unsafe_selected_rate=0.0, distribution_collapse_flag=true.
+Replay with spatial+scorer checkpoint wrote 300 scored BrainOutputEvents with bad_flags=0; replay eval reported replay_determinism_pass=true.
+Full pytest: 55 passed.
+```
+
+Gate interpretation: Goal 11A proves a replay-only learned scorer can train, save/load, eval on oracle/model BEV, and flow through modeld/replay. It is not a control policy. The OpenLORIS expert labels for the 300-frame subset collapse to `straight_short`, and the learned scorer inherits that collapse while reporting `distribution_collapse_flag=true`. OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`, so these artifacts are local research/replay outputs only.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

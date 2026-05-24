@@ -138,6 +138,7 @@ def run_trajectory_scorer(
         "replay_only": True,
         "control_safe": False,
         "not_executed": True,
+        "product_training_approved": False,
         "raw_pwm_emitted": False,
         "source_metadata": source_metadata,
     }
@@ -356,6 +357,7 @@ def _decision_record(
         "replay_only": True,
         "control_safe": False,
         "not_executed": True,
+        "product_training_approved": False,
         "raw_pwm_emitted": False,
     }
 
@@ -390,6 +392,7 @@ def _eval_metrics(
         "replay_only": True,
         "control_safe": False,
         "not_executed": True,
+        "product_training_approved": False,
     }
 
 
@@ -509,4 +512,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

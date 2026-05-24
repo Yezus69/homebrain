@@ -290,6 +290,7 @@ def _robot_supervision_grade(manifest: dict[str, Any]) -> str:
     if isinstance(existing, str) and existing in {
         "weak_visual_geometry",
         "public_rgbd_anchor",
+        "public_robot_frame_geometry",
         "robot_frame_metric",
         "unknown",
     }:
