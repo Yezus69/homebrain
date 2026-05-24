@@ -21,6 +21,11 @@ from homebrain.teachers.scene_teacher import (
     write_scene_teacher_json,
 )
 from homebrain.tools.audit_scene_teacher_signal import audit_scene_teacher_signal
+from homebrain.tools.run_owned_geometry_probe import (
+    STATUS_BLOCKED_MISSING_TEACHER_SETUP,
+    STATUS_REVIEW_ONLY_NOT_TRAINABLE,
+    run_owned_geometry_probe,
+)
 
 
 def _owned_frame_route(root: Path, *, frame_count: int = 4) -> Path:
@@ -79,6 +84,42 @@ def _owned_frame_route(root: Path, *, frame_count: int = 4) -> Path:
     return route
 
 
+def _owned_probe_frames(root: Path, *, frame_count: int = 4) -> Path:
+    frames = root / "probe_frames"
+    frames.mkdir(parents=True)
+    for frame_id in range(frame_count):
+        pixels = np.zeros((3, 4, 3), dtype=np.uint8)
+        pixels[:, :, 0] = np.uint8(20 + frame_id * 15)
+        pixels[:, :, 1] = np.uint8(50 + frame_id * 10)
+        pixels[:, :, 2] = np.uint8(90 + frame_id * 5)
+        path = frames / f"frame_{frame_id:06d}.ppm"
+        with path.open("wb") as handle:
+            handle.write(b"P6\n4 3\n255\n")
+            handle.write(pixels.tobytes(order="C"))
+    return frames
+
+
+def _assert_no_motion_or_training_claims(root: Path) -> None:
+    for path in root.rglob("*.json"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        stack = [data]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    if key in {"cmd_vel", "cmd_vel_emitted"}:
+                        assert value in {None, False, 0}
+                    if key in {"raw_pwm", "raw_pwm_emitted"}:
+                        assert value in {None, False, 0}
+                    if key in {"control_safe", "control_safe_claim"}:
+                        assert value is False
+                    if key == "product_training_approved":
+                        assert value is False
+                    stack.append(value)
+            elif isinstance(item, list):
+                stack.extend(item)
+
+
 def test_fake_moge_scene_teacher_and_signal_audit_are_review_only(tmp_path: Path) -> None:
     route = _owned_frame_route(tmp_path)
     scene = tmp_path / "scene_moge_fake"
@@ -124,6 +165,76 @@ def test_fake_moge_scene_teacher_and_signal_audit_are_review_only(tmp_path: Path
     assert report["mask_source_distribution"]["floor_traversable_mask_source"]["teacher_output"] == 4
     assert json.loads(out_json.read_text(encoding="utf-8"))["next_allowed_use"] == "review_only"
     assert "next_allowed_use" in out_md.read_text(encoding="utf-8")
+
+
+def test_owned_geometry_probe_fake_backend_is_review_only_not_trainable(tmp_path: Path) -> None:
+    frames = _owned_probe_frames(tmp_path)
+    out = tmp_path / "probe_fake"
+
+    result = run_owned_geometry_probe(
+        frames_dir=frames,
+        out_dir=out,
+        camera_name="front_rgb",
+        fps=10.0,
+        teacher_name="moge",
+        backend_name="fake",
+        owned_or_license_approved=True,
+        max_frames=3,
+    )
+
+    assert result["status"] == STATUS_REVIEW_ONLY_NOT_TRAINABLE
+    assert result["steps"]["image_sequence_ingest"]["ok"] is True
+    assert result["steps"]["scene_teacher_run"]["ok"] is True
+    assert result["steps"]["scene_teacher_qa"]["attempted"] is True
+    assert result["steps"]["signal_audit"]["attempted"] is True
+    assert result["steps"]["signal_audit"]["next_allowed_use"] == "review_only"
+    assert result["steps"]["visual_review"]["attempted"] is True
+    assert result["visual_review_exists"] is True
+    assert (out / "result.json").exists()
+    assert (out / "result.md").exists()
+    assert (out / "visual_review" / "scene_teacher_review.ppm").exists()
+    assert json.loads((out / "result.json").read_text(encoding="utf-8"))["status"] == STATUS_REVIEW_ONLY_NOT_TRAINABLE
+    _assert_no_motion_or_training_claims(out)
+
+
+def test_owned_geometry_probe_missing_real_moge_setup_blocks_before_qa_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = _owned_probe_frames(tmp_path)
+    out = tmp_path / "probe_real_missing"
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ADAPTER", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_DIR", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_CHECKPOINT", raising=False)
+
+    result = run_owned_geometry_probe(
+        frames_dir=frames,
+        out_dir=out,
+        camera_name="front_rgb",
+        fps=10.0,
+        teacher_name="moge",
+        backend_name="real",
+        owned_or_license_approved=True,
+        model_dir=tmp_path / "missing_moge",
+        checkpoint=tmp_path / "missing_moge.pt",
+        max_frames=2,
+    )
+
+    assert result["status"] == STATUS_BLOCKED_MISSING_TEACHER_SETUP
+    assert result["fake_fallback_used"] is False
+    assert result["steps"]["scene_teacher_run"]["attempted"] is True
+    assert result["steps"]["scene_teacher_run"]["ok"] is False
+    assert result["teacher_artifacts_exist"] is False
+    assert result["steps"]["scene_teacher_qa"]["attempted"] is False
+    assert result["steps"]["signal_audit"]["attempted"] is False
+    assert result["steps"]["visual_review"]["attempted"] is False
+    assert not Path(result["paths"]["scene_teacher_manifest"]).exists()
+    assert not Path(result["paths"]["qa_path"]).exists()
+    assert not Path(result["paths"]["audit_json_path"]).exists()
+    missing_fields = {item["field"] for item in result["missing_setup_fields"]}
+    assert {"HOMEBRAIN_MOGE_ADAPTER", "model_dir", "checkpoint"} <= missing_fields
+    assert result["retry_command"].startswith("python -m homebrain.tools.run_owned_geometry_probe")
+    assert json.loads((out / "result.json").read_text(encoding="utf-8"))["status"] == STATUS_BLOCKED_MISSING_TEACHER_SETUP
+    _assert_no_motion_or_training_claims(out)
 
 
 def test_signal_audit_blocks_invented_sensor_claims(tmp_path: Path) -> None:

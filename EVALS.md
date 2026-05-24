@@ -1205,3 +1205,44 @@ audit, or visual review artifact exists yet. The audit vocabulary was split into
 `review_only`, `single_frame_geometry_pretrain_candidate`,
 `temporal_memory_pretrain_candidate`, and `blocked`; targeted tests and full
 pytest pass.
+
+## Gate 1.12: single owned geometry production probe
+
+The current active path is one vertical command. It imports owned frames, runs
+the requested scene teacher backend, runs SceneTeacherPack QA only when teacher
+artifacts exist, runs `audit_scene_teacher_signal` only when QA exists, writes a
+visual review artifact only when teacher artifacts exist, and always writes
+`result.json` plus `result.md`.
+
+Single current production-probe command:
+```bash
+python -m homebrain.tools.run_owned_geometry_probe --frames data/inbox/room_walk_001/frames --out runs/goal16a_owned_geometry_probe_moge_real --camera front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved
+```
+
+Operator rule: do not use the separate ingest, scene-teacher, QA, audit, or
+visualization commands as the production path unless debugging this probe. Those
+commands remain implementation steps behind the probe.
+
+Probe statuses:
+```text
+BLOCKED_MISSING_TEACHER_SETUP
+REVIEW_ONLY_NOT_TRAINABLE
+REAL_REVIEW_ONLY_NOT_TRAINABLE
+SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE
+TEMPORAL_MEMORY_PRETRAIN_CANDIDATE
+BLOCKED_SIGNAL_AUDIT
+```
+
+Fake backend rule: `--backend fake` may only produce
+`REVIEW_ONLY_NOT_TRAINABLE` and is never training signal.
+
+Cleanup/freeze note: policy, scorer, and memory-action goals are frozen until a
+real MoGe or VGGT SceneTeacherPack exists for owned or license-approved indoor
+frames and passes the signal audit beyond review-only. The active blocker is
+real teacher setup, not policy tuning.
+
+Current Goal 16A outcome: the single probe command imported `350` owned frames
+to `runs/goal16a_owned_geometry_probe_moge_real/route` and wrote
+`runs/goal16a_owned_geometry_probe_moge_real/result.json` with
+`status=BLOCKED_MISSING_TEACHER_SETUP`. No fake fallback was used, no real
+SceneTeacherPack exists, and QA/audit/visual review were not attempted.

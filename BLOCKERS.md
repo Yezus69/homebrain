@@ -1,37 +1,41 @@
 # BLOCKERS.md
 
-## 2026-05-24 - Goal 15C real MoGe owned-route run blocked by missing local MoGe setup
+## Active Blockers
 
-Exact failure: `python -m homebrain.teachers.run_scene_teacher --teacher moge
---backend real --log runs\goal15c_room_walk_001_route --out
-runs\goal15c_room_walk_001_route\teacher_artifacts\moge_scene_v0_real` did not
-write a real SceneTeacherPack. The CLI reported: `moge scene teacher
-unavailable: Real MoGe backend requires a local external/moge checkout via
---model-dir or HOMEBRAIN_MOGE_DIR, or HOMEBRAIN_MOGE_ADAPTER=module:function.
-HomeBrain does not clone repositories during teacher runs.`
+### 2026-05-24 - Goal 16A owned geometry probe blocked by missing real MoGe setup
 
-Likely cause: the owned inbox frames exist and were imported with explicit
-approval, but this workspace has no `external/moge`, no MoGe checkpoint under
-`external/models`, and no configured `HOMEBRAIN_MOGE_ADAPTER`,
-`HOMEBRAIN_MOGE_DIR`, or `HOMEBRAIN_MOGE_CHECKPOINT`. `external/models` contains
-only `da3`.
+Exact failure: `python -m homebrain.tools.run_owned_geometry_probe --frames
+data\inbox\room_walk_001\frames --out runs\goal16a_owned_geometry_probe_moge_real
+--camera front_rgb --fps 10 --teacher moge --backend real
+--owned-or-license-approved` wrote
+`runs\goal16a_owned_geometry_probe_moge_real\result.json` with
+`status=BLOCKED_MISSING_TEACHER_SETUP`. The scene-teacher step reported: `Real
+MoGe backend requires a local external/moge checkout via --model-dir or
+HOMEBRAIN_MOGE_DIR, or HOMEBRAIN_MOGE_ADAPTER=module:function. HomeBrain does
+not clone repositories during teacher runs.`
 
-Minimal next repair action: install or clone MoGe outside HomeBrain's teacher run
-path, place the selected checkpoint locally, and set `HOMEBRAIN_MOGE_DIR` plus
-`HOMEBRAIN_MOGE_CHECKPOINT` or provide a HomeBrain-compatible
-`HOMEBRAIN_MOGE_ADAPTER=module:function`. Then rerun the Goal 15C real backend
-on `runs\goal15c_room_walk_001_route`, followed by `qa_scene_teacher`,
-`audit_scene_teacher_signal`, and a visual RGB/depth/confidence/floor/obstacle
-review artifact.
+Likely cause: the owned inbox frames exist and import cleanly, but this
+workspace has no `external/moge`, no local MoGe checkpoint, and no configured
+`HOMEBRAIN_MOGE_ADAPTER`, `HOMEBRAIN_MOGE_DIR`, or
+`HOMEBRAIN_MOGE_CHECKPOINT`.
 
-Command output summary: `python -m homebrain.ingest.image_sequence --frames
-data\inbox\room_walk_001\frames --out runs\goal15c_room_walk_001_route --camera
-front_rgb --fps 10 --owned-or-license-approved` imported `350` frames with `0`
-image load errors and `owned_or_license_approved=true`. The real MoGe command
-stopped before artifact creation; `runs\goal15c_room_walk_001_route\teacher_artifacts\moge_scene_v0_real`
-does not exist. No SceneTeacherPack QA, signal audit, or visual review artifact
-was possible. Py_compile passed, targeted tests passed with `5 passed`, and full
-pytest passed with `95 passed`.
+Minimal next repair action: install or clone MoGe outside HomeBrain's teacher
+run path, place the selected checkpoint locally, and set `HOMEBRAIN_MOGE_DIR`
+plus `HOMEBRAIN_MOGE_CHECKPOINT` or provide a HomeBrain-compatible
+`HOMEBRAIN_MOGE_ADAPTER=module:function`. Then rerun the same Goal 16A probe
+command. Do not tune policies, scorers, or memory-action goals until this real
+teacher signal exists and passes audit beyond review-only.
+
+Command output summary: the probe imported `350` frames with `0` image load
+errors and `owned_or_license_approved=true`. No real SceneTeacherPack exists, no
+fake fallback was used, and no SceneTeacherPack QA, signal audit, or visual
+review artifact was attempted.
+
+## Historical / Non-active Blockers
+
+The entries below are retained for audit context. They are not the active
+production path. Goal 16A freezes policy/scorer/memory-action work until the
+active real scene-teacher blocker above is repaired.
 
 ## 2026-05-24 - Goal 10B TUM Pioneer robot-frame BEV blocked by missing transform semantics
 

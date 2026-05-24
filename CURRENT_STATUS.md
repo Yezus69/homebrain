@@ -6,17 +6,16 @@ default read-list.
 
 ## Current objective
 
-Goal 15C completed on the setup-blocker branch: the owned
-`data/inbox/room_walk_001/frames` route was imported with explicit approval and
-the real MoGe CLI was attempted, but this workspace still lacks a local MoGe
-checkout/checkpoint or `HOMEBRAIN_MOGE_ADAPTER`. No real SceneTeacherPack, QA,
-audit, or visual review artifact could be produced.
+Goal 16A completed: the repo now has one active production-directed owned-frame
+geometry probe command. It imports owned frames, attempts the requested real or
+fake scene teacher, conditionally runs QA/audit/visual review only when upstream
+artifacts exist, and writes `result.json` plus `result.md`.
 
 ## Last completed goal
 
-Goal 15C: real MoGe owned-route setup check. The route import and verification
-tests pass, audit allowed-use semantics were split, and the exact missing real
-MoGe setup is recorded as an active blocker.
+Goal 16A: contract the repo around one production geometry-probe path. The real
+owned MoGe probe currently answers `BLOCKED_MISSING_TEACHER_SETUP` because this
+workspace still lacks local MoGe assets or `HOMEBRAIN_MOGE_ADAPTER`.
 
 ## Current implementation status
 
@@ -67,14 +66,68 @@ MoGe setup is recorded as an active blocker.
 - Goal 15C imported `data/inbox/room_walk_001/frames` to
   `runs/goal15c_room_walk_001_route` with `owned_or_license_approved=true`, but
   real MoGe did not run because local MoGe assets/adapters are missing.
+- Goal 16A added `homebrain.tools.run_owned_geometry_probe` as the single active
+  operator command for the current production geometry path. It wraps
+  image-sequence ingest, scene teacher run, scene-teacher QA, signal audit,
+  visual review, and final result reporting with explicit skip behavior when
+  upstream artifacts do not exist.
+- Policy, scorer, and memory-action goals are frozen until a real MoGe or VGGT
+  SceneTeacherPack exists on owned or license-approved frames and passes signal
+  audit beyond review-only.
 - Owned image/video route metadata can now explicitly record
   `owned_or_license_approved`; the audit blocks missing approval, invented
   IMU/odom/command streams, and robot-frame truth claims without measured
   camera-to-base plus base pose/odom.
-- Active blockers are tracked in `BLOCKERS.md`; resolved old blockers are archived
-  under `docs/blockers_archive/`.
+- Active blockers are tracked first in `BLOCKERS.md`; older non-active blockers
+  are separated below them for history.
 
 ## Goal completion log
+
+### 028 - Goal 16A single owned geometry production probe
+
+Objective attempted: stop feature sprawl by adding one production-directed
+vertical command that answers whether HomeBrain can produce a real spatial
+supervision artifact from owned indoor frames today, without training any model.
+
+Files changed: added `homebrain/tools/run_owned_geometry_probe.py`; updated
+`tests/test_goal15b_scene_teacher_signal.py`, `EVALS.md`, `BLOCKERS.md`, and
+`CURRENT_STATUS.md`.
+
+Commands run: required context reads; `python -m py_compile
+homebrain\tools\run_owned_geometry_probe.py`; production probe `python -m
+homebrain.tools.run_owned_geometry_probe --frames
+data\inbox\room_walk_001\frames --out runs\goal16a_owned_geometry_probe_moge_real
+--camera front_rgb --fps 10 --teacher moge --backend real
+--owned-or-license-approved`; targeted tests `python -m pytest
+tests\test_goal15b_scene_teacher_signal.py -q`; full tests `python -m pytest -q`.
+
+Pass/fail results: py_compile passed. The production probe passed as a command
+and wrote a final result with `status=BLOCKED_MISSING_TEACHER_SETUP`; this is the
+correct answer for this workspace because real MoGe setup is absent. Targeted
+tests passed with `7 passed`. Full pytest passed with `97 passed`.
+
+Artifacts created: `runs/goal16a_owned_geometry_probe_moge_real/result.json`,
+`runs/goal16a_owned_geometry_probe_moge_real/result.md`, and
+`runs/goal16a_owned_geometry_probe_moge_real/route/` with copied approved image
+frames and route metadata. No real MoGe SceneTeacherPack, QA JSON, signal audit,
+or visual review artifact was created.
+
+Metrics observed: the probe imported `350` frames with `0` image load errors and
+`owned_or_license_approved=true`. The scene teacher run was attempted with
+`teacher=moge` and `backend=real`, then stopped before artifacts. Exact missing
+setup fields in `result.json`: `HOMEBRAIN_MOGE_ADAPTER`,
+`external/moge`, and `external/moge/checkpoints/moge.pt`.
+
+Blockers/risks: active path is now the single probe command, but real teacher
+signal is still unavailable in this workspace. Fake backend tests produce only
+`REVIEW_ONLY_NOT_TRAINABLE`. No model was trained, no new teacher type, policy,
+scorer, dataset, SAM2, ROS, Nav2, Isaac, Habitat, sim, `cmd_vel`, or raw PWM was
+added.
+
+Recommended next goal: install or point to a local MoGe checkout/checkpoint or a
+HomeBrain-compatible `HOMEBRAIN_MOGE_ADAPTER=module:function`, then rerun the
+same Goal 16A command and inspect the resulting QA, signal audit, and visual
+review artifacts if real teacher artifacts are produced.
 
 ### 027 - Goal 15C real MoGe owned-route setup check
 
