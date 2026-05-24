@@ -8,6 +8,11 @@ import numpy as np
 import torch
 
 from homebrain.brain.spatial_memory_v0 import SPATIAL_MEMORY_V0_SOURCE, load_checkpoint
+from homebrain.brain.spatial_memory_v1 import (
+    SPATIAL_MEMORY_V1_SOURCE,
+    SpatialMemoryState,
+    load_checkpoint as load_v1_checkpoint,
+)
 from homebrain.data.spatial_dataset import write_deterministic_npz
 from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, event_identity
 from homebrain.policies.candidate_trajectories import generate_default_candidates
@@ -140,10 +145,11 @@ def write_spatial_model_outputs(
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
         device_name=device_name,
     )
+    suffix = "spatial-v1-model" if outputs and outputs[0].source == SPATIAL_MEMORY_V1_SOURCE else "spatial-v0-model"
     write_segment(
         out_dir,
         outputs,
-        segment_id=f"{manifest.segment_id}-spatial-v0-model",
+        segment_id=f"{manifest.segment_id}-{suffix}",
         artifact_files=artifacts,
     )
 
@@ -158,6 +164,17 @@ def spatial_model_outputs(
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
 ) -> tuple[list[BrainOutputEvent], list[str]]:
+    if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
+        if trajectory_scorer_checkpoint is not None:
+            raise ValueError("trajectory scorer integration is currently only supported for SpatialMemoryNet v0")
+        return _spatial_v1_model_outputs(
+            events,
+            out_dir=out_dir,
+            checkpoint=checkpoint,
+            feature_dir=feature_dir,
+            device_name=device_name,
+        )
+
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_checkpoint(checkpoint, map_location=device)
     model.to(device)
@@ -210,6 +227,52 @@ def spatial_model_outputs(
             start_timestamp_ns=start_timestamp_ns,
             device=device,
         )
+        brain_outputs.append(output)
+        artifact_files.append(artifact)
+    return brain_outputs, artifact_files
+
+
+def _spatial_v1_model_outputs(
+    events: Iterable[Event],
+    *,
+    out_dir: str | Path,
+    checkpoint: str | Path,
+    feature_dir: str | Path | None = None,
+    device_name: str | None = None,
+) -> tuple[list[BrainOutputEvent], list[str]]:
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model, payload = load_v1_checkpoint(checkpoint, map_location=device)
+    model.to(device)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    resolved_feature_dir = feature_dir or metadata.get("feature_artifacts")
+    if not isinstance(resolved_feature_dir, (str, Path)):
+        raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
+    feature_store = DINOFeatureStore(resolved_feature_dir)
+    output_root = Path(out_dir)
+    frames = [event for event in events if isinstance(event, FrameEvent)]
+    start_timestamp_ns = min((frame.timestamp_ns for frame in frames), default=0)
+    brain_outputs: list[BrainOutputEvent] = []
+    artifact_files: list[str] = []
+    state: SpatialMemoryState | None = None
+    previous_pose_delta: torch.Tensor | None = None
+    previous_sequence_camera: tuple[str, str] | None = None
+    for frame in frames:
+        current_key = (frame.sequence_id, frame.camera_id)
+        reset = previous_sequence_camera is None or current_key != previous_sequence_camera
+        output, artifact, state, previous_pose_delta = _spatial_v1_output_for_frame(
+            model=model,
+            frame=frame,
+            feature_store=feature_store,
+            output_root=output_root,
+            checkpoint=Path(checkpoint),
+            feature_dir=Path(resolved_feature_dir),
+            start_timestamp_ns=start_timestamp_ns,
+            previous_pose_delta=previous_pose_delta if not reset else None,
+            reset_memory=reset,
+            state=None if reset else state,
+            device=device,
+        )
+        previous_sequence_camera = current_key
         brain_outputs.append(output)
         artifact_files.append(artifact)
     return brain_outputs, artifact_files
@@ -348,6 +411,129 @@ def _spatial_output_for_frame(
         ),
         relative_artifact,
     )
+
+
+def _spatial_v1_output_for_frame(
+    *,
+    model: torch.nn.Module,
+    frame: FrameEvent,
+    feature_store: DINOFeatureStore,
+    output_root: Path,
+    checkpoint: Path,
+    feature_dir: Path,
+    start_timestamp_ns: int,
+    previous_pose_delta: torch.Tensor | None,
+    reset_memory: bool,
+    state: SpatialMemoryState | None,
+    device: torch.device,
+) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor]:
+    patch_features, _cls_feature = feature_store.load_for_frame(frame)
+    features = torch.from_numpy(np.transpose(patch_features, (2, 0, 1))[None, ...].astype(np.float32)).to(device)
+    timestamp_s = torch.tensor(
+        [[(frame.timestamp_ns - start_timestamp_ns) / 1_000_000_000.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sensor_context_dim = max(0, int(getattr(model.config, "sensor_dim", 5)) - 1)
+    sensor_mask = torch.zeros((1, sensor_context_dim), dtype=torch.float32, device=device)
+    pose_to_current = previous_pose_delta.view(1, 3).to(device) if previous_pose_delta is not None else None
+    pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if previous_pose_delta is not None else None
+    model.eval()
+    with torch.no_grad():
+        outputs = model.step(
+            features,
+            timestamp_s,
+            sensor_mask,
+            memory_state=state,
+            pose_delta_to_current=pose_to_current,
+            pose_delta_to_current_mask=pose_mask,
+            force_reset=torch.tensor([reset_memory], dtype=torch.bool, device=device),
+        )
+    current_logits = outputs["current_bev_logits"][0].detach().cpu().numpy().astype(np.float32)
+    memory_logits = outputs["fused_memory_bev_logits"][0].detach().cpu().numpy().astype(np.float32)
+    current_probabilities = torch.sigmoid(outputs["current_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
+    memory_probabilities = torch.sigmoid(outputs["fused_memory_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
+    uncertainty_grid = outputs["uncertainty_grid"][0, 0].detach().cpu().numpy().astype(np.float32)
+    uncertainty_scalar = float(outputs["uncertainty_scalar"][0].detach().cpu())
+    pose_delta = tuple(float(value) for value in outputs["pose_delta"][0].detach().cpu().numpy())
+    next_pose_delta = outputs["pose_delta"][0].detach()
+    next_state = outputs["memory_state"].detach()
+    debug = outputs["debug"]
+    memory_used = bool(debug["memory_used"][0].detach().cpu())
+    pose_warp_used = bool(debug["pose_warp_used"][0].detach().cpu())
+    pose_warp_valid = bool(debug["pose_warp_valid"][0].detach().cpu())
+    memory_reset = bool(debug["memory_reset"][0].detach().cpu())
+
+    relative_artifact = f"brain_outputs/spatial_v1/{frame.camera_id}_{frame.frame_id:06d}.npz"
+    artifact_path = output_root / relative_artifact
+    arrays = {
+        "current_bev_logits": current_logits,
+        "memory_bev_logits": memory_logits,
+        "current_bev_free_prob": current_probabilities[0].astype(np.float32),
+        "current_bev_occupied_prob": current_probabilities[1].astype(np.float32),
+        "current_bev_unknown_prob": current_probabilities[2].astype(np.float32),
+        "current_bev_traversable_prob": current_probabilities[3].astype(np.float32),
+        "current_bev_risky_prob": current_probabilities[4].astype(np.float32),
+        "memory_bev_free_prob": memory_probabilities[0].astype(np.float32),
+        "memory_bev_occupied_prob": memory_probabilities[1].astype(np.float32),
+        "memory_bev_unknown_prob": memory_probabilities[2].astype(np.float32),
+        "memory_bev_traversable_prob": memory_probabilities[3].astype(np.float32),
+        "memory_bev_risky_prob": memory_probabilities[4].astype(np.float32),
+        "uncertainty_grid": uncertainty_grid,
+        "memory_observed_mask": next_state.observed_mask[0, 0].detach().cpu().numpy().astype(np.float32),
+        "memory_used": np.asarray([memory_used], dtype=np.bool_),
+        "pose_warp_used": np.asarray([pose_warp_used], dtype=np.bool_),
+        "pose_warp_valid": np.asarray([pose_warp_valid], dtype=np.bool_),
+        "memory_reset": np.asarray([memory_reset], dtype=np.bool_),
+    }
+    write_deterministic_npz(artifact_path, arrays)
+    input_id = event_identity(frame)
+    return (
+        BrainOutputEvent(
+            timestamp_ns=frame.timestamp_ns,
+            sequence_id=frame.sequence_id,
+            source=SPATIAL_MEMORY_V1_SOURCE,
+            input_event_ids=[input_id],
+            pose_delta=pose_delta,  # type: ignore[arg-type]
+            pose_confidence=max(0.0, min(1.0, 1.0 - uncertainty_scalar)),
+            local_bev_ref=relative_artifact,
+            candidate_trajectories=None,
+            selected_trajectory_id=None,
+            cmd_vel=None,
+            uncertainty=uncertainty_scalar,
+            stop_reason="spatial_memory_v1_representation_pretraining_only_no_control",
+            debug={
+                "mock": False,
+                "model": SPATIAL_MEMORY_V1_SOURCE,
+                "checkpoint": checkpoint.as_posix(),
+                "feature_artifacts": feature_dir.as_posix(),
+                "camera_id": frame.camera_id,
+                "output_channels": list(BEV_OUTPUT_CHANNELS),
+                "local_bev_shape": list(memory_probabilities.shape[1:]),
+                "memory_used": memory_used,
+                "pose_warp_used": pose_warp_used,
+                "pose_warp_valid": pose_warp_valid,
+                "memory_reset": memory_reset,
+                "missing_pose_behavior": str(getattr(model.config, "missing_pose_behavior", "unknown")),
+                "representation_pretraining_only": True,
+                "control_safe": False,
+                "replay_only": True,
+                "not_executed": True,
+                "product_training_approved": False,
+                "cmd_vel_emitted": False,
+                "input_frame_id": frame.frame_id,
+            },
+        ),
+        relative_artifact,
+        next_state,
+        next_pose_delta,
+    )
+
+
+def _checkpoint_model_name(checkpoint: str | Path) -> str:
+    payload = torch.load(Path(checkpoint), map_location="cpu", weights_only=False)
+    value = payload.get("model_name") if isinstance(payload, dict) else None
+    return str(value) if isinstance(value, str) else ""
 
 
 def _metadata_float(metadata: dict[str, object], key: str, default: float) -> float:

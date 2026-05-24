@@ -154,6 +154,48 @@ python -m homebrain.replay.replayd --log runs/tum_freiburg1_xyz_route --checkpoi
 
 All Goal 7B checkpoints and BrainOutputEvents remain `representation_pretraining_only=true` and `control_safe=false`. There is still no trajectory scorer.
 
+## Gate 2.2: SpatialMemoryNet v1 temporal egocentric memory
+
+Required before using memory as evidence:
+- explicit persistent BEV memory state
+- SE(2) pose-aware memory warp with documented missing-pose behavior
+- temporal windows grouped by source/sequence/camera and sorted by timestamp
+- online-style fused-memory labels built from labels only, never model predictions
+- eval compares current frame and fused memory against a baseline
+- modeld/replay keeps memory across frames and resets on sequence boundaries
+- every artifact remains `replay_only=true`, `not_executed=true`, and `control_safe=false`
+- no `cmd_vel` is emitted
+
+SpatialMemoryNet v1 metrics:
+```text
+current_bev_iou_or_proxy
+fused_memory_bev_iou_or_proxy
+unknown_reduction_vs_current
+temporal_reprojection_consistency_iou
+pose_delta_rmse
+uncertainty_calibration_proxy
+inference_fps
+memory_warp_valid_fraction
+memory_reset_fraction
+per-source metrics
+route-out metrics when possible
+memory_benefit_pass
+failure_flags
+```
+
+Current Goal 12A commands:
+```bash
+python -m homebrain.train.train_spatial_v1 --dataset runs\goal11b_nightly\spatial_packs\openloris_cafe1_1_2_spatial_pack --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12a_spatial_memory_v1_poc --max-steps 2 --window-length 2 --batch-size 32 --device cpu --missing-pose-behavior reset
+python -m homebrain.train.eval_spatial_v1 --checkpoint runs\goal12a_spatial_memory_v1_poc\checkpoint.pt --dataset runs\goal11b_nightly\spatial_packs\openloris_cafe1_1_2_spatial_pack --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12a_spatial_memory_v1_eval.json --split val --window-length 2 --batch-size 32 --device cpu --baseline-checkpoint-v0 runs\goal11b_nightly\training\A_spatial_dino_bev_pose\seed_17\checkpoint.pt --report-json runs\goal12a_spatial_memory_v1_report.json --report-md runs\goal12a_spatial_memory_v1_report.md
+python -m homebrain.brain.modeld --log runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --checkpoint runs\goal12a_spatial_memory_v1_poc\checkpoint.pt --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12a_modeld_openloris_spatial_v1 --device cpu
+python -m homebrain.replay.replayd --log runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --checkpoint runs\goal12a_spatial_memory_v1_poc\checkpoint.pt --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --out runs\goal12a_replayed_openloris_spatial_v1 --device cpu
+python -m homebrain.eval.run_eval --log runs\goal12a_replayed_openloris_spatial_v1 --out runs\goal12a_replayed_openloris_spatial_v1_eval.json
+```
+
+Current Goal 12A result: v1 wiring, temporal supervision, modeld/replay persistence, and tests pass, but the tiny 2-step PoC does not pass the memory-benefit gate. Eval on OpenLORIS `cafe1-1_2` val windows reported `current_bev_iou_or_proxy=0.15507882038752238`, `fused_memory_bev_iou_or_proxy=0.14774751861890156`, `unknown_reduction_vs_current=0.2683714876572291`, `temporal_reprojection_consistency_iou=0.8004292050997416`, `pose_delta_rmse=0.12935527201781985`, `memory_warp_valid_fraction=0.5`, and `memory_benefit_pass=false` versus the stronger v0 baseline `bev_iou_or_proxy=0.5605437725782394`. The root cause is recorded as `current_bev_regressed_beyond_tolerance`.
+
+Gate interpretation: Goal 12A establishes real temporal memory infrastructure and honest evaluation. It does not prove a better spatial model yet. All v1 artifacts remain replay/eval only, OpenLORIS license review remains pending, and no control/product-safety claim is made.
+
 ## Gate 3: trajectory scorer
 
 Required before control integration:

@@ -123,6 +123,15 @@ Use explicit spatial memory:
 
 Do not rely only on hidden recurrent/transformer state.
 
+Current SpatialMemoryNet v1 implements the first local egocentric memory path:
+per-frame DINO features produce current BEV logits, a persistent BEV memory
+state is warped by robot-relative SE(2) pose deltas, and current observations
+are fused into memory with explicit missing-pose behavior (`reset`, `no_warp`,
+or `masked_update`). The v1 modeld/replay path resets memory on sequence
+boundaries and writes current BEV, memory BEV, uncertainty, observed-mask, and
+memory debug artifacts. This is still representation pretraining and replay
+evaluation only; it is not a control-safe planner and it emits no `cmd_vel`.
+
 ## Simulation philosophy
 
 Simulation is useful for causal labels, collision/recovery cases, and sanity checks. It is not the source of truth for real-home robustness.
