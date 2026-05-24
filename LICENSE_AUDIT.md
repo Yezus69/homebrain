@@ -28,7 +28,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | ARKitScenes | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | ScanNet / ScanNet++ | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | TUM RGB-D SLAM Dataset | public RGB-D / pose geometry anchor | UNVERIFIED / pending_human_review | No | Official page lists CC BY 4.0; Goal 10B downloaded/imported `freiburg2_pioneer_slam` but kept it out of robot-frame action labels because camera-to-base/base-pose semantics are missing. |
-| OpenLORIS-Scene | public robot-mounted indoor RGB-D/IMU/odom/pose bridge | UNVERIFIED / pending_human_review | No | Official dataset page lists CC BY-ND 4.0; Goal 10B imported `cafe1-1_2` and used it for replay-only robot-frame action sanity, not product/runtime approval. |
+| OpenLORIS-Scene | public robot-mounted indoor RGB-D/IMU/odom/pose bridge | PoC allowed / product pending_human_review | No | Official dataset page lists CC BY-ND 4.0; local HomeBrain PoC training/eval is allowed, but product training/runtime approval and derived dataset redistribution remain blocked. |
 | Ego4D / EPIC-KITCHENS | visual clutter/dynamics data | UNVERIFIED | No | Verify dataset terms. |
 
 ## Rule
@@ -185,3 +185,14 @@ Goal 11B did not add new external model families, datasets, simulator/middleware
 - Required at runtime: no. DINO, SpatialMemoryNet, and TrajectoryScorerNet are used only for offline/replay Goal 11B experiments.
 - Mock/fallback status: no fake public routes, intrinsics, transforms, odometry, or poses were substituted. Geometry-only DA3/TUM/phone frames were explicitly excluded from ActionLabelPack v4 action supervision.
 - Risk: CC BY-ND terms still need human/legal review before any training/product use; true leave-one-route-out folds still diagnose held-out action-distribution concentration on corridor and office; all artifacts remain `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.
+
+## Goal 12C dependency update
+
+Goal 12C did not add new external datasets, model families, simulator/middleware, hardware-control libraries, or product-runtime dependencies.
+
+- OpenLORIS-Scene was reclassified for HomeBrain policy as local PoC training/eval allowed, not product-approved training data.
+- Required OpenLORIS flags: `poc_training_eval_allowed=true`, `product_training_approved=false`, `runtime_dependency=false`, `derived_dataset_redistribution_allowed=false`, `attribution_required=true`, and `license_name=CC BY-ND 4.0`.
+- Intended use: local replay/eval proof-of-concept for robot-frame BEV, SpatialMemoryV1 memory validation, future-hidden-cell evaluation, deterministic occlusion stress, and true leave-one-route-out diagnostics.
+- Required at runtime: no.
+- Redistribution: OpenLORIS-derived generated datasets/artifacts/checkpoints/reports are not approved for redistribution and should remain under ignored generated-data paths such as `runs/` or local `data/public/`.
+- Risk: this policy does not approve OpenLORIS for product training, runtime dependency, control safety, or distribution of derived datasets. Any product use still requires human/legal review.

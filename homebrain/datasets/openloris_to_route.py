@@ -21,6 +21,7 @@ from homebrain.datasets.openloris_scene import (
     timestamp_ns,
     validate_sequence_dir,
 )
+from homebrain.datasets.usage_policy import openloris_usage_policy
 from homebrain.ingest.image_sequence import read_image_size
 from homebrain.ingest.metadata import ROUTE_SOURCE_METADATA_FILE, ROUTE_SOURCE_SCHEMA_VERSION, write_route_metadata
 from homebrain.messages.schema import Event, FrameEvent, ImuEvent, JsonDict, OdomEvent, PoseEvent, deterministic_json
@@ -130,6 +131,12 @@ def openloris_to_route(
         "official_page": OPENLORIS_SOURCE_URL,
         "license_name": OPENLORIS_LICENSE_NAME,
         "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
+        "usage_policy": openloris_usage_policy(),
+        "poc_training_eval_allowed": True,
+        "product_training_approved": False,
+        "runtime_dependency": False,
+        "derived_dataset_redistribution_allowed": False,
+        "attribution_required": True,
         "depth_scale": OPENLORIS_DEPTH_SCALE,
         "intrinsics": intrinsics,
         "camera_to_base": camera_to_base,
@@ -201,6 +208,12 @@ def openloris_to_route(
         "robot_frame_truth": bool(robot_frame_truth_candidate),
         "license_name": OPENLORIS_LICENSE_NAME,
         "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
+        "usage_policy": openloris_usage_policy(),
+        "poc_training_eval_allowed": True,
+        "product_training_approved": False,
+        "runtime_dependency": False,
+        "derived_dataset_redistribution_allowed": False,
+        "attribution_required": True,
         "control_safe": False,
         "control_safe_claim": False,
         "user_owned_or_license_unknown": False,

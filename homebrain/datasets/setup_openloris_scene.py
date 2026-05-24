@@ -26,6 +26,7 @@ from homebrain.datasets.openloris_scene import (
     validate_sequence_dir,
     write_json,
 )
+from homebrain.datasets.usage_policy import openloris_usage_policy
 
 
 def setup_openloris_scene(
@@ -62,6 +63,12 @@ def setup_openloris_scene(
         ),
         "license_name": OPENLORIS_LICENSE_NAME,
         "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
+        "usage_policy": openloris_usage_policy(),
+        "poc_training_eval_allowed": True,
+        "product_training_approved": False,
+        "runtime_dependency": False,
+        "derived_dataset_redistribution_allowed": False,
+        "attribution_required": True,
         "required_runtime": False,
         "control_safe": False,
         "status": "not_started",

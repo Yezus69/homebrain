@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 12B repaired SpatialMemoryNet v1 memory semantics and parity evaluation. v1 memory now initializes as semantic unknown, update masks no longer trust the full grid when observations are missing, modeld/replay default to route pose/odom warp when available, and the v1 current BEV path can shape-safely warm start from the Goal 11B v0 checkpoint. Multi-route OpenLORIS replay/eval reports now pass current-BEV parity before claiming memory benefit. No control claims are made; OpenLORIS license review remains pending.
+Goal 12C reclassified OpenLORIS as local PoC training/eval allowed but not product-approved, and added hard SpatialMemoryNet v1 validation that avoids label-derived update masks at eval time. The Goal 12C report passes deployment-style memory, future-hidden-cell memory, occlusion recovery, pose ablation, and true leave-one-route-out structure gates. All artifacts remain replay/eval only with `control_safe=false`, `not_executed=true`, `runtime_dependency=false`, and `product_training_approved=false`.
 
 ## Last completed goal
 
-Goal 12B: SpatialMemoryNetV1 parity plus memory-sanity repair, including unknown-prior memory init, conservative update-mask semantics, route pose/odom warp defaults, shape-safe v0 warm start, window1 parity eval, multi-route window4/window8 route-pose sweeps, modeld/replay safety verification, reports, docs, and full verification. The previous Goal 12A current-BEV regression blocker is resolved for replay/eval representation pretraining.
+Goal 12C: OpenLORIS PoC policy plus SpatialMemoryNetV1 hard validation, including dataset usage policy flags, deployment-style v1 eval with model/replay update masks only, future-observation hidden-cell scoring, deterministic occlusion/dropout stress, pose ablations, true leave-one-route-out v1 folds for cafe/office/corridor, reports, tests, docs, and full verification.
 
 ## Current implementation status
 
@@ -81,6 +81,10 @@ Goal 12B: SpatialMemoryNetV1 parity plus memory-sanity repair, including unknown
 - v1 train/eval now supports shape-safe warm start from a SpatialMemoryNet v0 checkpoint for matching encoder/current-BEV-head tensors, plus a memory-disabled/window1 parity path gated against the same validation split.
 - Goal 12B reports exist at `runs/goal12b_spatial_memory_v1_parity_report.json` and `runs/goal12b_spatial_memory_v1_parity_report.md`; multi-route v1 artifacts exist under `runs/goal12b_spatial_memory_v1/`.
 - Goal 12B passes current-BEV parity and memory-benefit gates in replay/eval: v1 window1 current IoU matches v0 at `0.6922143800184131`, window4 route-pose fused-memory IoU is `0.9757767224311829`, `fused_memory_iou_delta=0.2297759104147553`, `temporal_consistency_delta=0.9620874587694804`, and no `cmd_vel` is emitted.
+- `homebrain.datasets.usage_policy` defines OpenLORIS as `poc_training_eval_allowed=true`, `product_training_approved=false`, `runtime_dependency=false`, `derived_dataset_redistribution_allowed=false`, `attribution_required=true`, and `license_name=CC BY-ND 4.0`.
+- `homebrain.train.spatial_v1_hard_eval` adds deployment-style v1 memory metrics that do not pass label-derived observation masks into the model, future-hidden-cell metrics aligned with route pose, deterministic occlusion/dropout stress masks, and pose ablations.
+- `homebrain.tools.goal12c_hard_validation` writes `runs/goal12c_spatial_memory_v1_hard_validation_report.json` and `.md`, and can train true leave-one-route-out v1 folds under `runs/goal12c_true_route_out/`.
+- Goal 12C hard validation passed: deployment memory IoU `0.6969542382284999` vs current IoU `0.6947728270664811`; hidden-cell IoU `0.1083006834350748` vs hidden current IoU `0.046022046640116186`; occlusion recovery delta `0.270266732025336`; true route-out completed for `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; all safety/product flags remain false.
 - First real student checkpoint exists at `runs/spatial_v0_overfit/checkpoint.pt`; it is a tiny 8-example overfit artifact only, not a navigation/control model.
 - Goal 7B real train/val checkpoints exist at `runs/spatial_v0_goal7b_da3_only/checkpoint.pt`, `runs/spatial_v0_goal7b_tum_only/checkpoint.pt`, and `runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt`; all are representation-pretraining-only and not control-safe.
 - SpatialTrainPack splits are now deterministic sequence-aware contiguous blocks with review embargo frames between train and val for contiguous windows.
@@ -130,6 +134,34 @@ Goal 12B: SpatialMemoryNetV1 parity plus memory-sanity repair, including unknown
 - Goal 11A modeld/replay outputs exist at `runs/goal11a_modeld_openloris_spatial_scorer/` and `runs/goal11a_replayed_openloris_spatial_scorer/`; scored BrainOutputEvents keep `cmd_vel=null`, `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.
 
 ## Goal completion log
+
+### 021 - Goal 12C OpenLORIS PoC policy and SpatialMemoryV1 hard validation
+
+Objective attempted: reclassify OpenLORIS as local PoC training/eval allowed but not product/runtime approved, add hard v1 memory evals that avoid label-derived update masks at eval time, evaluate future-hidden cells and deterministic occlusion/dropout stress, run pose ablations, run true leave-one-route-out v1 folds for cafe/office/corridor, and write honest reports and safety flags.
+
+Files changed: `homebrain/datasets/usage_policy.py`, `homebrain/datasets/setup_openloris_scene.py`, `homebrain/datasets/openloris_to_route.py`, `homebrain/train/spatial_v1_hard_eval.py`, `homebrain/tools/goal12c_hard_validation.py`, `tests/test_goal12c_hard_validation.py`, `CURRENT_STATUS.md`, `EVALS.md`, and `LICENSE_AUDIT.md`.
+
+Commands run:
+```bash
+python -m py_compile homebrain\datasets\usage_policy.py homebrain\datasets\setup_openloris_scene.py homebrain\datasets\openloris_to_route.py homebrain\train\spatial_v1_hard_eval.py homebrain\tools\goal12c_hard_validation.py tests\test_goal12c_hard_validation.py
+python -m pytest tests\test_goal12c_hard_validation.py -q
+python -m homebrain.tools.goal12c_hard_validation --out-json runs\goal12c_spatial_memory_v1_hard_validation_report.json --out-md runs\goal12c_spatial_memory_v1_hard_validation_report.md --batch-size 64 --future-horizon 3 --run-true-route-out --true-route-out-steps 25
+python -m pytest tests\test_goal12a_spatial_memory_v1.py -q
+python -m pytest -q
+git diff --check
+```
+
+Pass/fail results: py_compile passed; targeted Goal 12C tests passed with `6 passed`; existing Goal 12A/v1 regression tests passed with `11 passed`; full pytest passed with `73 passed`; `git diff --check` exited 0 with CRLF line-ending warnings only. The Goal 12C hard-validation report command exited 0 and wrote pass gates for OpenLORIS policy, deployment memory benefit, hidden memory benefit, occlusion recovery, pose ablation, true leave-one-route-out, and overall hard validation.
+
+Artifacts created: `runs/goal12c_spatial_memory_v1_hard_validation_report.json`, `runs/goal12c_spatial_memory_v1_hard_validation_report.md`, smoke reports under `runs/goal12c_spatial_memory_v1_hard_validation_report_smoke.*`, and true route-out fold artifacts under `runs/goal12c_true_route_out/` including per-fold train/heldout manifests, v1 window1/window4 checkpoints, and eval JSONs.
+
+Metrics observed: deployment-style eval used model-predicted update masks only and reported `deployment_current_iou=0.6947728270664811`, `deployment_memory_iou=0.6969542382284999`, `deployment_memory_delta=0.0021814111620187537`, `deployment_update_mask_coverage=0.10406653117388487`, and `deployment_overwrite_fraction=0.06715520238503814`. Future-hidden eval reported `future_reveal_count=289383`, `hidden_cell_iou=0.1083006834350748`, `hidden_current_iou=0.046022046640116186`, `hidden_free_iou=0.11577271616422674`, `hidden_obstacle_iou=0.10269665888821085`, and `hidden_memory_benefit_pass=true`. Occlusion stress reported average `occluded_current_iou=0.13894250784314385`, `occluded_memory_iou=0.4092092398684799`, and `occlusion_recovery_delta=0.270266732025336`, with all three masks passing. Pose ablation reported route pose memory IoU `0.6969542382284999`, no-warp `0.6984273675829172`, corrupted route pose `0.6611157339066267`, and predicted pose `0.6815132293850183`; route pose passed as tied within the explicit `0.005` tolerance while degraded pose modes fell behind.
+
+True route-out metrics: all three Goal 11B route families were evaluated with train-on-all-but-one folds using fold-local Goal 11B true-LORO v0 warm starts. Held-out `cafe1-1_2` window4 deployment memory IoU was `0.5324965164065361` vs window1 `0.5217542991042137`; `office1-1_7` was `0.5704576537013054` vs `0.5548267662525177`; `corridor1-1` was `0.5821172345429659` vs `0.5764159296949705`. Each fold kept current-BEV parity against its v0 fold baseline and reported window4 deployment memory benefit.
+
+Blockers/risks: no Goal 12C gate blocker remains. Residual risks are that OpenLORIS is only PoC-approved locally, not product-training-approved or redistributable as derived datasets; the deployment-memory gain on the full validation split is small; no-warp slightly edges route pose but only within tolerance; all artifacts remain `replay_only=true`, `not_executed=true`, `control_safe=false`, `runtime_dependency=false`, and `product_training_approved=false`; no hardware control, raw PWM, ROS/Nav2/Isaac/Habitat, or runtime OpenLORIS dependency was added.
+
+Recommended next goal: extend SpatialMemoryV1 hard validation to more robot-frame routes and owned logs, then tighten route-pose superiority and hidden-obstacle performance before any product-training or control-facing claim.
 
 ### 020 - Goal 12B SpatialMemoryNetV1 parity and memory-sanity repair
 

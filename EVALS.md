@@ -224,6 +224,35 @@ Current Goal 12B result: v1 current-frame parity was repaired with a shape-safe 
 
 Gate interpretation: Goal 12B promotes the v1 temporal-memory evaluation path past the previous current-BEV blocker, but only for replay/eval representation pretraining. OpenLORIS license review remains pending, route-out metrics are still per-source eval proxies rather than retrained leave-one-route-out models, and all outputs remain `control_safe=false`, `not_executed=true`, and `cmd_vel=null`.
 
+Current Goal 12C hard-validation command:
+```bash
+python -m homebrain.tools.goal12c_hard_validation --out-json runs\goal12c_spatial_memory_v1_hard_validation_report.json --out-md runs\goal12c_spatial_memory_v1_hard_validation_report.md --batch-size 64 --future-horizon 3 --run-true-route-out --true-route-out-steps 25
+```
+
+Goal 12C hard-validation metrics:
+```text
+deployment_memory_iou
+deployment_current_iou
+deployment_memory_delta
+deployment_update_mask_coverage
+deployment_overwrite_fraction
+deployment_memory_benefit_pass
+hidden_cell_iou
+hidden_free_iou
+hidden_obstacle_iou
+future_reveal_count
+hidden_memory_benefit_pass
+occluded_current_iou
+occluded_memory_iou
+occlusion_recovery_delta
+true_leave_one_route_out
+pose_ablation
+```
+
+Current Goal 12C result: OpenLORIS is now explicitly `poc_training_eval_allowed=true`, `product_training_approved=false`, `runtime_dependency=false`, `derived_dataset_redistribution_allowed=false`, and `attribution_required=true`; generated OpenLORIS-derived artifacts remain under ignored generated-data paths and are not redistributable. The hard eval does not pass label-derived observation masks into the model; labels are used only after prediction for scoring. Deployment-style eval reported `deployment_current_iou=0.6947728270664811`, `deployment_memory_iou=0.6969542382284999`, `deployment_memory_delta=0.0021814111620187537`, `deployment_update_mask_coverage=0.10406653117388487`, and `deployment_memory_benefit_pass=true`. Future-hidden eval reported `future_reveal_count=289383`, `hidden_cell_iou=0.1083006834350748`, `hidden_free_iou=0.11577271616422674`, `hidden_obstacle_iou=0.10269665888821085`, and `hidden_memory_benefit_pass=true`. Occlusion stress passed all three deterministic masks with average `occlusion_recovery_delta=0.270266732025336`. True leave-one-route-out trained v1 window1/window4 folds on all-but-one routes for `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; each held-out route reported window4 deployment memory IoU above window1 deployment memory IoU. Pose ablation passed with route pose tied within a `0.005` tolerance of no-warp and degraded under corrupted/predicted pose.
+
+Gate interpretation: Goal 12C is stronger evidence that v1 memory stores useful information beyond the current frame, but still only for local replay/eval representation pretraining. OpenLORIS is local-PoC allowed, not product-training-approved, not a runtime dependency, and not redistributable as derived datasets. All outputs remain `control_safe=false`, `not_executed=true`, `replay_only=true`, and no `cmd_vel` is emitted.
+
 ## Gate 3: trajectory scorer
 
 Required before control integration:
