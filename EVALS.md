@@ -576,6 +576,47 @@ True leave-one-route-out: cafe held out top1=0.35833333333333334 and no Goal 11B
 
 Gate interpretation: Goal 11B reduces the single-action collapse from Goal 11A in the multi-route v4 label pack and full-data scorer sweeps, but true held-out route retraining still shows route-generalization concentration on corridor and office. This is replay/eval evidence only, not a control policy or product-training approval. OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`.
 
+## Gate 3.7: SpatialMemoryV1 memory-to-trajectory shadow eval
+
+Required before training a learned memory-aware trajectory scorer:
+- load v1 modeld artifacts explicitly as `v1_current_bev` or `v1_memory_bev` LocalBev sources
+- never treat v1 fused memory BEV as oracle/ground truth
+- run the existing deterministic candidate generator/scorer on oracle labels, v0 current BEV when available, v1 current BEV, and v1 memory BEV
+- report normal, future-hidden-cell, deterministic occlusion/dropout, and true route-out shadow metrics
+- compare v1 memory against v1 current, not just v0
+- block learned memory-scorer training unless memory improves action metrics without collision, stop-heavy, collapse, or route-out regressions
+- keep all outputs `replay_only=true`, `not_executed=true`, `control_safe=false`, `product_training_approved=false`, and `cmd_vel=null`
+
+Goal 13A command:
+```bash
+python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64
+```
+
+Goal 13A report artifacts:
+```text
+runs/goal13a_memory_policy_shadow_eval_report.json
+runs/goal13a_memory_policy_shadow_eval_report.md
+runs/goal13a_memory_policy_shadow_eval_decisions.jsonl
+runs/goal13a_memory_policy_shadow_eval_worst_disagreements.ppm
+```
+
+Goal 13A metrics:
+```text
+normal frame_count=472
+normal v1_current: action_entropy=0.19897238107381565, dominant_action_fraction=0.972457627118644, unsafe_selected_rate=0.0, collision_proxy_rate=0.0, unknown_penalty_mean=0.01476968648069996, agreement_with_oracle_action=0.9766949152542372, agreement_with_future_motion_label=0.00211864406779661, stop_fraction=0.0
+normal v1_memory: action_entropy=0.17555724310992266, dominant_action_fraction=0.9766949152542372, unsafe_selected_rate=0.0, collision_proxy_rate=0.0, unknown_penalty_mean=0.0125395347506313, agreement_with_oracle_action=0.972457627118644, agreement_with_future_motion_label=0.0, stop_fraction=0.0
+normal memory_vs_current_action_changed_fraction=0.00847457627118644
+normal memory_improved_decision_fraction=0.00211864406779661
+normal memory_worsened_decision_fraction=0.006355932203389831
+normal memory_oracle_score_mean_delta=-0.0012516724861274286
+hidden-cell frame_count=403, v1_memory dominant_action_fraction=0.9751861042183623, v1_memory unknown_penalty_mean=0.013380507677423747
+occlusion aggregate frame_count=1142, v1_memory dominant_action_fraction=0.9816112084063048, v1_memory unknown_penalty_mean=0.009961119309824528
+true route-out memory_quality_delta: cafe1-1_2=0.0016560370235119814, corridor1-1=-0.010013379889019429, office1-1_7=0.0
+memory_action_benefit_pass=false
+```
+
+Gate interpretation: Goal 13A proves v1 memory can slightly reduce selected unknown penalty in the transparent trajectory scorer, but it does not yet improve trajectory decisions enough to train a learned memory-aware scorer. V1 memory remains distribution-collapsed beyond Goal 11B thresholds in normal, hidden-cell, and occlusion modes, and it worsens the `corridor1-1` true route-out fold. The correct next action is scorer/data diagnosis, not model training or control integration.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:
@@ -609,6 +650,7 @@ python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts run
 python -m homebrain.teachers.run_teacher --teacher depth_pro --backend fake --log runs/dummy_route --out runs/dummy_route/teacher_artifacts/depth_pro_fake
 python -m homebrain.teachers.visualize_artifacts --artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/depth_pro_fake_viz
 python -m homebrain.eval.run_eval --log runs/dummy_route --teacher-artifacts runs/dummy_route/teacher_artifacts/depth_pro_fake --out runs/dummy_eval_with_depth_pro_fake.json
+python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64
 ```
 
 As new features are added, Codex must update this file with exact current commands.

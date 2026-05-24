@@ -4,11 +4,11 @@ Codex must update this file at the end of every goal.
 
 ## Current objective
 
-Goal 12C reclassified OpenLORIS as local PoC training/eval allowed but not product-approved, and added hard SpatialMemoryNet v1 validation that avoids label-derived update masks at eval time. The Goal 12C report passes deployment-style memory, future-hidden-cell memory, occlusion recovery, pose ablation, and true leave-one-route-out structure gates. All artifacts remain replay/eval only with `control_safe=false`, `not_executed=true`, `runtime_dependency=false`, and `product_training_approved=false`.
+Goal 13A added memory-aware trajectory shadow evaluation for SpatialMemoryNetV1 current BEV versus fused-memory BEV. The report shows v1 memory reduces unknown penalty but does not pass the action-benefit gate because decisions remain Goal 11B-collapsed and one true route-out fold worsens. No learned memory-aware trajectory scorer was trained.
 
 ## Last completed goal
 
-Goal 12C: OpenLORIS PoC policy plus SpatialMemoryNetV1 hard validation, including dataset usage policy flags, deployment-style v1 eval with model/replay update masks only, future-observation hidden-cell scoring, deterministic occlusion/dropout stress, pose ablations, true leave-one-route-out v1 folds for cafe/office/corridor, reports, tests, docs, and full verification.
+Goal 13A: SpatialMemoryV1 memory-to-trajectory shadow evaluation, comparing oracle labels, v0 current BEV, v1 current BEV, and v1 fused-memory BEV under normal, future-hidden-cell, deterministic occlusion, and true route-out shadow-eval modes.
 
 ## Current implementation status
 
@@ -85,6 +85,10 @@ Goal 12C: OpenLORIS PoC policy plus SpatialMemoryNetV1 hard validation, includin
 - `homebrain.train.spatial_v1_hard_eval` adds deployment-style v1 memory metrics that do not pass label-derived observation masks into the model, future-hidden-cell metrics aligned with route pose, deterministic occlusion/dropout stress masks, and pose ablations.
 - `homebrain.tools.goal12c_hard_validation` writes `runs/goal12c_spatial_memory_v1_hard_validation_report.json` and `.md`, and can train true leave-one-route-out v1 folds under `runs/goal12c_true_route_out/`.
 - Goal 12C hard validation passed: deployment memory IoU `0.6969542382284999` vs current IoU `0.6947728270664811`; hidden-cell IoU `0.1083006834350748` vs hidden current IoU `0.046022046640116186`; occlusion recovery delta `0.270266732025336`; true route-out completed for `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; all safety/product flags remain false.
+- `homebrain.policies.run_trajectory_scorer` can now load explicit v1 modeld BEV sources as `v1_current_bev` or `v1_memory_bev` LocalBev records; fused memory is never treated as oracle.
+- `homebrain.tools.goal13a_memory_policy_shadow_eval` writes memory-aware replay-only trajectory shadow reports at `runs/goal13a_memory_policy_shadow_eval_report.json` and `.md`, plus per-frame decisions at `runs/goal13a_memory_policy_shadow_eval_decisions.jsonl`.
+- Goal 13A action gate failed: normal v1 memory selected actions had lower unknown penalty than v1 current (`0.0125395347506313` vs `0.01476968648069996`) with unchanged unsafe/collision rates, but memory action entropy/dominance stayed collapsed (`action_entropy=0.17555724310992266`, `dominant_action_fraction=0.9766949152542372`) and true route-out worsened on `corridor1-1` (`memory_quality_delta=-0.010013379889019429`).
+- Because `memory_action_benefit_pass=false`, no learned memory-aware trajectory scorer was trained or promoted.
 - First real student checkpoint exists at `runs/spatial_v0_overfit/checkpoint.pt`; it is a tiny 8-example overfit artifact only, not a navigation/control model.
 - Goal 7B real train/val checkpoints exist at `runs/spatial_v0_goal7b_da3_only/checkpoint.pt`, `runs/spatial_v0_goal7b_tum_only/checkpoint.pt`, and `runs/spatial_v0_goal7b_da3_tum_mixed/checkpoint.pt`; all are representation-pretraining-only and not control-safe.
 - SpatialTrainPack splits are now deterministic sequence-aware contiguous blocks with review embargo frames between train and val for contiguous windows.
@@ -134,6 +138,32 @@ Goal 12C: OpenLORIS PoC policy plus SpatialMemoryNetV1 hard validation, includin
 - Goal 11A modeld/replay outputs exist at `runs/goal11a_modeld_openloris_spatial_scorer/` and `runs/goal11a_replayed_openloris_spatial_scorer/`; scored BrainOutputEvents keep `cmd_vel=null`, `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.
 
 ## Goal completion log
+
+### 022 - Goal 13A SpatialMemoryV1 memory-to-trajectory shadow evaluation
+
+Objective attempted: prove whether SpatialMemoryNetV1 fused memory improves trajectory decisions before training any learned memory-aware scorer by comparing oracle label BEV, v0 current BEV, v1 current BEV, and v1 memory BEV under normal, future-hidden-cell, deterministic occlusion, and true route-out shadow-eval modes.
+
+Files changed: `homebrain/policies/run_trajectory_scorer.py`, `homebrain/tools/goal13a_memory_policy_shadow_eval.py`, `tests/test_goal13a_memory_policy_shadow_eval.py`, `CURRENT_STATUS.md`, `EVALS.md`, and `BLOCKERS.md`.
+
+Commands run:
+```bash
+python -m py_compile homebrain\policies\run_trajectory_scorer.py homebrain\tools\goal13a_memory_policy_shadow_eval.py
+python -m homebrain.tools.goal13a_memory_policy_shadow_eval --device cpu --batch-size 2 --max-frames-per-mode 3 --out-json runs\goal13a_smoke_report.json --out-md runs\goal13a_smoke_report.md --decisions-jsonl runs\goal13a_smoke_decisions.jsonl --contact-sheet runs\goal13a_smoke_worst.ppm
+python -m pytest tests\test_goal13a_memory_policy_shadow_eval.py -q
+python -m homebrain.tools.goal13a_memory_policy_shadow_eval --batch-size 64
+```
+
+Pass/fail results: py_compile passed. The capped smoke shadow eval wrote a structurally valid report and correctly failed the action-benefit gate. Targeted Goal 13A tests passed with `6 passed`. The full Goal 13A shadow-eval command exited 0 and wrote reports, decisions, and a contact-sheet artifact, but the pass gate is intentionally failed: `memory_action_benefit_pass=false`.
+
+Artifacts created: `runs/goal13a_memory_policy_shadow_eval_report.json`, `runs/goal13a_memory_policy_shadow_eval_report.md`, `runs/goal13a_memory_policy_shadow_eval_decisions.jsonl`, `runs/goal13a_memory_policy_shadow_eval_worst_disagreements.ppm`, and smoke artifacts under `runs/goal13a_smoke_*`.
+
+Metrics observed: normal eval covered `472` validation frame occurrences. V1 current BEV reported `action_entropy=0.19897238107381565`, `dominant_action_fraction=0.972457627118644`, `unsafe_selected_rate=0.0`, `collision_proxy_rate=0.0`, `unknown_penalty_mean=0.01476968648069996`, `agreement_with_oracle_action=0.9766949152542372`, `agreement_with_future_motion_label=0.00211864406779661`, and `stop_fraction=0.0`. V1 memory BEV reported `action_entropy=0.17555724310992266`, `dominant_action_fraction=0.9766949152542372`, `unsafe_selected_rate=0.0`, `collision_proxy_rate=0.0`, `unknown_penalty_mean=0.0125395347506313`, `agreement_with_oracle_action=0.972457627118644`, `agreement_with_future_motion_label=0.0`, and `stop_fraction=0.0`. Normal memory-vs-current action changed on `0.00847457627118644` of frames, improved `0.00211864406779661`, worsened `0.006355932203389831`, and had `memory_oracle_score_mean_delta=-0.0012516724861274286`.
+
+Hard-mode metrics: hidden-cell shadow eval covered `403` frame occurrences; memory unknown penalty improved (`0.013380507677423747` vs current `0.01599249680048183`) but oracle/future agreement did not improve and memory remained collapsed (`dominant_action_fraction=0.9751861042183623`). Occlusion aggregate covered `1142` frame occurrences; memory unknown penalty improved (`0.009961119309824528` vs current `0.012669789707598043`) but oracle agreement fell (`0.9623467600700525` vs current `0.978108581436077`) and memory remained collapsed (`dominant_action_fraction=0.9816112084063048`). True route-out shadow deltas were `cafe1-1_2=0.0016560370235119814`, `corridor1-1=-0.010013379889019429`, and `office1-1_7=0.0`.
+
+Blockers/risks: Goal 13A gate blocker is active and recorded in `BLOCKERS.md`. Failure reasons are normal/hidden/occlusion v1 memory crossing Goal 11B collapse thresholds and v1 memory worsening the `corridor1-1` true route-out fold. All outputs remain `replay_only=true`, `not_executed=true`, `control_safe=false`, `product_training_approved=false`; `cmd_vel` and raw PWM remain absent; OpenLORIS remains PoC-only and not product-training-approved.
+
+Recommended next goal: do not train a learned memory-aware scorer yet. First inspect why the candidate scorer collapses to one action under memory/current BEV, add more route diversity or calibrate the transparent scorer on robot-frame routes, then rerun Goal 13A before any learned memory scorer.
 
 ### 021 - Goal 12C OpenLORIS PoC policy and SpatialMemoryV1 hard validation
 

@@ -28,6 +28,7 @@ from homebrain.replay.segment_log import read_events
 from homebrain.teachers.artifacts import load_array
 
 POLICY_ARTIFACT_SCHEMA_VERSION = "homebrain.policy_artifacts.v0"
+MODEL_BEV_SOURCES = ("model", "v1_current_bev", "v1_memory_bev")
 
 
 @dataclass(frozen=True)
@@ -166,17 +167,21 @@ def _load_decision_inputs(
             feature_dir=features,
             device_name=device_name,
         )
-        records = [_record_from_model_event(event, output) for event in outputs]
+        records = [_record_from_model_event(event, output, bev_source=bev_source) for event in outputs]
         return records, {"source_kind": "spatial_model_inference", "grid_shape": list(records[0].bev.shape) if records else []}
-    if bev_source == "model":
+    if bev_source in MODEL_BEV_SOURCES:
         events = read_events(root)
         model_events = [
             event
             for event in events
             if isinstance(event, BrainOutputEvent) and isinstance(event.local_bev_ref, str)
         ]
-        records = [_record_from_model_event(event, root) for event in model_events]
-        return records, {"source_kind": "modeld_output", "grid_shape": list(records[0].bev.shape) if records else []}
+        records = [_record_from_model_event(event, root, bev_source=bev_source) for event in model_events]
+        return records, {
+            "source_kind": "modeld_output",
+            "model_bev_source": bev_source,
+            "grid_shape": list(records[0].bev.shape) if records else [],
+        }
     if bev_source == "labels":
         if (root / "manifest.json").exists():
             manifest = read_json(root / "manifest.json")
@@ -185,20 +190,20 @@ def _load_decision_inputs(
         bev_dir = _infer_bev_dir(root)
         manifest = load_bev_manifest(bev_dir)
         return _records_from_bev_manifest(bev_dir, manifest)
-    raise ValueError("--bev-source must be model or labels")
+    raise ValueError("--bev-source must be model, labels, v1_current_bev, or v1_memory_bev")
 
 
-def _record_from_model_event(event: BrainOutputEvent, artifact_root: Path) -> BevDecisionInput:
+def _record_from_model_event(
+    event: BrainOutputEvent,
+    artifact_root: Path,
+    *,
+    bev_source: str = "model",
+) -> BevDecisionInput:
     if not event.local_bev_ref:
         raise ValueError("BrainOutputEvent is missing local_bev_ref")
     artifact_path = artifact_root / event.local_bev_ref
     with np.load(artifact_path, allow_pickle=False) as data:
-        free = np.asarray(data["bev_free_prob"], dtype=np.float32)
-        occupied = np.asarray(data["bev_occupied_prob"], dtype=np.float32)
-        unknown = np.asarray(data["bev_unknown_prob"], dtype=np.float32)
-        traversable = np.asarray(data["bev_traversable_prob"], dtype=np.float32)
-        risky = np.asarray(data["bev_risky_prob"], dtype=np.float32)
-        uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32)
+        free, occupied, unknown, traversable, risky, uncertainty = _model_bev_arrays(data, bev_source=bev_source)
     frame_id = int(event.debug.get("input_frame_id", -1)) if isinstance(event.debug, dict) else -1
     return BevDecisionInput(
         sequence_id=event.sequence_id,
@@ -211,11 +216,48 @@ def _record_from_model_event(event: BrainOutputEvent, artifact_root: Path) -> Be
             unknown=unknown,
             traversable=traversable,
             risky=risky,
+            confidence=(np.float32(1.0) - uncertainty).astype(np.float32) if uncertainty is not None else None,
             uncertainty=uncertainty,
-            source="model",
+            source=bev_source,
         ),
         pose_delta=event.pose_delta,
         source_ref=event.local_bev_ref,
+    )
+
+
+def _model_bev_arrays(
+    data: np.lib.npyio.NpzFile,
+    *,
+    bev_source: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    if bev_source == "model":
+        if "bev_free_prob" not in data.files:
+            raise ValueError("v1 modeld artifacts require explicit bev_source='v1_current_bev' or 'v1_memory_bev'")
+        prefix = "bev"
+    elif bev_source == "v1_current_bev":
+        prefix = "current_bev"
+    elif bev_source == "v1_memory_bev":
+        prefix = "memory_bev"
+    else:
+        raise ValueError(f"unsupported model BEV source: {bev_source}")
+    required = (
+        f"{prefix}_free_prob",
+        f"{prefix}_occupied_prob",
+        f"{prefix}_unknown_prob",
+        f"{prefix}_traversable_prob",
+        f"{prefix}_risky_prob",
+    )
+    missing = [name for name in required if name not in data.files]
+    if missing:
+        raise ValueError(f"model BEV artifact is missing {bev_source} arrays: {missing}")
+    uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32) if "uncertainty_grid" in data.files else None
+    return (
+        np.asarray(data[f"{prefix}_free_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_occupied_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_unknown_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_traversable_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_risky_prob"], dtype=np.float32),
+        uncertainty,
     )
 
 
@@ -490,7 +532,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", required=True, help="Input route, modeld output, BEV dir, or SpatialTrainPack.")
     parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet checkpoint.")
     parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
-    parser.add_argument("--bev-source", choices=("model", "labels"), default="model")
+    parser.add_argument("--bev-source", choices=("model", "labels", "v1_current_bev", "v1_memory_bev"), default="model")
     parser.add_argument("--out", required=True, help="Output policy artifact directory.")
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     parser.add_argument("--max-frames", type=int, default=None)
