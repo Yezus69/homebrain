@@ -55,6 +55,11 @@ def setup_openloris_scene(
         "package_file": Path(package_file).as_posix() if package_file is not None else None,
         "max_download_gb": float(max_download_gb),
         "allow_large_download": bool(allow_large_download),
+        "large_download_approval_record": _large_download_approval_record(
+            sequence=sequence,
+            max_download_gb=max_download_gb,
+            allow_large_download=allow_large_download,
+        ),
         "license_name": OPENLORIS_LICENSE_NAME,
         "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
         "required_runtime": False,
@@ -137,6 +142,27 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _large_download_approval_record(
+    *,
+    sequence: str,
+    max_download_gb: float,
+    allow_large_download: bool,
+) -> dict[str, Any] | None:
+    if not allow_large_download:
+        return None
+    return {
+        "approved": True,
+        "approval_method": "cli_flag_--allow-large-download",
+        "approved_at_utc": _utc_now(),
+        "sequence": sequence,
+        "bounded_by_max_download_gb": float(max_download_gb),
+        "note": (
+            "Operator explicitly approved this bounded public dataset download/import. "
+            "This does not imply license approval or control safety."
+        ),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Download/validate a public OpenLORIS-Scene package.")
     parser.add_argument("--out", required=True, help="Output dataset root, e.g. data/public/openloris_scene.")
@@ -159,6 +185,11 @@ def main(argv: list[str] | None = None) -> int:
         allow_large_download=args.allow_large_download,
     )
     print(f"wrote OpenLORIS setup metadata to {metadata_path.as_posix()}")
+    if args.allow_large_download:
+        print(
+            "recorded large-download approval "
+            f"for sequence={args.sequence} max_download_gb={args.max_download_gb}"
+        )
     if return_code != 0:
         print("OpenLORIS setup blocked; see dataset_metadata.json for details.", file=sys.stderr)
     return return_code

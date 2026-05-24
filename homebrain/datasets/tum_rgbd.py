@@ -87,6 +87,22 @@ class TumGroundTruth:
 
 
 @dataclass(frozen=True)
+class TumAccelerometer:
+    timestamp: float
+    ax: float
+    ay: float
+    az: float
+
+    def to_dict(self) -> JsonDict:
+        return {
+            "timestamp": self.timestamp,
+            "ax": self.ax,
+            "ay": self.ay,
+            "az": self.az,
+        }
+
+
+@dataclass(frozen=True)
 class TumAssociation:
     rgb: TumEntry
     depth: TumEntry
@@ -97,7 +113,13 @@ def tum_sequence_dir(out_dir: str | Path, sequence: str) -> Path:
     return Path(out_dir) / sequence
 
 
-def download_and_extract_sequence(out_dir: str | Path, sequence: str, *, max_download_gb: float | None = None) -> Path:
+def download_and_extract_sequence(
+    out_dir: str | Path,
+    sequence: str,
+    *,
+    max_download_gb: float | None = None,
+    allow_large_download: bool = False,
+) -> Path:
     if sequence not in TUM_RGBD_DOWNLOADS:
         raise ValueError(f"unsupported TUM RGB-D sequence {sequence!r}")
     root = Path(out_dir)
@@ -114,10 +136,11 @@ def download_and_extract_sequence(out_dir: str | Path, sequence: str, *, max_dow
             size = remote_file_size(TUM_RGBD_DOWNLOADS[sequence])
             if size is not None:
                 size_gb = size / (1024.0**3)
-                if size_gb > max_download_gb:
+                if size_gb > max_download_gb and not allow_large_download:
                     raise RuntimeError(
                         f"TUM RGB-D sequence {sequence} archive is {size_gb:.2f} GB, "
-                        f"exceeding max_download_gb={max_download_gb:.2f}"
+                        f"exceeding max_download_gb={max_download_gb:.2f}; rerun with --allow-large-download "
+                        "only when the bounded download/import is explicitly approved"
                     )
         download_url(TUM_RGBD_DOWNLOADS[sequence], archive_path)
 
@@ -201,6 +224,29 @@ def parse_groundtruth(path: str | Path) -> list[TumGroundTruth]:
                 qy=float(parts[5]),
                 qz=float(parts[6]),
                 qw=float(parts[7]),
+            )
+        )
+    return entries
+
+
+def parse_accelerometer(path: str | Path) -> list[TumAccelerometer]:
+    source = Path(path)
+    if not source.exists():
+        return []
+    entries: list[TumAccelerometer] = []
+    for line in source.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split()
+        if len(parts) < 4:
+            continue
+        entries.append(
+            TumAccelerometer(
+                timestamp=float(parts[0]),
+                ax=float(parts[1]),
+                ay=float(parts[2]),
+                az=float(parts[3]),
             )
         )
     return entries

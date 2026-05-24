@@ -14,6 +14,7 @@ from homebrain.policies.build_action_label_pack import (
     ACTION_LABEL_PACK_SCHEMA_VERSION,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
+    ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
 )
 
 ACTION_LABEL_QA_SCHEMA_VERSION = "homebrain.action_label_pack_qa.v0"
@@ -33,9 +34,14 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         ACTION_LABEL_PACK_SCHEMA_VERSION,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
     }:
         errors.append(f"unsupported schema_version={manifest.get('schema_version')!r}")
-    is_v1 = schema_version in {ACTION_LABEL_PACK_SCHEMA_VERSION_V1, ACTION_LABEL_PACK_SCHEMA_VERSION_V2}
+    is_v1 = schema_version in {
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
+    }
     example_records = manifest.get("examples")
     if not isinstance(example_records, list):
         return _failed_metrics(root, "manifest examples must be a list")

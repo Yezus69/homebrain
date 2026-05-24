@@ -110,6 +110,33 @@ def test_robot_rgbd_to_bev_refuses_missing_extrinsics_without_review(tmp_path: P
     assert manifest["control_safe"] is False
 
 
+def test_robot_rgbd_to_bev_refuses_tum_without_camera_to_base(tmp_path: Path) -> None:
+    source = tmp_path / "tum" / "freiburg2_pioneer_slam"
+    route = tmp_path / "route"
+    bev = tmp_path / "bev"
+    _write_tum_fixture(source, frame_count=2)
+    tum_rgbd_to_route(source_dir=source, out_dir=route, max_frames=2)
+
+    with pytest.raises(ValueError, match="camera_to_base transform is missing"):
+        robot_rgbd_to_bev(log_dir=route, out_dir=bev)
+
+
+def test_action_label_pack_v3_schema(tmp_path: Path) -> None:
+    controlled = tmp_path / "controlled"
+    action_pack = tmp_path / "actions_v3"
+    generate_controlled_bev_maps(out_dir=controlled, examples_per_scenario=1, grid_size=32, meters_per_cell=0.05)
+
+    build_action_label_pack(sources=[controlled], out_dir=action_pack, pack_version=3)
+    qa = qa_action_label_pack(action_pack)
+    manifest = json.loads((action_pack / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest["schema_version"] == "homebrain.action_label_pack.v3"
+    assert manifest["version"] == 3
+    assert manifest["control_safe"] is False
+    assert manifest["not_executed"] is True
+    assert qa["action_label_pack_qa_pass"] is True
+
+
 def _write_openloris_fixture(root: Path, *, frame_count: int, include_extrinsics: bool) -> None:
     (root / "color").mkdir(parents=True, exist_ok=True)
     (root / "aligned_depth").mkdir(parents=True, exist_ok=True)

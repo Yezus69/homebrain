@@ -39,6 +39,7 @@ from homebrain.teachers.artifacts import file_sha256, relative_to_root
 ACTION_LABEL_PACK_SCHEMA_VERSION = "homebrain.action_label_pack.v0"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V1 = "homebrain.action_label_pack.v1"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V2 = "homebrain.action_label_pack.v2"
+ACTION_LABEL_PACK_SCHEMA_VERSION_V3 = "homebrain.action_label_pack.v3"
 ACTION_LABEL_EXAMPLE_SCHEMA_VERSION = "homebrain.action_label_example.v0"
 COLLISION_THRESHOLD = RISKY_CANDIDATE_THRESHOLD
 UNKNOWN_BLOCK_THRESHOLD = 0.95
@@ -217,6 +218,8 @@ def build_action_label_pack(
 
 
 def _pack_schema_version(pack_version: int) -> str:
+    if pack_version >= 3:
+        return ACTION_LABEL_PACK_SCHEMA_VERSION_V3
     if pack_version >= 2:
         return ACTION_LABEL_PACK_SCHEMA_VERSION_V2
     if pack_version >= 1:
@@ -614,7 +617,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", action="append", required=True, help="Input controlled/reviewed BEV pack.")
     parser.add_argument("--out", required=True, help="Output ActionLabelPack directory.")
     parser.add_argument("--max-examples", type=int, default=None)
-    parser.add_argument("--pack-version", type=int, choices=(0, 1, 2), default=0)
+    parser.add_argument("--pack-version", type=int, choices=(0, 1, 2, 3), default=0)
     args = parser.parse_args(argv)
     manifest = build_action_label_pack(
         sources=[Path(source) for source in args.source],

@@ -8,10 +8,16 @@ import numpy as np
 
 from homebrain.datasets.openloris_scene import (
     OPENLORIS_DEPTH_SCALE,
+    OPENLORIS_LICENSE_NAME,
     OPENLORIS_LICENSE_REVIEW_STATUS,
     OPENLORIS_ROUTE_ASSOCIATIONS_FILE,
 )
-from homebrain.datasets.tum_rgbd import read_depth_png_m
+from homebrain.datasets.tum_rgbd import (
+    TUM_RGBD_LICENSE_NAME,
+    TUM_RGBD_LICENSE_REVIEW_STATUS,
+    TUM_RGBD_ROUTE_ASSOCIATIONS_FILE,
+    read_depth_png_m,
+)
 from homebrain.geometry.bev_projector import BEV_ARTIFACT_KINDS, BEV_MANIFEST_FILE, BEV_SCHEMA_VERSION, bev_array_stats
 from homebrain.messages.schema import FrameEvent, JsonDict
 from homebrain.replay.replayd import order_events_for_replay
@@ -40,10 +46,8 @@ def robot_rgbd_to_bev(
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
     route_manifest = load_manifest(log_root)
-    associations_path = log_root / OPENLORIS_ROUTE_ASSOCIATIONS_FILE
-    associations = _read_json(associations_path)
-    if associations.get("source_type") != "openloris_scene_associations":
-        raise ValueError(f"expected OpenLORIS associations in {associations_path}")
+    associations, associations_path, source_kind = _load_robot_rgbd_associations(log_root)
+    source_info = _source_info(source_kind)
     frames_by_id = _route_frames_by_id(log_root)
     frame_records: list[JsonDict] = []
     warnings: list[str] = []
@@ -61,6 +65,7 @@ def robot_rgbd_to_bev(
         if frame is None:
             warnings.append(f"frame_{frame_id}_missing_from_route_log")
             continue
+        record = _with_manifest_defaults(record, associations=associations, source_kind=source_kind)
         try:
             frame_record = _write_frame(
                 output=output,
@@ -91,8 +96,8 @@ def robot_rgbd_to_bev(
         "source_schema_version": route_manifest.schema_version,
         "source_depth_artifacts": associations_path.as_posix(),
         "source_depth_manifest_sha256": file_sha256(associations_path),
-        "source_depth_teacher_name": "openloris_scene_rgbd",
-        "source_depth_backend": "public_robot_mounted_rgbd_pose",
+        "source_depth_teacher_name": source_info["source_depth_teacher_name"],
+        "source_depth_backend": source_info["source_depth_backend"],
         "source_depth_mock": False,
         "source_depth_real_perception": True,
         "source_name": str(associations.get("source_sequence", route_manifest.segment_id)),
@@ -103,7 +108,8 @@ def robot_rgbd_to_bev(
         "source_geometry_truth": True,
         "depth_truth_metric": True,
         "pose_truth_metric": bool(pose_count > 0),
-        "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
+        "license_name": source_info["license_name"],
+        "license_review_status": source_info["license_review_status"],
         "grid_shape": [grid_cells, grid_cells],
         "camera_config": {
             "meters_per_cell": float(meters_per_cell),
@@ -269,6 +275,62 @@ def _write_frame(
         "artifacts": artifact_records,
         "stats": metadata["stats"],
         "warnings": metadata["warnings"],
+    }
+
+
+def _load_robot_rgbd_associations(log_root: Path) -> tuple[JsonDict, Path, str]:
+    candidates = (
+        (OPENLORIS_ROUTE_ASSOCIATIONS_FILE, "openloris_scene_associations", "openloris"),
+        (TUM_RGBD_ROUTE_ASSOCIATIONS_FILE, "tum_rgbd_associations", "tum_rgbd"),
+    )
+    existing: list[Path] = []
+    for filename, expected_source_type, source_kind in candidates:
+        path = log_root / filename
+        if not path.exists():
+            continue
+        existing.append(path)
+        associations = _read_json(path)
+        if associations.get("source_type") == expected_source_type:
+            return associations, path, source_kind
+    if existing:
+        raise ValueError(
+            "robot RGB-D BEV found associations file(s) but none had a supported source_type: "
+            + ", ".join(path.as_posix() for path in existing)
+        )
+    raise FileNotFoundError(
+        "robot RGB-D BEV requires OpenLORIS or TUM RGB-D route associations; "
+        f"missing {OPENLORIS_ROUTE_ASSOCIATIONS_FILE} and {TUM_RGBD_ROUTE_ASSOCIATIONS_FILE}"
+    )
+
+
+def _with_manifest_defaults(record: JsonDict, *, associations: JsonDict, source_kind: str) -> JsonDict:
+    enriched = dict(record)
+    intrinsics = associations.get("intrinsics")
+    if "intrinsics" not in enriched and isinstance(intrinsics, dict):
+        enriched["intrinsics"] = {
+            "available": True,
+            "status": f"provided_by_{source_kind}_calibration",
+            **intrinsics,
+        }
+    camera_to_base = associations.get("camera_to_base")
+    if "camera_to_base" not in enriched and _valid_matrix(camera_to_base):
+        enriched["camera_to_base"] = camera_to_base
+    return enriched
+
+
+def _source_info(source_kind: str) -> JsonDict:
+    if source_kind == "tum_rgbd":
+        return {
+            "source_depth_teacher_name": "tum_rgbd_rgbd",
+            "source_depth_backend": "public_robot_mounted_tum_rgbd_pose",
+            "license_name": TUM_RGBD_LICENSE_NAME,
+            "license_review_status": TUM_RGBD_LICENSE_REVIEW_STATUS,
+        }
+    return {
+        "source_depth_teacher_name": "openloris_scene_rgbd",
+        "source_depth_backend": "public_robot_mounted_rgbd_pose",
+        "license_name": OPENLORIS_LICENSE_NAME,
+        "license_review_status": OPENLORIS_LICENSE_REVIEW_STATUS,
     }
 
 

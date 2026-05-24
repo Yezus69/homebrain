@@ -27,8 +27,8 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | iGibson | synthetic control data | UNVERIFIED | No | Use only after license check. |
 | ARKitScenes | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
 | ScanNet / ScanNet++ | public indoor geometry data | UNVERIFIED | No | Verify dataset terms. |
-| TUM RGB-D SLAM Dataset | public RGB-D / pose geometry anchor | UNVERIFIED / pending_human_review | No | Official page lists CC BY 4.0; keep pending human review before product/training approval. |
-| OpenLORIS-Scene | public robot-mounted indoor RGB-D/IMU/odom/pose bridge | UNVERIFIED / pending_human_review | No | Official dataset page lists CC BY-ND 4.0; Goal 10A inspected official docs/tools and blocked bounded download before importing real data. |
+| TUM RGB-D SLAM Dataset | public RGB-D / pose geometry anchor | UNVERIFIED / pending_human_review | No | Official page lists CC BY 4.0; Goal 10B downloaded/imported `freiburg2_pioneer_slam` but kept it out of robot-frame action labels because camera-to-base/base-pose semantics are missing. |
+| OpenLORIS-Scene | public robot-mounted indoor RGB-D/IMU/odom/pose bridge | UNVERIFIED / pending_human_review | No | Official dataset page lists CC BY-ND 4.0; Goal 10B imported `cafe1-1_2` and used it for replay-only robot-frame action sanity, not product/runtime approval. |
 | Ego4D / EPIC-KITCHENS | visual clutter/dynamics data | UNVERIFIED | No | Verify dataset terms. |
 
 ## Rule
@@ -136,3 +136,26 @@ TUM RGB-D was also extended to try the robot-mounted `freiburg2_pioneer_slam` fa
 - Fallback sequence/download attempted: `freiburg2_pioneer_slam`, `rgbd_dataset_freiburg2_pioneer_slam.tgz`.
 - License name/status in HomeBrain: `CC BY 4.0` observed previously, with `license_review_status=pending_human_review`.
 - Risk: TUM Pioneer is robot-mounted, but HomeBrain still must not mark it action-valid without robot/base pose and camera-to-base semantics passing the robot-frame action contract.
+
+## Goal 10B dependency update
+
+Goal 10B approved bounded public dataset download/import and did not add product-runtime dependencies, training frameworks, simulator/middleware, or hardware control.
+
+- TUM RGB-D source URL: https://cvg.cit.tum.de/data/datasets/rgbd-dataset
+- TUM sequence/download used: `freiburg2_pioneer_slam`, `rgbd_dataset_freiburg2_pioneer_slam.tgz`, archive size recorded as `1.515` GB.
+- TUM license name/status in HomeBrain: `CC BY 4.0`, with `license_review_status=pending_human_review`.
+- TUM intended use: offline public robot-mounted RGB-D/camera-pose import review. It is not action supervision because HomeBrain has no non-assumed camera-to-base transform or robot/base pose semantics for this route.
+- TUM runtime requirement: no.
+- TUM mock/fallback status: no fake TUM data or transforms were substituted.
+- TUM risk: route groundtruth remains preserved as dataset camera pose, not robot base pose; no TUM Pioneer robot-frame BEV/action labels were generated.
+
+- OpenLORIS-Scene source URL: https://lifelong-robotic-vision.github.io/dataset/scene.html
+- OpenLORIS official download docs: https://github.com/lifelong-robotic-vision/OpenLORIS-Scene/blob/master/download.md
+- OpenLORIS package mirror used: https://huggingface.co/datasets/shixuesong/openloris-scene/tree/main/package
+- OpenLORIS tools/static transform source inspected: https://github.com/lifelong-robotic-vision/openloris-scene-tools at commit `ce6a4839f618bf036d3f3dbae14561bfc7413641`.
+- OpenLORIS sequence/package used: `cafe1-1_2`, selected package `package/cafe1-1_2-package.tar`, package size recorded as `6.954` GB.
+- OpenLORIS license name/status in HomeBrain: `CC BY-ND 4.0`, with `license_review_status=pending_human_review`.
+- OpenLORIS intended use: offline public robot-mounted RGB-D/IMU/odom/pose replay-only robot-frame BEV and action sanity review.
+- OpenLORIS runtime requirement: no.
+- OpenLORIS mock/fallback status: no fake public data, camera-to-base transform, base pose, odom, IMU, or command stream was substituted. Setup used an existing local 7-Zip executable only to extract nested `.7z` package contents.
+- OpenLORIS risk: `CC BY-ND 4.0` needs human/legal review before any training/product use; action sanity passing is structural replay evidence only and remains `control_safe=false`.

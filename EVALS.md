@@ -358,6 +358,46 @@ Full pytest: 51 passed.
 
 Gate interpretation: Goal 10A adds the bridge and verifies the contract path with synthetic robot-frame fixtures, but no real public robot-mounted frames were imported under the bounded download caps. The next gate should stage/download a robot-mounted sequence or reduce the adapter to a smaller officially available package before learned scorer v0.
 
+## Gate 3.4: real public robot-mounted action sanity
+
+Required before learned trajectory scoring:
+- large public dataset downloads require an explicit `--allow-large-download` approval record in setup metadata
+- TUM/OpenLORIS imports preserve only available RGB/depth/pose/odom/IMU fields and masks, without faking camera-to-base, base pose, wheel odometry, commands, or IMU channels
+- `robot_rgbd_to_bev` may run only when depth, intrinsics, camera-to-base, and base pose/odom semantics are present; missing transforms must produce an exact blocker instead of assumed truth
+- real robot-frame public frames enter ActionLabelPack v3 only after `audit_bev_action_sanity` passes
+- DA3/phone and TUM camera-pose geometry-only sources remain excluded or marked geometry-only for action learning
+- every output remains `replay_only=true`, `not_executed=true`, and `control_safe=false`
+
+Goal 10B commands:
+```bash
+python -m homebrain.datasets.setup_tum_rgbd --out data/public/tum_rgbd --sequence freiburg2_pioneer_slam --download --max-download-gb 2.0 --allow-large-download
+python -m homebrain.datasets.tum_rgbd_to_route --source data/public/tum_rgbd/freiburg2_pioneer_slam --out runs/tum_freiburg2_pioneer_slam_route --max-frames 300
+python -m homebrain.geometry.robot_rgbd_to_bev --log runs/tum_freiburg2_pioneer_slam_route --out runs/tum_freiburg2_pioneer_slam_route/geometry/robot_rgbd_bev
+python -m homebrain.datasets.setup_openloris_scene --out data/public/openloris_scene --sequence cafe1-1_2 --download --max-download-gb 8.0 --allow-large-download
+python -m homebrain.datasets.setup_openloris_scene --out data/public/openloris_scene --sequence cafe1-1_2 --package-file data/public/openloris_scene/_downloads/cafe1-1_2-package.tar --max-download-gb 8.0 --allow-large-download
+python -m homebrain.datasets.openloris_to_route --source data/public/openloris_scene/cafe1-1_2 --out runs/openloris_cafe1_2_route --max-frames 300
+python -m homebrain.geometry.robot_rgbd_to_bev --log runs/openloris_cafe1_2_route --out runs/openloris_cafe1_2_route/geometry/robot_rgbd_bev
+python -m homebrain.data.pack_spatial_dataset --log runs/openloris_cafe1_2_route --bev runs/openloris_cafe1_2_route/geometry/robot_rgbd_bev --out runs/openloris_cafe1_2_robot_frame_spatial_pack
+python -m homebrain.policies.audit_bev_action_sanity --source runs/openloris_cafe1_2_robot_frame_spatial_pack --out runs/goal10b_action_sanity_openloris_cafe1_2
+python -m homebrain.policies.run_trajectory_scorer --log runs/openloris_cafe1_2_robot_frame_spatial_pack --bev-source labels --out runs/goal10b_policy_openloris_cafe1_2
+python -m homebrain.policies.build_action_label_pack --source runs/goal9_controlled_bev_maps --source runs/openloris_cafe1_2_robot_frame_spatial_pack --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal10b_action_label_pack_v3 --pack-version 3
+python -m homebrain.policies.qa_action_label_pack --pack runs/goal10b_action_label_pack_v3 --out runs/goal10b_action_label_pack_v3_qa.json
+python -m homebrain.policies.compare_robot_frame_action_sources --source runs/openloris_cafe1_2_robot_frame_spatial_pack --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --label openloris_cafe1_2_robot_frame --label da3_phone_geometry_only --label tum_freiburg1_xyz_geometry_only --out runs/goal10b_robot_frame_source_comparison
+```
+
+Current Goal 10B results:
+```text
+TUM Pioneer downloaded 1.515 GB under max_download_gb=2.0 with explicit large-download approval, imported 300 RGB-D frames plus camera-pose events and accelerometer provenance, then correctly refused robot-frame BEV because camera_to_base and robot_base_pose semantics are missing. No assumed extrinsics were used.
+OpenLORIS cafe1-1_2 downloaded/staged the 6.954 GB package under max_download_gb=8.0, extracted nested .7z archives with local 7-Zip, imported 300 RGB-D/IMU/odom/pose frames, and produced robot-frame BEV using dataset intrinsics, camera-to-base, and base pose/odom evidence.
+OpenLORIS robot BEV validation: bev_frame_count=300, bev_missing_count=0, bev_shape_error_count=0, bev_nan_count=0, free_ratio_mean=0.0283203125, obstacle_ratio_mean=0.076953125, unknown_ratio_mean=0.8947265625, control_safe=false.
+OpenLORIS action sanity: action_supervision_ok_fraction=1.0, robot_center_blocked_rate=0.0, footprint_blocked_rate=0.0, forward_corridor_free_rate=0.0, replay_only=true, not_executed=true, control_safe=false.
+OpenLORIS label-BEV policy: frame_count=300, selected_candidate_id=rotate_left, risky_candidate_fraction=0.00037037037037037035, stop_selected_fraction=0.0, selected_risk_score=0.0, control_safe=false.
+ActionLabelPack v3 QA: example_count=1206, OpenLORIS included=300, excluded_frame_count=393, excluded geometry-only sources room_walk_001_route_short60=59 and tum_freiburg1_xyz_route=120, selected_stop_fraction=0.13764510779436154, selected_motion_fraction=0.8623548922056384, action_entropy=2.0890729289226004, action_label_pack_qa_pass=true.
+Source comparison: OpenLORIS action_supervision_ok_fraction=1.0; DA3 phone geometry=0.0; TUM freiburg1 XYZ geometry-only=0.0.
+```
+
+Gate interpretation: Goal 10B produces the first real public robot-mounted frames that pass the robot-frame action sanity contract, but they remain replay-only and `control_safe=false`. Learned scorer v0 is allowed only as a local research/replay experiment if OpenLORIS license risk is accepted; otherwise collect/stage owned robot-frame logs with measured camera-to-base and base odom/commands first.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

@@ -87,3 +87,25 @@ Command output summary: setup wrote `data/public/openloris_scene/openloris_scene
 Fallback attempt: `python -m homebrain.datasets.setup_tum_rgbd --out data\public\tum_rgbd --sequence freiburg2_pioneer_slam --download --max-download-gb 0.25` resolved the TUM Pioneer robot-mounted archive but refused to download it because it is 1.51 GB, exceeding `max_download_gb=0.25`.
 
 Fallback minimal next repair action: approve a larger bounded TUM Pioneer download or stage `rgbd_dataset_freiburg2_pioneer_slam.tgz`; then import it and keep it geometry-only unless robot/base pose and camera-to-base semantics pass the BEV action contract.
+
+Resolution update: Goal 10B approved bounded downloads. TUM Pioneer `freiburg2_pioneer_slam` downloaded and imported; OpenLORIS `cafe1-1_2` downloaded, extracted, imported, projected to robot-frame BEV, passed action sanity, and entered ActionLabelPack v3. The download-size blocker is resolved, but TUM Pioneer has a separate semantic blocker below.
+
+## 2026-05-24 - Goal 10B TUM Pioneer robot-frame BEV blocked by missing transform semantics
+
+Exact failure: `python -m homebrain.geometry.robot_rgbd_to_bev --log runs/tum_freiburg2_pioneer_slam_route --out runs/tum_freiburg2_pioneer_slam_route/geometry/robot_rgbd_bev` refused to write robot-frame BEV: `camera_to_base transform is missing; rerun with --review-assumed-extrinsics only for review artifacts marked robot_frame_truth=false`.
+
+Likely cause: the public TUM RGB-D `freiburg2_pioneer_slam` archive provides RGB, depth, groundtruth camera pose, and accelerometer samples, but the HomeBrain importer has no non-assumed camera-to-base transform and no robot/base pose semantics for the route. The imported groundtruth is preserved as dataset camera pose, not promoted to robot base pose.
+
+Minimal next repair action: locate official TUM Pioneer camera-to-base/base-link calibration and robot/base pose semantics if they exist, or use a dataset/log with measured camera-to-base and base odometry. Do not use `--review-assumed-extrinsics` for action labels; if it is used for review-only geometry, keep `robot_frame_truth=false`, `action_supervision_ok=false`, and `control_safe=false`.
+
+Command output summary: TUM setup downloaded a `1.515` GB archive under `max_download_gb=2.0` with `large_download_approval_record.approved=true`; route import wrote `runs/tum_freiburg2_pioneer_slam_route` with 300 RGB-D frames, 300 camera-pose events, `has_accelerometer=true`, `has_camera_to_base_transform=false`, `has_robot_base_pose=false`, `has_wheel_odometry=false`, and `has_commands=false`. No TUM robot-frame BEV, TUM Pioneer SpatialTrainPack, TUM Pioneer action sanity JSON, or TUM Pioneer ActionLabelPack examples were generated.
+
+## 2026-05-24 - Goal 10B OpenLORIS robot-frame route status
+
+Exact failure: none active for the Goal 10B OpenLORIS fallback. OpenLORIS `cafe1-1_2` setup, import, robot-frame BEV, SpatialTrainPack, action sanity, label-BEV policy, source comparison, ActionLabelPack v3, and QA completed.
+
+Likely cause: not applicable. The fallback had the required RGB-D, camera-to-base, base pose/odom, and IMU evidence for robot-frame review. A setup wrinkle was fixed: the downloaded package tar contained nested `.7z` archives, and setup now uses an existing local 7-Zip executable when available.
+
+Minimal next repair action: not applicable for Goal 10B completion. Before learned scorer v0, decide whether OpenLORIS `CC BY-ND 4.0` can be used for local research replay labels, or collect/stage owned robot-frame logs with measured camera-to-base, wheel odom, and commands.
+
+Command output summary: OpenLORIS setup staged the `6.954` GB package under `max_download_gb=8.0`; route import wrote 300 frames with `robot_frame_truth=true`; BEV validation reported `bev_missing_count=0`, `bev_shape_error_count=0`, and `bev_nan_count=0`; action sanity reported `action_supervision_ok_fraction=1.0`; ActionLabelPack v3 QA reported `example_count=1206`, `cafe1-1_2=300`, `excluded_frame_count=393`, `action_label_pack_qa_pass=true`, and all safety flags `replay_only=true`, `not_executed=true`, `control_safe=false`.

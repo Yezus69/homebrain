@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import ssl
+import subprocess
 import tarfile
 import urllib.request
 import zipfile
@@ -423,11 +424,13 @@ def extract_package(archive_path: str | Path, out_dir: str | Path, sequence: str
     if suffixes.endswith(".tar") or suffixes.endswith(".tar.gz") or suffixes.endswith(".tgz"):
         with tarfile.open(archive, "r:*") as tar:
             _safe_extract_tar(tar, extract_root)
+        _extract_nested_7z_archives(extract_root)
     elif suffixes.endswith(".zip"):
         with zipfile.ZipFile(archive) as zipped:
             _safe_extract_zip(zipped, extract_root)
+        _extract_nested_7z_archives(extract_root)
     elif suffixes.endswith(".7z"):
-        raise RuntimeError("OpenLORIS package archive is .7z; install 7z and extract it manually before import")
+        _extract_7z_archive(archive, extract_root / archive.stem)
     else:
         raise RuntimeError(f"unsupported OpenLORIS archive type: {archive.name}")
     discovered = discover_sequence_root(extract_root)
@@ -523,11 +526,20 @@ def _parse_intrinsics_from_sensors_yaml(path: Path, camera_id: str) -> JsonDict:
     if not path.exists():
         return {"available": False, "status": "missing", "depth_scale": OPENLORIS_DEPTH_SCALE}
     text = path.read_text(encoding="utf-8", errors="replace")
-    camera_position = text.find(camera_id)
-    search_text = text[camera_position:] if camera_position >= 0 else text
-    matrices = re.findall(r"data:\s*\[([^\]]+)\]", search_text)
+    search_text = _sensor_yaml_section(text, camera_id)
+    matrices = re.findall(r"intrinsics:\s*!!opencv-matrix.*?data:\s*\[([^\]]+)\]", search_text, flags=re.S)
     for matrix_text in matrices:
         values = _float_list(matrix_text)
+        if len(values) == 4 and values[0] > 0.0 and values[2] > 0.0:
+            return {
+                "available": True,
+                "fx": float(values[0]),
+                "fy": float(values[2]),
+                "cx": float(values[1]),
+                "cy": float(values[3]),
+                "depth_scale": OPENLORIS_DEPTH_SCALE,
+                "source": "sensors.yaml_camera_intrinsics",
+            }
         if len(values) >= 9 and values[0] > 0.0 and values[4] > 0.0:
             return {
                 "available": True,
@@ -539,6 +551,22 @@ def _parse_intrinsics_from_sensors_yaml(path: Path, camera_id: str) -> JsonDict:
                 "source": "sensors.yaml_camera_matrix",
             }
     return {"available": False, "status": "not_found_in_sensors_yaml", "depth_scale": OPENLORIS_DEPTH_SCALE}
+
+
+def _sensor_yaml_section(text: str, camera_id: str) -> str:
+    names = [camera_id]
+    if not camera_id.endswith("_optical_frame"):
+        names.append(f"{camera_id}_optical_frame")
+    for name in names:
+        match = re.search(rf"(?m)^{re.escape(name)}:\s*$", text)
+        if match is None:
+            continue
+        start = match.start()
+        next_match = re.search(r"(?m)^[A-Za-z0-9_]+:\s*$", text[match.end() :])
+        end = match.end() + next_match.start() if next_match is not None else len(text)
+        return text[start:end]
+    camera_position = text.find(camera_id)
+    return text[camera_position:] if camera_position >= 0 else text
 
 
 def _float_list(value: str) -> list[float]:
@@ -598,6 +626,45 @@ def _safe_extract_zip(archive: zipfile.ZipFile, out_dir: Path) -> None:
         if out_root not in target.parents and target != out_root:
             raise ValueError(f"unsafe archive member path: {member.filename}")
     archive.extractall(out_dir)
+
+
+def _extract_nested_7z_archives(root: Path) -> None:
+    for archive in sorted(root.rglob("*.7z")):
+        _extract_7z_archive(archive, archive.with_suffix(""))
+
+
+def _extract_7z_archive(archive: Path, out_dir: Path) -> None:
+    executable = _find_7z_executable()
+    if executable is None:
+        raise RuntimeError(
+            "OpenLORIS package contains .7z archives, but no 7z executable was found; "
+            "install 7-Zip or extract the package manually before import"
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [executable.as_posix(), "x", "-y", f"-o{out_dir.as_posix()}", archive.as_posix()],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        summary = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = summary[-1] if summary else "no extractor output"
+        raise RuntimeError(f"7z failed to extract {archive.name}: {detail}")
+
+
+def _find_7z_executable() -> Path | None:
+    path_value = shutil.which("7z") or shutil.which("7zz") or shutil.which("7za")
+    if path_value:
+        return Path(path_value)
+    for candidate in (
+        Path("C:/Program Files/7-Zip/7z.exe"),
+        Path("C:/Program Files/NVIDIA Corporation/NVIDIA GeForce Experience/7z.exe"),
+        Path("C:/Program Files/Unity/Editor/Data/Tools/7z.exe"),
+    ):
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _ssl_context() -> ssl.SSLContext:
