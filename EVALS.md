@@ -269,6 +269,56 @@ ActionLabelPack QA: example_count=1299, candidate_count_mean=9.0, selected_stop_
 
 Gate interpretation: Goal 9A is an audit and deterministic action-labeling gate only. Stop-heavy model and label behavior is not hidden, and ActionLabelPack v0 is replay-only supervision for later experiments, not a learned policy or control evidence.
 
+## Gate 3.2: robot-frame BEV/action sanity repair
+
+Required before learned trajectory scoring:
+- BEV action contract documents channels, origin, footprint, frame types, and action truth flags
+- DA3/phone and TUM/public RGB-D BEVs are not treated as robot-frame action truth by default
+- BEV action sanity reports center/footprint/corridor/candidate block reasons per source and frame
+- derived traversability views preserve raw labels and remain `derived=true`, `review_required=true`, and `control_safe=false`
+- scorer calibration sweeps only transparent knobs and refuses configs that fail controlled open/blocked gates
+- ActionLabelPack v1 includes `source_weight` and `action_supervision_ok` and excludes/flags bad action frames
+- old-vs-calibrated policy comparison marks stop-heavy reviewed/modeld sources as geometry-only for action learning
+
+BEV action sanity metrics:
+```text
+robot_center_blocked_rate
+footprint_blocked_rate
+forward_corridor_free_rate
+occupied_ratio_near_robot
+unknown_ratio_near_robot
+risky_ratio_near_robot
+candidate_block_reason_counts
+origin_frame_status_distribution
+action_supervision_ok_fraction
+```
+
+Current Goal 9B commands:
+```bash
+python -m homebrain.policies.audit_bev_action_sanity --source runs/goal9_controlled_bev_maps --out runs/goal9b_action_sanity_controlled
+python -m homebrain.policies.audit_bev_action_sanity --source runs/room_walk_001_da3_stable_spatial_pack_short60 --out runs/goal9b_action_sanity_da3
+python -m homebrain.policies.audit_bev_action_sanity --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal9b_action_sanity_tum
+python -m homebrain.policies.build_traversability_view --source runs/room_walk_001_da3_stable_spatial_pack_short60 --out runs/goal9b_traversability_da3
+python -m homebrain.policies.build_traversability_view --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal9b_traversability_tum
+python -m homebrain.policies.sweep_scorer_config --source runs/goal9_controlled_bev_maps --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal9b_scorer_sweep
+python -m homebrain.policies.build_action_label_pack --source runs/goal9_controlled_bev_maps --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal9b_action_label_pack_v1 --pack-version 1
+python -m homebrain.policies.qa_action_label_pack --pack runs/goal9b_action_label_pack_v1 --out runs/goal9b_action_label_pack_v1_qa.json
+python -m homebrain.policies.compare_scorer_configs --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --source runs/spatial_v0_goal7b_modeld_short60 --source runs/spatial_v0_goal7b_modeld_tum --config runs/goal9b_scorer_sweep/scorer_sweep.json --out runs/goal9b_policy_comparison
+```
+
+Current Goal 9B results:
+```text
+Controlled action sanity: action_supervision_ok_fraction=0.8089285714285714, open_room action_supervision_ok_fraction=1.0, robot_center_blocked_rate=0.0, footprint_blocked_rate=0.19107142857142856.
+DA3 action sanity: action_supervision_ok_fraction=0.0, robot_center_blocked_rate=1.0, footprint_blocked_rate=1.0, forward_corridor_free_rate=0.0, origin_frame_status=not_robot_frame_truth_phone_teacher_geometry.
+TUM action sanity: action_supervision_ok_fraction=0.0, robot_center_blocked_rate=1.0, footprint_blocked_rate=1.0, forward_corridor_free_rate=0.0, origin_frame_status=not_robot_frame_truth_public_rgbd_camera_pose.
+Scorer sweep selected config: unknown_weight=0.8, risk_weight=12.0, obstacle_threshold=0.35, footprint_radius_cells=3, obstacle_inflation_cells=1, stop_bias=10.0.
+Scorer sweep gates: controlled_open_motion_rate=1.0, blocked_map_stop_rate=1.0, reviewed_motion_rate=0.09497206703910614, collision_proxy_rate=0.0, stop_fraction=0.41878367975365666.
+ActionLabelPack v1 QA: example_count=906, excluded_frame_count=393, selected_stop_fraction=0.18322295805739514, selected_motion_fraction=0.8167770419426048, action_label_pack_qa_pass=true.
+Old vs calibrated comparison: DA3 labels old/calibrated stop_fraction=1.0/1.0; TUM labels=0.8583333333333333/0.8583333333333333; short60 modeld=1.0/1.0; TUM modeld=0.8916666666666667/0.9. All four are marked geometry_only for action learning.
+```
+
+Gate interpretation: Goal 9B repairs the action contract and filtering path, not the real BEV labels themselves. Controlled maps are usable replay-only action-supervision proxies after sanity filtering; current DA3/TUM reviewed labels and modeld BEVs remain geometry-only for action learning until robot-frame origin/footprint semantics are repaired.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

@@ -22,11 +22,22 @@ from homebrain.data.spatial_dataset import (
     write_json,
 )
 from homebrain.messages.schema import JsonDict
+from homebrain.policies.bev_action_sanity import (
+    ActionSanityConfig,
+    LoadedBevFrame,
+    contract_flags_for_frame,
+    evaluate_loaded_frame,
+    meters_per_cell_from_manifest,
+    robot_radius_m_from_manifest,
+    source_weight_for_sanity,
+)
 from homebrain.policies.candidate_trajectories import CandidateTrajectory, candidates_hash, generate_default_candidates
+from homebrain.policies.run_trajectory_scorer import BevDecisionInput
 from homebrain.policies.trajectory_scorer import LocalBev, RISKY_CANDIDATE_THRESHOLD
 from homebrain.teachers.artifacts import file_sha256, relative_to_root
 
 ACTION_LABEL_PACK_SCHEMA_VERSION = "homebrain.action_label_pack.v0"
+ACTION_LABEL_PACK_SCHEMA_VERSION_V1 = "homebrain.action_label_pack.v1"
 ACTION_LABEL_EXAMPLE_SCHEMA_VERSION = "homebrain.action_label_example.v0"
 COLLISION_THRESHOLD = RISKY_CANDIDATE_THRESHOLD
 UNKNOWN_BLOCK_THRESHOLD = 0.95
@@ -39,10 +50,15 @@ class SourceFrame:
     frame_id: int
     timestamp_ns: int
     source_name: str
+    source_family: str
     source_ref: str
     supervision_grade: str
     scenario_name: str
     bev: LocalBev
+    action_supervision_ok: bool
+    source_weight: float
+    action_sanity: JsonDict
+    contract_flags: JsonDict
 
 
 @dataclass(frozen=True)
@@ -63,6 +79,7 @@ def build_action_label_pack(
     sources: list[str | Path],
     out_dir: str | Path,
     max_examples: int | None = None,
+    pack_version: int = 0,
 ) -> Path:
     if not sources:
         raise ValueError("at least one source is required")
@@ -78,6 +95,30 @@ def build_action_label_pack(
         loaded_frames, manifest = _load_spatial_pack_frames(source_root)
         frames.extend(loaded_frames)
         source_manifests.append(manifest)
+    excluded_frames: list[JsonDict] = []
+    if pack_version >= 1:
+        kept: list[SourceFrame] = []
+        for frame in frames:
+            if frame.action_supervision_ok:
+                kept.append(frame)
+            else:
+                excluded_frames.append(
+                    {
+                        "sequence_id": frame.sequence_id,
+                        "camera_id": frame.camera_id,
+                        "frame_id": frame.frame_id,
+                        "timestamp_ns": frame.timestamp_ns,
+                        "source_name": frame.source_name,
+                        "source_family": frame.source_family,
+                        "source_ref": frame.source_ref,
+                        "scenario_name": frame.scenario_name,
+                        "action_supervision_ok": False,
+                        "source_weight": frame.source_weight,
+                        "origin_frame_status": frame.action_sanity.get("origin_frame_status"),
+                        "reject_reasons": frame.action_sanity.get("action_supervision_reject_reasons", []),
+                    }
+                )
+        frames = kept
     if max_examples is not None:
         frames = frames[:max_examples]
     if not frames:
@@ -114,12 +155,16 @@ def build_action_label_pack(
                 "frame_id": frame.frame_id,
                 "timestamp_ns": frame.timestamp_ns,
                 "source_name": frame.source_name,
+                "source_family": frame.source_family,
                 "source_ref": frame.source_ref,
                 "supervision_grade": frame.supervision_grade,
                 "scenario_name": frame.scenario_name,
                 "selected_candidate_id": selected.candidate_id,
                 "selected_by_expert_count": 1,
                 "candidate_count": len(labels),
+                "source_weight": round(float(frame.source_weight), 6),
+                "action_supervision_ok": bool(frame.action_supervision_ok),
+                "origin_frame_status": frame.action_sanity.get("origin_frame_status"),
                 "replay_only": True,
                 "not_executed": True,
                 "control_safe": False,
@@ -127,11 +172,11 @@ def build_action_label_pack(
         )
 
     manifest: JsonDict = {
-        "schema_version": ACTION_LABEL_PACK_SCHEMA_VERSION,
+        "schema_version": ACTION_LABEL_PACK_SCHEMA_VERSION_V1 if pack_version >= 1 else ACTION_LABEL_PACK_SCHEMA_VERSION,
         "example_schema_version": ACTION_LABEL_EXAMPLE_SCHEMA_VERSION,
         "created_at_utc": DETERMINISTIC_CREATED_AT_UTC,
         "package_type": "ActionLabelPack",
-        "version": 0,
+        "version": int(pack_version),
         "source_dirs": [source.as_posix() for source in source_roots],
         "source_manifest_sha256": [
             file_sha256(source / "manifest.json") if (source / "manifest.json").exists() else "missing"
@@ -147,6 +192,13 @@ def build_action_label_pack(
         "source_distribution": dict(sorted(source_distribution.items())),
         "selected_distribution": dict(sorted(selected_distribution.items())),
         "scoring": _scoring_description(),
+        "action_sanity_filter": {
+            "enabled": bool(pack_version >= 1),
+            "schema_version": "homebrain.bev_action_sanity.v0",
+            "excluded_frame_count": len(excluded_frames),
+            "policy": "v1 includes only action_supervision_ok frames; excluded frames are retained as manifest audit records",
+        },
+        "excluded_frames": excluded_frames,
         "supervision_type": "deterministic_candidate_trajectory_scores",
         "replay_only": True,
         "not_executed": True,
@@ -171,11 +223,26 @@ def expert_labels_for_frame(
         _raw_expert_label(candidate, bev=bev, selected_by_expert=False)
         for candidate in candidates
     ]
-    motion = [label for label in raw if label.candidate_id != "stop"]
+    motion = [
+        label
+        for candidate, label in zip(candidates, raw)
+        if label.candidate_id != "stop" and abs(float(candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0))) > 0.0
+    ]
     all_motion_blocked = bool(motion) and all(
         label.collision_proxy >= COLLISION_THRESHOLD or label.unknown_penalty >= UNKNOWN_BLOCK_THRESHOLD
+        or label.coverage_gain <= 0.0
         for label in motion
     )
+    straight_motion = [
+        label
+        for label in raw
+        if label.candidate_id in {"straight_short", "straight_medium"}
+    ]
+    straight_blocked = bool(straight_motion) and all(
+        label.collision_proxy >= COLLISION_THRESHOLD or label.unknown_penalty >= UNKNOWN_BLOCK_THRESHOLD
+        for label in straight_motion
+    )
+    all_motion_blocked = all_motion_blocked or straight_blocked
     adjusted = [_adjust_stop_label(label, all_motion_blocked=all_motion_blocked) for label in raw]
     selected_index = min(
         range(len(adjusted)),
@@ -270,9 +337,15 @@ def _example_arrays(frame: SourceFrame, labels: tuple[ExpertCandidateLabel, ...]
         "sequence_id": scalar_str(frame.sequence_id),
         "camera_id": scalar_str(frame.camera_id),
         "source_name": scalar_str(frame.source_name),
+        "source_family": scalar_str(frame.source_family),
         "source_ref": scalar_str(frame.source_ref),
         "supervision_grade": scalar_str(frame.supervision_grade),
         "scenario_name": scalar_str(frame.scenario_name),
+        "source_weight": scalar_float(frame.source_weight),
+        "action_supervision_ok": scalar_bool(frame.action_supervision_ok),
+        "origin_frame_status": scalar_str(str(frame.action_sanity.get("origin_frame_status", "unknown"))),
+        "robot_frame_truth": scalar_bool(bool(frame.action_sanity.get("robot_frame_truth", False))),
+        "action_sanity_json": scalar_str(json.dumps(frame.action_sanity, sort_keys=True, separators=(",", ":"))),
         "candidate_ids": np.asarray([label.candidate_id for label in labels]),
         "candidate_count": scalar_int(len(labels)),
         "collision_proxy": np.asarray([label.collision_proxy for label in labels], dtype=np.float32),
@@ -301,7 +374,11 @@ def _load_spatial_pack_frames(root: Path) -> tuple[list[SourceFrame], JsonDict]:
         raise ValueError(f"source pack manifest examples must be a list: {root}")
     records: list[SourceFrame] = []
     default_source_name = str(manifest.get("source_name") or manifest.get("source_segment_id") or root.name)
+    default_source_family = str(manifest.get("source_family") or "unknown")
     default_grade = str(manifest.get("supervision_grade") or manifest.get("robot_supervision_grade") or "unknown")
+    meters_per_cell = meters_per_cell_from_manifest(manifest, tuple(manifest.get("grid_shape", [32, 32])))  # type: ignore[arg-type]
+    robot_radius_m = robot_radius_m_from_manifest(manifest, meters_per_cell)
+    sanity_config = ActionSanityConfig()
     for record in examples:
         if not isinstance(record, dict) or not isinstance(record.get("example_path"), str):
             continue
@@ -309,31 +386,64 @@ def _load_spatial_pack_frames(root: Path) -> tuple[list[SourceFrame], JsonDict]:
         example = load_example_npz(example_path)
         _validate_source_flags(example, example_path)
         source_name = _scalar_or_record_str(example, record, "source_name", default_source_name)
+        source_family = _scalar_or_record_str(example, record, "source_family", default_source_family)
         supervision_grade = _scalar_or_record_str(example, record, "supervision_grade", default_grade)
         scenario_name = _scalar_or_record_str(example, record, "scenario_name", "unknown")
         free = np.asarray(example["bev_free"], dtype=np.float32)
         obstacle = np.asarray(example["bev_obstacle"], dtype=np.float32)
         unknown = np.asarray(example["bev_unknown"], dtype=np.float32)
         confidence = np.asarray(example["bev_confidence"], dtype=np.float32)
+        traversable = np.asarray(example["bev_traversable"], dtype=np.float32) if "bev_traversable" in example else free.copy()
+        risky = np.asarray(example["bev_risky"], dtype=np.float32) if "bev_risky" in example else obstacle.copy()
+        bev = LocalBev(
+            free=free,
+            occupied=obstacle,
+            unknown=unknown,
+            traversable=traversable,
+            risky=risky,
+            confidence=confidence,
+            source="labels",
+        )
+        decision_input = BevDecisionInput(
+            sequence_id=str(record.get("sequence_id", manifest.get("source_segment_id", root.name))),
+            camera_id=str(record.get("camera_id", "front_rgb")),
+            frame_id=int(record.get("frame_id", np.asarray(example["frame_id"]).item())),
+            timestamp_ns=int(record.get("timestamp_ns", np.asarray(example["timestamp_ns"]).item())),
+            bev=bev,
+            pose_delta=None,
+            source_ref=str(record["example_path"]),
+        )
+        loaded_frame = LoadedBevFrame(
+            record=decision_input,
+            source_root=root,
+            source_name=source_name,
+            source_family=source_family,
+            scenario_name=scenario_name,
+            supervision_grade=supervision_grade,
+            source_kind="spatial_train_pack",
+            source_manifest=manifest,
+            frame_record=record,
+            meters_per_cell=meters_per_cell,
+            robot_radius_m=robot_radius_m,
+        )
+        action_sanity = evaluate_loaded_frame(loaded_frame, config=sanity_config)
+        contract_flags = contract_flags_for_frame(loaded_frame)
         records.append(
             SourceFrame(
-                sequence_id=str(record.get("sequence_id", manifest.get("source_segment_id", root.name))),
-                camera_id=str(record.get("camera_id", "front_rgb")),
-                frame_id=int(record.get("frame_id", np.asarray(example["frame_id"]).item())),
-                timestamp_ns=int(record.get("timestamp_ns", np.asarray(example["timestamp_ns"]).item())),
+                sequence_id=decision_input.sequence_id,
+                camera_id=decision_input.camera_id,
+                frame_id=decision_input.frame_id,
+                timestamp_ns=decision_input.timestamp_ns,
                 source_name=source_name,
+                source_family=source_family,
                 source_ref=str(record["example_path"]),
                 supervision_grade=supervision_grade,
                 scenario_name=scenario_name,
-                bev=LocalBev(
-                    free=free,
-                    occupied=obstacle,
-                    unknown=unknown,
-                    traversable=free.copy(),
-                    risky=obstacle.copy(),
-                    confidence=confidence,
-                    source="labels",
-                ),
+                bev=bev,
+                action_supervision_ok=bool(action_sanity.get("action_supervision_ok", False)),
+                source_weight=source_weight_for_sanity(action_sanity),
+                action_sanity=action_sanity,
+                contract_flags=contract_flags,
             )
         )
     return records, manifest
@@ -469,8 +579,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", action="append", required=True, help="Input controlled/reviewed BEV pack.")
     parser.add_argument("--out", required=True, help="Output ActionLabelPack directory.")
     parser.add_argument("--max-examples", type=int, default=None)
+    parser.add_argument("--pack-version", type=int, choices=(0, 1), default=0)
     args = parser.parse_args(argv)
-    manifest = build_action_label_pack(sources=[Path(source) for source in args.source], out_dir=args.out, max_examples=args.max_examples)
+    manifest = build_action_label_pack(
+        sources=[Path(source) for source in args.source],
+        out_dir=args.out,
+        max_examples=args.max_examples,
+        pack_version=args.pack_version,
+    )
     print(json.dumps({"manifest": manifest.as_posix()}, sort_keys=True))
     return 0
 

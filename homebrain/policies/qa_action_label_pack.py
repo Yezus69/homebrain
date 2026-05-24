@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from homebrain.data.spatial_dataset import load_example_npz, mean, np_scalar_to_bool, np_scalar_to_str, read_json, write_json
-from homebrain.policies.build_action_label_pack import ACTION_LABEL_PACK_SCHEMA_VERSION
+from homebrain.policies.build_action_label_pack import ACTION_LABEL_PACK_SCHEMA_VERSION, ACTION_LABEL_PACK_SCHEMA_VERSION_V1
 
 ACTION_LABEL_QA_SCHEMA_VERSION = "homebrain.action_label_pack_qa.v0"
 DOMINANT_ACTION_FRACTION = 0.90
@@ -24,8 +24,10 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - QA reports malformed packs.
         return _failed_metrics(root, f"missing_or_malformed_manifest: {exc}")
 
-    if manifest.get("schema_version") != ACTION_LABEL_PACK_SCHEMA_VERSION:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {ACTION_LABEL_PACK_SCHEMA_VERSION, ACTION_LABEL_PACK_SCHEMA_VERSION_V1}:
         errors.append(f"unsupported schema_version={manifest.get('schema_version')!r}")
+    is_v1 = schema_version == ACTION_LABEL_PACK_SCHEMA_VERSION_V1
     example_records = manifest.get("examples")
     if not isinstance(example_records, list):
         return _failed_metrics(root, "manifest examples must be a list")
@@ -34,6 +36,8 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     selected_ids: list[str] = []
     source_names: list[str] = []
     selected_by_source: dict[str, list[str]] = {}
+    action_ok_by_source: dict[str, list[bool]] = {}
+    weight_by_source: dict[str, list[float]] = {}
     coverage_gains: list[float] = []
     collision_positive_count = 0
     collision_total_count = 0
@@ -69,6 +73,8 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
             "selected_by_expert",
             "selected_candidate_id",
             "source_name",
+            "action_supervision_ok" if is_v1 else "source_name",
+            "source_weight" if is_v1 else "source_name",
             "replay_only",
             "not_executed",
             "control_safe",
@@ -111,6 +117,10 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         source_name = np_scalar_to_str(example["source_name"])
         source_names.append(source_name)
         selected_by_source.setdefault(source_name, []).append(selected_ids[-1])
+        if "action_supervision_ok" in example:
+            action_ok_by_source.setdefault(source_name, []).append(np_scalar_to_bool(example["action_supervision_ok"]))
+        if "source_weight" in example:
+            weight_by_source.setdefault(source_name, []).append(float(np.asarray(example["source_weight"], dtype=np.float32).item()))
         coverage_gains.extend(float(value) for value in coverage.tolist())
         collision_positive_count += int(np.count_nonzero(collision >= np.float32(0.35)))
         collision_total_count += int(collision.size)
@@ -130,6 +140,24 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     source_selected_motion_fraction = {
         source_name: float(sum(1 for value in values if value != "stop") / max(len(values), 1))
         for source_name, values in sorted(selected_by_source.items())
+    }
+    source_action_supervision_ok_fraction = {
+        source_name: float(sum(1 for value in values if value) / max(len(values), 1))
+        for source_name, values in sorted(action_ok_by_source.items())
+    }
+    source_weight_mean = {
+        source_name: mean([float(value) for value in values])
+        for source_name, values in sorted(weight_by_source.items())
+    }
+    per_source = {
+        source_name: {
+            "example_count": len(selected_by_source.get(source_name, [])),
+            "selected_stop_fraction": source_selected_stop_fraction.get(source_name, 0.0),
+            "selected_motion_fraction": source_selected_motion_fraction.get(source_name, 0.0),
+            "action_supervision_ok_fraction": source_action_supervision_ok_fraction.get(source_name, 0.0),
+            "source_weight_mean": source_weight_mean.get(source_name, 0.0),
+        }
+        for source_name in sorted(source_distribution)
     }
     dominant_fraction = max(selected_distribution.values(), default=0) / max(example_count, 1)
     flags: list[str] = []
@@ -159,6 +187,12 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "source_selected_distribution": source_selected_distribution,
         "source_selected_stop_fraction": source_selected_stop_fraction,
         "source_selected_motion_fraction": source_selected_motion_fraction,
+        "source_action_supervision_ok_fraction": source_action_supervision_ok_fraction,
+        "source_weight_mean": source_weight_mean,
+        "per_source": per_source,
+        "excluded_frame_count": int(manifest.get("action_sanity_filter", {}).get("excluded_frame_count", 0))
+        if isinstance(manifest.get("action_sanity_filter"), dict)
+        else 0,
         "dominant_action_fraction": float(dominant_fraction),
         "deterministic_hash": _pack_hash(root, example_records),
         "missing_count": missing_count,
