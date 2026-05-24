@@ -32,23 +32,39 @@ def train_spatial_v0(
     device_name: str | None = None,
     batch_size: int = 4,
     learning_rate: float = 1e-3,
+    seed: int = 7,
+    sensor_context_mode: str = "masks",
 ) -> dict[str, Any]:
-    torch.manual_seed(7)
+    torch.manual_seed(seed)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     pack_specs = _pack_specs(dataset_dir=dataset_dir, feature_dir=feature_dir, dataset_manifest=dataset_manifest)
-    train_dataset = _build_dataset(pack_specs, split="train", tiny_overfit=tiny_overfit)
-    val_dataset = train_dataset if tiny_overfit else _build_dataset(pack_specs, split="val", tiny_overfit=False)
+    train_dataset = _build_dataset(
+        pack_specs,
+        split="train",
+        tiny_overfit=tiny_overfit,
+        sensor_context_mode=sensor_context_mode,
+    )
+    val_dataset = train_dataset if tiny_overfit else _build_dataset(
+        pack_specs,
+        split="val",
+        tiny_overfit=False,
+        sensor_context_mode=sensor_context_mode,
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=min(batch_size, len(train_dataset)),
         shuffle=True,
-        generator=_generator(),
+        generator=_generator(seed),
     )
     train_eval_loader = DataLoader(train_dataset, batch_size=min(batch_size, len(train_dataset)), shuffle=False)
     val_loader = DataLoader(val_dataset, batch_size=min(batch_size, len(val_dataset)), shuffle=False)
 
     feature_dim = int(train_dataset.feature_shape[-1])
-    config = SpatialMemoryNetConfig(feature_dim=feature_dim, bev_shape=train_dataset.grid_shape)
+    config = SpatialMemoryNetConfig(
+        feature_dim=feature_dim,
+        bev_shape=train_dataset.grid_shape,
+        sensor_dim=int(train_dataset[0]["sensor_mask"].shape[0]) + 1,
+    )
     model = SpatialMemoryNetV0(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
 
@@ -94,6 +110,8 @@ def train_spatial_v0(
         "device": str(device),
         "batch_size": batch_size,
         "learning_rate": learning_rate,
+        "seed": int(seed),
+        "sensor_context_mode": sensor_context_mode,
         "example_count": len(train_dataset),
         "val_example_count": len(val_dataset),
         "feature_shape": list(train_dataset.feature_shape),
@@ -138,6 +156,8 @@ def train_spatial_v0(
             "tiny_overfit": tiny_overfit,
             "batch_size": batch_size,
             "learning_rate": learning_rate,
+            "seed": int(seed),
+            "sensor_context_mode": sensor_context_mode,
             "device": str(device),
             "representation_pretraining_only": True,
             "control_safe": False,
@@ -157,6 +177,7 @@ def train_spatial_v0(
             "control_safe": False,
             "robot_supervision_grade": train_dataset.robot_supervision_grade,
             "data_manifest_hashes": data_hashes,
+            "sensor_context_mode": sensor_context_mode,
         },
         metrics=metrics,
     )
@@ -188,6 +209,7 @@ def _build_dataset(
     *,
     split: str,
     tiny_overfit: bool,
+    sensor_context_mode: str,
 ) -> SpatialTrainDataset | SpatialMultiPackDataset:
     if len(pack_specs) == 1:
         spec = pack_specs[0]
@@ -197,8 +219,14 @@ def _build_dataset(
             split=split,
             source_name=spec.source_name,
             tiny_overfit=tiny_overfit,
+            sensor_context_mode=sensor_context_mode,
         )
-    return SpatialMultiPackDataset(pack_specs, split=split, tiny_overfit=tiny_overfit)
+    return SpatialMultiPackDataset(
+        pack_specs,
+        split=split,
+        tiny_overfit=tiny_overfit,
+        sensor_context_mode=sensor_context_mode,
+    )
 
 
 def _source_metrics(
@@ -240,9 +268,9 @@ def _pack_spec_record(spec: SpatialPackSpec) -> dict[str, Any]:
     }
 
 
-def _generator() -> torch.Generator:
+def _generator(seed: int) -> torch.Generator:
     generator = torch.Generator()
-    generator.manual_seed(7)
+    generator.manual_seed(seed)
     return generator
 
 
@@ -257,6 +285,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--sensor-context-mode", choices=("masks", "odom"), default="masks")
     args = parser.parse_args(argv)
     metrics = train_spatial_v0(
         dataset_dir=args.dataset,
@@ -268,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
         device_name=args.device,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        seed=args.seed,
+        sensor_context_mode=args.sensor_context_mode,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0

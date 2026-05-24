@@ -438,6 +438,45 @@ Full pytest: 55 passed.
 
 Gate interpretation: Goal 11A proves a replay-only learned scorer can train, save/load, eval on oracle/model BEV, and flow through modeld/replay. It is not a control policy. The OpenLORIS expert labels for the 300-frame subset collapse to `straight_short`, and the learned scorer inherits that collapse while reporting `distribution_collapse_flag=true`. OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`, so these artifacts are local research/replay outputs only.
 
+## Gate 3.6: multi-route robot-frame nightly benchmark
+
+Required before treating learned spatial memory and trajectory scoring as meaningful across public robot-mounted routes:
+- stage multiple real OpenLORIS robot-frame RGB-D/odom/pose routes without faking sensors or transforms
+- produce robot-frame BEV, SpatialTrainPack, QA, action sanity, and real DINOv2 features per evaluated route
+- build ActionLabelPack v4 with controlled coverage expert labels, robot-frame coverage/risk labels, and future-motion candidate labels from base pose/odom
+- exclude DA3/TUM/phone geometry-only frames from action supervision
+- run 4 configs x 2 seeds at the target step budget unless exact compute/data blockers are recorded
+- run held-out route replay with best spatial+scorer checkpoints and write BrainOutputEvents/eval/contact sheets
+- run leave-one-route-out and leave-one-scene-out generalization where the route set allows it
+- report collapse explicitly using `action_entropy<1.0` or `dominant_action_fraction>0.65`
+- keep all outputs `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`
+
+Goal 11B commands:
+```bash
+python -m homebrain.tools.run_goal11b_nightly --run-root runs/goal11b_nightly --max-total-gb 48 --max-frames-per-route 1200 --skip-download --skip-training
+python -m homebrain.policies.build_action_label_pack --source runs/goal9_controlled_bev_maps --source runs/goal11b_nightly/spatial_packs/openloris_cafe1_1_2_spatial_pack --source runs/goal11b_nightly/spatial_packs/openloris_office1_1_7_spatial_pack --source runs/goal11b_nightly/spatial_packs/openloris_corridor1_1_spatial_pack --source runs/room_walk_001_da3_stable_spatial_pack_short60 --source runs/tum_freiburg1_xyz_rgbd_truth_spatial_pack --out runs/goal11b_nightly/action_label_pack_v4 --pack-version 4
+python -m homebrain.policies.qa_action_label_pack --pack runs/goal11b_nightly/action_label_pack_v4 --out runs/goal11b_nightly/action_label_pack_v4_qa.json
+python -m homebrain.tools.run_goal11b_nightly --run-root runs/goal11b_nightly --true-loro-only --target-steps 10000 --batch-size 64 --spatial-batch-size 64 --device cuda:0 --device cuda:1
+python -m homebrain.tools.run_goal11b_nightly --postprocess-report
+python -m pytest -q
+```
+
+Current Goal 11B results:
+```text
+Report artifacts: runs/goal11b_nightly_report.json and runs/goal11b_nightly_report.md.
+Wall time: 9747.094 sec total observed, split as route/DINO pipeline 5399.054 sec, 4x2 training sweeps 2665.21 sec, true LORO generalization 1682.83 sec.
+GPU inventory: cuda:0 NVIDIA GeForce RTX 4090, cuda:1 NVIDIA GeForce RTX 4090, cuda:2 NVIDIA GeForce RTX 2080 Ti; benchmark devices requested cuda:0 and cuda:1.
+Routes evaluated: cafe1-1_2 1200 frames, office1-1_7 809 frames, corridor1-1 1200 frames; total 3209 frames across 3 scenes, all with action_supervision_ok_fraction=1.0 and license_review_status=pending_human_review.
+Failed route: home1-1_5 refused robot-frame BEV because frame 0 lacked camera intrinsics; no assumed intrinsics/transforms were used.
+ActionLabelPack v4 QA: example_count=4115, future_motion_label_valid_fraction=0.7541514783313082, action_entropy=2.393928609048208, dominant_action_fraction=0.3997569866342649, action_label_pack_qa_pass=true, goal11b_distribution_collapse_flag=false.
+Training sweep: 8/8 runs completed at 10000 steps each. Best spatial A seed 17 reported bev_iou_or_proxy=0.6886480986140668, pose_delta_rmse=0.015515498786640047, inference_fps=163.7896275126021. Best scorer D seed 23 reported top1_action_agreement=0.7878315132605305, rank_corr=0.6077483099323971, action_entropy=1.8101558477925317, dominant_action_fraction=0.5585023400936038, unsafe_selected_rate=0.0, inference_fps=7.882133618513223.
+Model-vs-oracle gap: model-BEV best scorer top1 exceeded oracle-label-BEV best scorer by 0.1158995570029363 on the validation split.
+Replay: held-out route replay wrote 1200 cafe, 1200 corridor, and 809 office BrainOutputEvents; all three evals reported bad_flag_count=0.
+True leave-one-route-out: cafe held out top1=0.35833333333333334 and no Goal 11B collapse; corridor held out top1=0.4166666666666667 with action_entropy=0.7871934753607142 and dominant_action_fraction=0.8666666666666667, collapse diagnosed; office held out top1=0.5018541409147095 with dominant_action_fraction=0.7033374536464772, collapse diagnosed. One-route scenes reuse the corresponding route-out folds for scene-out reporting.
+```
+
+Gate interpretation: Goal 11B reduces the single-action collapse from Goal 11A in the multi-route v4 label pack and full-data scorer sweeps, but true held-out route retraining still shows route-generalization concentration on corridor and office. This is replay/eval evidence only, not a control policy or product-training approval. OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`.
+
 ## Gate 4: real-video spatial output
 
 Required before hardware integration:

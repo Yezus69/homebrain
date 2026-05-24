@@ -427,8 +427,11 @@ def train_trajectory_scorer_v0(
     learning_rate: float = 1.0e-3,
     device_name: str | None = None,
     max_examples: int | None = None,
+    seed: int = 11,
+    bev_source: str = "oracle",
+    modeld_dir: str | Path | None = None,
 ) -> JsonDict:
-    torch.manual_seed(11)
+    torch.manual_seed(seed)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     train_dataset = ActionLabelScorerDataset(
         action_pack,
@@ -436,6 +439,8 @@ def train_trajectory_scorer_v0(
         source_names=source_names,
         source_families=source_families,
         max_examples=max_examples,
+        bev_source=bev_source,
+        modeld_dir=modeld_dir,
     )
     val_dataset = ActionLabelScorerDataset(
         action_pack,
@@ -443,6 +448,8 @@ def train_trajectory_scorer_v0(
         source_names=source_names,
         source_families=source_families,
         max_examples=max_examples,
+        bev_source=bev_source,
+        modeld_dir=modeld_dir,
     )
     config = TrajectoryScorerNetConfig(
         bev_channels=int(train_dataset.samples[0].bev_tensor.shape[0]),
@@ -454,7 +461,7 @@ def train_trajectory_scorer_v0(
         train_dataset,
         batch_size=min(batch_size, len(train_dataset)),
         shuffle=True,
-        generator=_torch_generator(),
+        generator=_torch_generator(seed),
     )
     train_eval_loader = DataLoader(train_dataset, batch_size=min(batch_size, len(train_dataset)), shuffle=False)
     val_loader = DataLoader(val_dataset, batch_size=min(batch_size, len(val_dataset)), shuffle=False)
@@ -487,6 +494,9 @@ def train_trajectory_scorer_v0(
         "max_steps": int(max_steps),
         "batch_size": int(batch_size),
         "learning_rate": float(learning_rate),
+        "seed": int(seed),
+        "bev_source": bev_source,
+        "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
         "example_count": len(train_dataset),
         "val_example_count": len(val_dataset),
         "source_filters": {
@@ -530,6 +540,9 @@ def train_trajectory_scorer_v0(
             "max_steps": int(max_steps),
             "batch_size": int(batch_size),
             "learning_rate": float(learning_rate),
+            "seed": int(seed),
+            "bev_source": bev_source,
+            "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
             "replay_only": True,
             "not_executed": True,
             "control_safe": False,
@@ -553,6 +566,9 @@ def train_trajectory_scorer_v0(
             "not_executed": True,
             "control_safe": False,
             "product_training_approved": False,
+            "seed": int(seed),
+            "bev_source": bev_source,
+            "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
         },
         metrics=metrics,
     )
@@ -954,28 +970,38 @@ def _load_model_bev_map(modeld_dir: str | Path | None) -> dict[tuple[str, int], 
         return {}
     root = Path(modeld_dir)
     records: dict[tuple[str, int], LocalBev] = {}
-    for event in read_events(root):
-        if not isinstance(event, BrainOutputEvent) or not isinstance(event.local_bev_ref, str):
-            continue
-        frame_id = -1
-        if isinstance(event.debug, dict) and isinstance(event.debug.get("input_frame_id"), int):
-            frame_id = int(event.debug["input_frame_id"])
-        if frame_id < 0:
-            continue
-        artifact_path = root / event.local_bev_ref
-        with np.load(artifact_path, allow_pickle=False) as data:
-            uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32)
-            records[(event.sequence_id, frame_id)] = LocalBev(
-                free=np.asarray(data["bev_free_prob"], dtype=np.float32),
-                occupied=np.asarray(data["bev_occupied_prob"], dtype=np.float32),
-                unknown=np.asarray(data["bev_unknown_prob"], dtype=np.float32),
-                traversable=np.asarray(data["bev_traversable_prob"], dtype=np.float32),
-                risky=np.asarray(data["bev_risky_prob"], dtype=np.float32),
-                confidence=(np.float32(1.0) - uncertainty).astype(np.float32),
-                uncertainty=uncertainty,
-                source="model",
-            )
+    for event_root in _modeld_event_roots(root):
+        for event in read_events(event_root):
+            if not isinstance(event, BrainOutputEvent) or not isinstance(event.local_bev_ref, str):
+                continue
+            frame_id = -1
+            if isinstance(event.debug, dict) and isinstance(event.debug.get("input_frame_id"), int):
+                frame_id = int(event.debug["input_frame_id"])
+            if frame_id < 0:
+                continue
+            artifact_path = event_root / event.local_bev_ref
+            with np.load(artifact_path, allow_pickle=False) as data:
+                uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32)
+                records[(event.sequence_id, frame_id)] = LocalBev(
+                    free=np.asarray(data["bev_free_prob"], dtype=np.float32),
+                    occupied=np.asarray(data["bev_occupied_prob"], dtype=np.float32),
+                    unknown=np.asarray(data["bev_unknown_prob"], dtype=np.float32),
+                    traversable=np.asarray(data["bev_traversable_prob"], dtype=np.float32),
+                    risky=np.asarray(data["bev_risky_prob"], dtype=np.float32),
+                    confidence=(np.float32(1.0) - uncertainty).astype(np.float32),
+                    uncertainty=uncertainty,
+                    source="model",
+                )
     return records
+
+
+def _modeld_event_roots(root: Path) -> list[Path]:
+    if (root / "manifest.json").exists():
+        return [root]
+    roots = sorted(path.parent for path in root.rglob("manifest.json"))
+    if not roots:
+        raise FileNotFoundError(f"no modeld manifest.json found under {root}")
+    return roots
 
 
 def _load_oracle_bev(path: Path) -> LocalBev:
@@ -1138,9 +1164,9 @@ def _batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, A
     return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
 
 
-def _torch_generator() -> torch.Generator:
+def _torch_generator(seed: int = 11) -> torch.Generator:
     generator = torch.Generator()
-    generator.manual_seed(11)
+    generator.manual_seed(seed)
     return generator
 
 
@@ -1265,6 +1291,9 @@ def train_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--learning-rate", type=float, default=1.0e-3)
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-examples", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=11)
+    parser.add_argument("--bev-source", choices=("oracle", "model"), default="oracle")
+    parser.add_argument("--modeld", default=None)
     args = parser.parse_args(argv)
     metrics = train_trajectory_scorer_v0(
         action_pack=args.action_pack,
@@ -1276,6 +1305,9 @@ def train_main(argv: list[str] | None = None) -> int:
         learning_rate=args.learning_rate,
         device_name=args.device,
         max_examples=args.max_examples,
+        seed=args.seed,
+        bev_source=args.bev_source,
+        modeld_dir=args.modeld,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0

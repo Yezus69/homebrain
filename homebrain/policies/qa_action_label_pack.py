@@ -15,10 +15,13 @@ from homebrain.policies.build_action_label_pack import (
     ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
     ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
+    ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
 )
 
 ACTION_LABEL_QA_SCHEMA_VERSION = "homebrain.action_label_pack_qa.v0"
 DOMINANT_ACTION_FRACTION = 0.90
+DOMINANT_ACTION_FRACTION_V4 = 0.65
+MIN_ACTION_ENTROPY_V4 = 1.0
 
 
 def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
@@ -35,13 +38,16 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
     }:
         errors.append(f"unsupported schema_version={manifest.get('schema_version')!r}")
     is_v1 = schema_version in {
         ACTION_LABEL_PACK_SCHEMA_VERSION_V1,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V2,
         ACTION_LABEL_PACK_SCHEMA_VERSION_V3,
+        ACTION_LABEL_PACK_SCHEMA_VERSION_V4,
     }
+    is_v4 = schema_version == ACTION_LABEL_PACK_SCHEMA_VERSION_V4
     example_records = manifest.get("examples")
     if not isinstance(example_records, list):
         return _failed_metrics(root, "manifest examples must be a list")
@@ -52,6 +58,9 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
     selected_by_source: dict[str, list[str]] = {}
     action_ok_by_source: dict[str, list[bool]] = {}
     weight_by_source: dict[str, list[float]] = {}
+    label_source_types: list[str] = []
+    future_label_valid_count = 0
+    future_label_total_count = 0
     coverage_gains: list[float] = []
     collision_positive_count = 0
     collision_total_count = 0
@@ -131,6 +140,12 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         source_name = np_scalar_to_str(example["source_name"])
         source_names.append(source_name)
         selected_by_source.setdefault(source_name, []).append(selected_ids[-1])
+        if "label_source_type" in example:
+            label_source_types.append(np_scalar_to_str(example["label_source_type"]))
+        if "future_label_mask" in example:
+            mask = np.asarray(example["future_label_mask"], dtype=np.float32)
+            future_label_valid_count += int(np.count_nonzero(mask > np.float32(0.0)))
+            future_label_total_count += int(mask.size)
         if "action_supervision_ok" in example:
             action_ok_by_source.setdefault(source_name, []).append(np_scalar_to_bool(example["action_supervision_ok"]))
         if "source_weight" in example:
@@ -184,11 +199,14 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         for source_name in sorted(set(source_distribution) | set(excluded_by_source))
     }
     dominant_fraction = max(selected_distribution.values(), default=0) / max(example_count, 1)
+    action_entropy = _entropy(selected_distribution)
     flags: list[str] = []
     if example_count and selected_stop_count == example_count:
         flags.append("all_labels_are_stop")
-    if dominant_fraction >= DOMINANT_ACTION_FRACTION:
+    if dominant_fraction >= (DOMINANT_ACTION_FRACTION_V4 if is_v4 else DOMINANT_ACTION_FRACTION):
         flags.append("one_action_dominates")
+    if is_v4 and action_entropy < MIN_ACTION_ENTROPY_V4:
+        flags.append("action_entropy_below_1.0")
     if replay_only_false_count or not_executed_false_count or control_safe_true_count:
         flags.append("safety_flags_invalid")
     if selected_count_error_count:
@@ -205,9 +223,18 @@ def qa_action_label_pack(pack_dir: str | Path) -> dict[str, Any]:
         "selected_motion_fraction": float((example_count - selected_stop_count) / max(example_count, 1)),
         "collision_positive_rate": float(collision_positive_count / max(collision_total_count, 1)),
         "coverage_gain_mean": mean(coverage_gains),
-        "action_entropy": _entropy(selected_distribution),
+        "action_entropy": action_entropy,
         "source_distribution": source_distribution,
         "selected_distribution": selected_distribution,
+        "label_source_distribution": _distribution(label_source_types),
+        "raw_selected_distribution": manifest.get("raw_selected_distribution", {}),
+        "balanced_selected_distribution": manifest.get("balanced_selected_distribution", selected_distribution),
+        "raw_source_distribution": manifest.get("raw_source_distribution", {}),
+        "balanced_source_distribution": manifest.get("balanced_source_distribution", source_distribution),
+        "balancing": manifest.get("balancing", {}),
+        "future_motion_label_valid_count": future_label_valid_count,
+        "future_motion_label_total_count": future_label_total_count,
+        "future_motion_label_valid_fraction": float(future_label_valid_count / max(future_label_total_count, 1)),
         "source_selected_distribution": source_selected_distribution,
         "source_selected_stop_fraction": source_selected_stop_fraction,
         "source_selected_motion_fraction": source_selected_motion_fraction,

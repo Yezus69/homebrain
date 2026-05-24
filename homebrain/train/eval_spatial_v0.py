@@ -30,6 +30,7 @@ def eval_spatial_v0(
     split: str | None = None,
     device_name: str | None = None,
     batch_size: int = 8,
+    sensor_context_mode: str | None = None,
 ) -> dict[str, Any]:
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_checkpoint(checkpoint, map_location=device)
@@ -41,7 +42,8 @@ def eval_spatial_v0(
         dataset_manifest=dataset_manifest,
         checkpoint_metadata=metadata,
     )
-    dataset = _build_dataset(pack_specs, split=split)
+    resolved_sensor_context_mode = sensor_context_mode or str(metadata.get("sensor_context_mode", "masks"))
+    dataset = _build_dataset(pack_specs, split=split, sensor_context_mode=resolved_sensor_context_mode)
     loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=False)
     eval_metrics = evaluate_spatial_v0(model, loader, device=device)
     train_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
@@ -59,6 +61,7 @@ def eval_spatial_v0(
         "dataset_manifest": Path(dataset_manifest).as_posix() if dataset_manifest is not None else None,
         "split": split,
         "device": str(device),
+        "sensor_context_mode": resolved_sensor_context_mode,
         "example_count": len(dataset),
         "source_name": dataset.source_name,
         "robot_supervision_grade": dataset.robot_supervision_grade,
@@ -107,7 +110,12 @@ def _pack_specs(
     ]
 
 
-def _build_dataset(pack_specs: list[SpatialPackSpec], *, split: str | None) -> SpatialTrainDataset | SpatialMultiPackDataset:
+def _build_dataset(
+    pack_specs: list[SpatialPackSpec],
+    *,
+    split: str | None,
+    sensor_context_mode: str,
+) -> SpatialTrainDataset | SpatialMultiPackDataset:
     if len(pack_specs) == 1:
         spec = pack_specs[0]
         return SpatialTrainDataset(
@@ -115,8 +123,9 @@ def _build_dataset(pack_specs: list[SpatialPackSpec], *, split: str | None) -> S
             feature_dir=spec.feature_dir,
             split=split,
             source_name=spec.source_name,
+            sensor_context_mode=sensor_context_mode,
         )
-    return SpatialMultiPackDataset(pack_specs, split=split)
+    return SpatialMultiPackDataset(pack_specs, split=split, sensor_context_mode=sensor_context_mode)
 
 
 def _source_metrics(
@@ -166,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Output eval JSON.")
     parser.add_argument("--device", default=None)
     parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--sensor-context-mode", choices=("masks", "odom"), default=None)
     args = parser.parse_args(argv)
     split = args.split if args.split else None
     metrics = eval_spatial_v0(
@@ -177,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         out_path=args.out,
         device_name=args.device,
         batch_size=args.batch_size,
+        sensor_context_mode=args.sensor_context_mode,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0

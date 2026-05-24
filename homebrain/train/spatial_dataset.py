@@ -15,6 +15,7 @@ from homebrain.teachers.artifacts import file_sha256, frame_key, load_array, loa
 
 BEV_OUTPUT_CHANNELS: tuple[str, ...] = ("free", "occupied", "unknown", "traversable", "risky")
 SENSOR_MASK_FIELDS: tuple[str, ...] = ("pose", "action", "imu", "wheel")
+SENSOR_CONTEXT_MODES: tuple[str, ...] = ("masks", "odom")
 SPATIAL_DATASET_MANIFEST_SCHEMA_VERSION = "homebrain.spatial_v0_dataset_manifest.v0"
 
 
@@ -106,7 +107,10 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         tiny_overfit: bool = False,
         tiny_limit: int = 8,
         allow_tiny_fixture_features: bool = False,
+        sensor_context_mode: str = "masks",
     ) -> None:
+        if sensor_context_mode not in SENSOR_CONTEXT_MODES:
+            raise ValueError(f"sensor_context_mode must be one of {SENSOR_CONTEXT_MODES}")
         self.root = Path(dataset_dir)
         self.manifest = read_json(self.root / SPATIAL_MANIFEST_FILE)
         if self.manifest.get("control_safe") is not False:
@@ -127,6 +131,7 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
             raise ValueError(f"no examples found in {self.root}")
         self.feature_store = DINOFeatureStore(feature_dir) if feature_dir is not None else None
         self.allow_tiny_fixture_features = allow_tiny_fixture_features
+        self.sensor_context_mode = sensor_context_mode
         self.feature_alignment = self._feature_alignment_summary()
         if self.feature_store is not None and self.feature_alignment["missing_feature_count"] > 0:
             missing = self.feature_alignment["missing_feature_keys"][:5]
@@ -148,7 +153,7 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         labels, label_mask = _bev_labels_and_mask(example)
         timestamp_ns = int(np.asarray(example["timestamp_ns"]).item())
         timestamp_s = np.asarray([(timestamp_ns - self.start_timestamp_ns) / 1_000_000_000.0], dtype=np.float32)
-        sensor_mask = np.zeros((len(SENSOR_MASK_FIELDS),), dtype=np.float32)
+        sensor_mask = np.zeros((_sensor_context_dim(self.sensor_context_mode),), dtype=np.float32)
         pose_delta = np.zeros((3,), dtype=np.float32)
         pose_mask = np.asarray([_scalar_float(example, "pose_delta_mask", 0.0)], dtype=np.float32)
         if "pose_delta" in example:
@@ -159,6 +164,8 @@ class SpatialTrainDataset(Dataset[dict[str, Any]]):
         sensor_mask[1] = _scalar_float(example, "action_label_mask", 0.0)
         sensor_mask[2] = _scalar_float(example, "imu_label_mask", 0.0)
         sensor_mask[3] = _scalar_float(example, "wheel_label_mask", 0.0)
+        if self.sensor_context_mode == "odom":
+            sensor_mask[4:7] = pose_delta
 
         return {
             "features": torch.from_numpy(np.transpose(patch_features, (2, 0, 1)).copy()),
@@ -320,6 +327,7 @@ class SpatialMultiPackDataset(Dataset[dict[str, Any]]):
         split: str | None = None,
         tiny_overfit: bool = False,
         tiny_limit: int = 8,
+        sensor_context_mode: str = "masks",
     ) -> None:
         if not pack_specs:
             raise ValueError("dataset manifest must include at least one pack")
@@ -331,6 +339,7 @@ class SpatialMultiPackDataset(Dataset[dict[str, Any]]):
                 source_name=spec.source_name,
                 tiny_overfit=tiny_overfit,
                 tiny_limit=tiny_limit,
+                sensor_context_mode=sensor_context_mode,
             )
             for spec in pack_specs
         ]
@@ -427,6 +436,12 @@ def dataset_manifest_hashes(
         )
     hashes["packs"] = pack_hashes
     return hashes
+
+
+def _sensor_context_dim(mode: str) -> int:
+    if mode == "odom":
+        return len(SENSOR_MASK_FIELDS) + 3
+    return len(SENSOR_MASK_FIELDS)
 
 
 def _resolve_manifest_path(base: Path, value: str) -> Path:

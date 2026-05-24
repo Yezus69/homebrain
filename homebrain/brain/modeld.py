@@ -238,7 +238,8 @@ def _spatial_output_for_frame(
         dtype=torch.float32,
         device=device,
     )
-    sensor_mask = torch.zeros((1, 4), dtype=torch.float32, device=device)
+    sensor_context_dim = max(0, int(getattr(model.config, "sensor_dim", 5)) - 1)
+    sensor_mask = torch.zeros((1, sensor_context_dim), dtype=torch.float32, device=device)
     model.eval()
     with torch.no_grad():
         outputs = model(features, timestamp_s, sensor_mask)

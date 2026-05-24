@@ -121,3 +121,23 @@ Minimal next repair action: not applicable for Goal 11A completion. The next use
 Command output summary: OpenLORIS DINO wrote 300 real feature frames; SpatialMemoryNet refresh reported `val_loss=0.11438632508118947`, `bev_iou_or_proxy=0.4798779853309194`, `pose_delta_rmse=null`, and `control_safe=false`; standalone spatial eval reported `failure_flags=["eval_loss_much_higher_than_train_loss"]`; TrajectoryScorerNet v0 trained on the OpenLORIS ActionLabelPack v3 subset and reported `val_top1_action_agreement=1.0` versus random `0.1111111111111111`; oracle and model-BEV evals both reported `distribution_collapse_flag=true` because the OpenLORIS expert subset selected `straight_short` for every evaluated frame; replay/modeld wrote 300 scored BrainOutputEvents with `bad_flags=0`; `python -m pytest -q` reported 55 passed.
 
 Residual risks: OpenLORIS remains `CC BY-ND 4.0` with `pending_human_review`, so the scorer is not product-approved training; the learned scorer inherited a single-action expert-label collapse; model-BEV rank correlation is lower than oracle BEV; the spatial refresh still has a train/val gap; no hardware control, raw PWM, ROS/Nav2/Isaac/Habitat, SAM/NoMaD/ViNT integration, or control-safe claim was added.
+
+## 2026-05-24 - Goal 11B OpenLORIS `home1-1_5` route blocked by missing intrinsics
+
+Exact failure: the Goal 11B nightly selected `home1-1_5`, but `robot_rgbd_to_bev` refused to write robot-frame BEV with `no robot-frame BEV frames written; first warning: frame_0_failed:association/frame is missing camera intrinsics; refusing robot-frame BEV`.
+
+Likely cause: the staged OpenLORIS `home1-1_5` package/import path did not expose camera intrinsics for the first RGB-D association in the format HomeBrain requires. Goal 11B intentionally did not invent intrinsics or transforms.
+
+Minimal next repair action: inspect `home1-1_5` calibration files and importer mapping for camera intrinsics. Only rerun BEV/action supervision after intrinsics, camera-to-base, and base pose/odom are present without assumptions; otherwise keep the route out of robot-frame action supervision.
+
+Command output summary: Goal 11B still completed the hard route criterion with three fully evaluated robot-frame routes: `cafe1-1_2` 1200 frames, `office1-1_7` 809 frames, and `corridor1-1` 1200 frames. The failed `home1-1_5` route is recorded in `runs/goal11b_nightly_report.json` and `runs/goal11b_nightly_report.md`; OpenLORIS license review remains pending.
+
+## 2026-05-24 - Goal 11B true route-out generalization concentration diagnosed
+
+Exact failure: no benchmark-completion failure, but true leave-one-route-out retraining still crossed the Goal 11B collapse threshold on held-out `corridor1-1` and `office1-1_7`. Corridor held out reported `action_entropy=0.7871934753607142` and `dominant_action_fraction=0.8666666666666667`; office held out reported `dominant_action_fraction=0.7033374536464772`.
+
+Likely cause: three evaluated OpenLORIS routes are still too few and scene-specific for robust route-out action generalization, even though the full-data v4 label pack and 4x2 sweeps no longer collapse globally.
+
+Minimal next repair action: add more robot-frame routes that pass intrinsics/transform/action sanity, then rerun v4 balancing, true leave-one-route-out, and leave-one-scene-out. Do not promote the current scorer beyond replay/eval.
+
+Command output summary: ActionLabelPack v4 QA passed with `action_entropy=2.393928609048208` and `dominant_action_fraction=0.3997569866342649`; best full-data model-BEV scorer reported `top1_action_agreement=0.7878315132605305`, `action_entropy=1.8101558477925317`, `dominant_action_fraction=0.5585023400936038`, and `unsafe_selected_rate=0.0`. The residual route-out concentration is explicitly recorded in `collapse_diagnosis` in the Goal 11B report.

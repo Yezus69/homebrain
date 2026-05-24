@@ -23,6 +23,8 @@ from homebrain.data.spatial_dataset import (
     write_deterministic_npz,
     write_json,
 )
+from homebrain.datasets.openloris_scene import OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+from homebrain.datasets.tum_rgbd import TUM_RGBD_ROUTE_ASSOCIATIONS_FILE
 from homebrain.geometry.bev_projector import BEV_ARTIFACT_KINDS
 from homebrain.geometry.validate_bev import load_bev_manifest
 from homebrain.messages.schema import FrameEvent, JsonDict, deterministic_json
@@ -82,6 +84,7 @@ def pack_spatial_dataset(
     split_assignments = _sequence_aware_split_assignments(frame_records)
     pose_labels = _pose_delta_labels(log_root)
     pose_label_count = 0
+    pose_label_frames: set[str] = set()
     not_robot_frame_truth_count = 0
     example_records: list[JsonDict] = []
     split_counts: dict[str, int] = {"train": 0, "val": 0, "review": 0}
@@ -104,6 +107,7 @@ def pack_spatial_dataset(
         pose_label = pose_labels.get(frame_id, _missing_pose_label())
         if pose_label.mask > 0.0:
             pose_label_count += 1
+            pose_label_frames.add(pose_label.frame)
         rgb_ref = frame.data_ref
         rgb_path = (log_root / rgb_ref).as_posix()
         provenance = _example_provenance(
@@ -290,8 +294,11 @@ def pack_spatial_dataset(
             "leakage_guard_frames": 1,
         },
         "pose_label_count": pose_label_count,
-        "pose_label_frame": "camera_relative_dataset_pose" if pose_label_count else "none",
-        "pose_label_convention": _pose_label_convention(pose_label_count),
+        "pose_label_frame": _manifest_pose_label_frame(pose_label_count, pose_label_frames),
+        "pose_label_convention": _pose_label_convention(
+            pose_label_count,
+            pose_label_frame=_manifest_pose_label_frame(pose_label_count, pose_label_frames),
+        ),
         "frames": example_records,
         "examples": example_records,
     }
@@ -472,7 +479,11 @@ def _missing_pose_label() -> PoseDeltaLabel:
 
 
 def _pose_delta_labels(log_root: Path) -> dict[int, PoseDeltaLabel]:
-    associations_path = log_root / "tum_rgbd_associations.json"
+    openloris_path = log_root / OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+    if openloris_path.exists():
+        return _openloris_pose_delta_labels(openloris_path)
+
+    associations_path = log_root / TUM_RGBD_ROUTE_ASSOCIATIONS_FILE
     if not associations_path.exists():
         return {}
     associations = read_json(associations_path)
@@ -512,9 +523,66 @@ def _pose_delta_labels(log_root: Path) -> dict[int, PoseDeltaLabel]:
     return labels
 
 
+def _openloris_pose_delta_labels(associations_path: Path) -> dict[int, PoseDeltaLabel]:
+    associations = read_json(associations_path)
+    if associations.get("source_type") != "openloris_scene_associations":
+        return {}
+    frames = associations.get("frames")
+    if not isinstance(frames, list):
+        return {}
+    ordered = sorted(
+        [frame for frame in frames if isinstance(frame, dict)],
+        key=lambda frame: int(frame.get("frame_id", 0)),
+    )
+    labels: dict[int, PoseDeltaLabel] = {}
+    for current, nxt in zip(ordered, ordered[1:]):
+        current_pose = _base_pose_record(current)
+        next_pose = _base_pose_record(nxt)
+        if current_pose is None or next_pose is None:
+            continue
+        delta = _relative_robot_base_pose_delta(current_pose, next_pose)
+        labels[int(current["frame_id"])] = PoseDeltaLabel(
+            pose_delta=delta,
+            mask=1.0,
+            target_frame_id=int(nxt["frame_id"]),
+            source="openloris_robot_base_pose_or_odom_association",
+            frame="robot_base_relative_pose",
+        )
+    if ordered:
+        last = ordered[-1]
+        labels[int(last["frame_id"])] = PoseDeltaLabel(
+            pose_delta=(0.0, 0.0, 0.0),
+            mask=0.0,
+            target_frame_id=-1,
+            source="openloris_robot_base_pose_or_odom_association_no_next_frame",
+            frame="robot_base_relative_pose",
+        )
+    return labels
+
+
+def _base_pose_record(frame_record: JsonDict) -> JsonDict | None:
+    base_pose = frame_record.get("base_pose")
+    if isinstance(base_pose, dict):
+        return base_pose
+    odom = frame_record.get("odom")
+    if isinstance(odom, dict) and isinstance(odom.get("pose"), dict):
+        return odom["pose"]  # type: ignore[return-value]
+    return None
+
+
+def _relative_robot_base_pose_delta(current_pose: JsonDict, next_pose: JsonDict) -> tuple[float, float, float]:
+    current = _pose_matrix(current_pose)
+    nxt = _pose_matrix(next_pose)
+    relative = np.linalg.inv(current) @ nxt
+    dx = float(relative[0, 3])
+    dy = float(relative[1, 3])
+    dyaw = float(atan2(float(relative[1, 0]), float(relative[0, 0])))
+    return (dx, dy, dyaw)
+
+
 def _relative_camera_pose_delta(current_gt: JsonDict, next_gt: JsonDict) -> tuple[float, float, float]:
-    current_pose = _tum_pose_matrix(current_gt)
-    next_pose = _tum_pose_matrix(next_gt)
+    current_pose = _pose_matrix(current_gt)
+    next_pose = _pose_matrix(next_gt)
     relative = np.linalg.inv(current_pose) @ next_pose
     dx = float(relative[0, 3])
     dz_as_dy = float(relative[2, 3])
@@ -522,7 +590,7 @@ def _relative_camera_pose_delta(current_gt: JsonDict, next_gt: JsonDict) -> tupl
     return (dx, dz_as_dy, dyaw)
 
 
-def _tum_pose_matrix(groundtruth: JsonDict) -> np.ndarray:
+def _pose_matrix(groundtruth: JsonDict) -> np.ndarray:
     rotation = _quat_to_rotation(
         float(groundtruth["qx"]),
         float(groundtruth["qy"]),
@@ -557,12 +625,38 @@ def _quat_to_rotation(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     )
 
 
-def _pose_label_convention(pose_label_count: int) -> JsonDict:
+def _manifest_pose_label_frame(pose_label_count: int, pose_label_frames: set[str]) -> str:
+    if pose_label_count <= 0:
+        return "none"
+    if len(pose_label_frames) == 1:
+        return next(iter(pose_label_frames))
+    return "mixed"
+
+
+def _pose_label_convention(pose_label_count: int, *, pose_label_frame: str) -> JsonDict:
     if pose_label_count <= 0:
         return {
             "available": False,
             "pose_label_frame": "none",
             "note": "No pose labels were packed; missing pose targets are masked and are not fake labels.",
+        }
+    if pose_label_frame == "robot_base_relative_pose":
+        return {
+            "available": True,
+            "pose_label_frame": "robot_base_relative_pose",
+            "source": "OpenLORIS base pose or odometry associations",
+            "transform": "inv(T_map_base_current) @ T_map_base_next",
+            "pose_delta_components": [
+                "robot_base_forward_x_m",
+                "robot_base_left_y_m",
+                "relative_yaw_about_base_z_rad",
+            ],
+            "robot_odometry_or_base_pose": True,
+            "control_safe": False,
+            "note": (
+                "This is robot-frame replay/eval supervision from public OpenLORIS pose/odom evidence. "
+                "It is not hardware control evidence and remains control_safe=false."
+            ),
         }
     return {
         "available": True,

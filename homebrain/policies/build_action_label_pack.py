@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,7 @@ from homebrain.data.spatial_dataset import (
     write_deterministic_npz,
     write_json,
 )
+from homebrain.datasets.openloris_scene import OPENLORIS_ROUTE_ASSOCIATIONS_FILE
 from homebrain.messages.schema import JsonDict
 from homebrain.policies.bev_action_sanity import (
     ActionSanityConfig,
@@ -40,9 +42,11 @@ ACTION_LABEL_PACK_SCHEMA_VERSION = "homebrain.action_label_pack.v0"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V1 = "homebrain.action_label_pack.v1"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V2 = "homebrain.action_label_pack.v2"
 ACTION_LABEL_PACK_SCHEMA_VERSION_V3 = "homebrain.action_label_pack.v3"
+ACTION_LABEL_PACK_SCHEMA_VERSION_V4 = "homebrain.action_label_pack.v4"
 ACTION_LABEL_EXAMPLE_SCHEMA_VERSION = "homebrain.action_label_example.v0"
 COLLISION_THRESHOLD = RISKY_CANDIDATE_THRESHOLD
 UNKNOWN_BLOCK_THRESHOLD = 0.95
+FUTURE_MOTION_HORIZONS_S: tuple[float, ...] = (0.5, 1.0, 2.0)
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,7 @@ class SourceFrame:
     source_weight: float
     action_sanity: JsonDict
     contract_flags: JsonDict
+    base_pose: JsonDict | None
 
 
 @dataclass(frozen=True)
@@ -74,6 +79,27 @@ class ExpertCandidateLabel:
     smoothness_cost: float
     total_expert_score: float
     selected_by_expert: bool
+
+
+@dataclass(frozen=True)
+class FutureMotionLabel:
+    horizon_s: float
+    best_candidate_id: str
+    match_error: float
+    target_frame_id: int
+    dx: float
+    dy: float
+    dyaw: float
+    mask: float
+
+
+@dataclass(frozen=True)
+class PreparedActionExample:
+    frame: SourceFrame
+    training_labels: tuple[ExpertCandidateLabel, ...]
+    coverage_labels: tuple[ExpertCandidateLabel, ...]
+    future_labels: tuple[FutureMotionLabel, ...]
+    label_source_type: str
 
 
 def build_action_label_pack(
@@ -135,19 +161,62 @@ def build_action_label_pack(
         robot_radius_m=robot_radius_m,
     )
     candidate_ids = [candidate.id for candidate in candidates]
+    prepared: list[PreparedActionExample] = []
+    frames_by_motion_key = _frames_by_future_motion_key(frames)
+
+    for frame in frames:
+        if frame.bev.shape != first_shape:
+            raise ValueError(f"all ActionLabelPack examples must share one grid shape; got {frame.bev.shape}")
+        coverage_labels = expert_labels_for_frame(bev=frame.bev, candidates=candidates)
+        future_labels = _future_motion_labels_for_frame(
+            frame,
+            frames_by_key=frames_by_motion_key,
+            candidates=candidates,
+        )
+        training_labels, label_source_type = _training_labels_for_v4(
+            coverage_labels=coverage_labels,
+            future_labels=future_labels,
+            enabled=pack_version >= 4,
+        )
+        prepared.append(
+            PreparedActionExample(
+                frame=frame,
+                training_labels=training_labels,
+                coverage_labels=coverage_labels,
+                future_labels=future_labels,
+                label_source_type=label_source_type,
+            )
+        )
+
+    raw_source_distribution = _distribution([item.frame.source_name for item in prepared])
+    raw_selected_distribution = _distribution([_selected_label(item.training_labels).candidate_id for item in prepared])
+    raw_label_source_distribution = _distribution([item.label_source_type for item in prepared])
+    balanced = _balance_prepared_examples(prepared) if pack_version >= 4 else prepared
+
     examples: list[JsonDict] = []
     source_distribution: dict[str, int] = {}
     selected_distribution: dict[str, int] = {}
+    label_source_distribution: dict[str, int] = {}
 
-    for index, frame in enumerate(frames):
-        if frame.bev.shape != first_shape:
-            raise ValueError(f"all ActionLabelPack examples must share one grid shape; got {frame.bev.shape}")
-        labels = expert_labels_for_frame(bev=frame.bev, candidates=candidates)
+    for index, item in enumerate(balanced):
+        frame = item.frame
+        labels = item.training_labels
         selected = _selected_label(labels)
         source_distribution[frame.source_name] = source_distribution.get(frame.source_name, 0) + 1
         selected_distribution[selected.candidate_id] = selected_distribution.get(selected.candidate_id, 0) + 1
+        label_source_distribution[item.label_source_type] = label_source_distribution.get(item.label_source_type, 0) + 1
         example_path = examples_dir / f"action_{index:06d}.npz"
-        write_deterministic_npz(example_path, _example_arrays(frame, labels))
+        write_deterministic_npz(
+            example_path,
+            _example_arrays(
+                frame,
+                labels,
+                coverage_labels=item.coverage_labels,
+                future_labels=item.future_labels,
+                label_source_type=item.label_source_type,
+                pack_version=pack_version,
+            ),
+        )
         examples.append(
             {
                 "example_path": relative_to_root(example_path, output),
@@ -164,6 +233,14 @@ def build_action_label_pack(
                 "selected_candidate_id": selected.candidate_id,
                 "selected_by_expert_count": 1,
                 "candidate_count": len(labels),
+                "label_source_type": item.label_source_type,
+                "coverage_expert_selected_candidate_id": _selected_label(item.coverage_labels).candidate_id,
+                "future_motion_primary_candidate_id": _primary_future_label(item.future_labels).best_candidate_id
+                if _primary_future_label(item.future_labels).mask > 0.0
+                else None,
+                "future_motion_primary_match_error": _primary_future_label(item.future_labels).match_error
+                if _primary_future_label(item.future_labels).mask > 0.0
+                else None,
                 "source_weight": round(float(frame.source_weight), 6),
                 "action_supervision_ok": bool(frame.action_supervision_ok),
                 "origin_frame_status": frame.action_sanity.get("origin_frame_status"),
@@ -194,7 +271,22 @@ def build_action_label_pack(
         "source_distribution": dict(sorted(source_distribution.items())),
         "excluded_source_distribution": _excluded_source_distribution(excluded_frames),
         "source_frame_counts": _source_frame_counts(frames, excluded_frames),
+        "raw_source_distribution": raw_source_distribution,
+        "raw_selected_distribution": raw_selected_distribution,
+        "raw_label_source_distribution": raw_label_source_distribution,
         "selected_distribution": dict(sorted(selected_distribution.items())),
+        "label_source_distribution": dict(sorted(label_source_distribution.items())),
+        "balanced_source_distribution": dict(sorted(source_distribution.items())),
+        "balanced_selected_distribution": dict(sorted(selected_distribution.items())),
+        "balancing": _balancing_record(
+            enabled=pack_version >= 4,
+            raw_count=len(prepared),
+            balanced_count=len(balanced),
+            raw_source_distribution=raw_source_distribution,
+            raw_selected_distribution=raw_selected_distribution,
+            balanced_source_distribution=source_distribution,
+            balanced_selected_distribution=selected_distribution,
+        ),
         "scoring": _scoring_description(),
         "action_sanity_filter": {
             "enabled": bool(pack_version >= 1),
@@ -206,6 +298,14 @@ def build_action_label_pack(
         },
         "excluded_frames": excluded_frames,
         "supervision_type": "deterministic_candidate_trajectory_scores",
+        "future_motion_supervision": {
+            "enabled": bool(pack_version >= 4),
+            "horizons_s": list(FUTURE_MOTION_HORIZONS_S),
+            "source": "robot_base_pose_or_odom_matching_to_candidate_trajectories",
+            "primary_horizon_s": 1.0,
+            "kept_separate_from_coverage_risk_expert": True,
+            "control_safe": False,
+        },
         "replay_only": True,
         "not_executed": True,
         "control_safe": False,
@@ -218,6 +318,8 @@ def build_action_label_pack(
 
 
 def _pack_schema_version(pack_version: int) -> str:
+    if pack_version >= 4:
+        return ACTION_LABEL_PACK_SCHEMA_VERSION_V4
     if pack_version >= 3:
         return ACTION_LABEL_PACK_SCHEMA_VERSION_V3
     if pack_version >= 2:
@@ -366,9 +468,18 @@ def _adjust_stop_label(label: ExpertCandidateLabel, *, all_motion_blocked: bool)
     )
 
 
-def _example_arrays(frame: SourceFrame, labels: tuple[ExpertCandidateLabel, ...]) -> dict[str, np.ndarray]:
+def _example_arrays(
+    frame: SourceFrame,
+    labels: tuple[ExpertCandidateLabel, ...],
+    *,
+    coverage_labels: tuple[ExpertCandidateLabel, ...],
+    future_labels: tuple[FutureMotionLabel, ...],
+    label_source_type: str,
+    pack_version: int,
+) -> dict[str, np.ndarray]:
     selected = _selected_label(labels)
-    return {
+    coverage_selected = _selected_label(coverage_labels)
+    arrays = {
         "schema_version": scalar_str(ACTION_LABEL_EXAMPLE_SCHEMA_VERSION),
         "frame_id": scalar_int(frame.frame_id),
         "timestamp_ns": scalar_int(frame.timestamp_ns),
@@ -395,11 +506,41 @@ def _example_arrays(frame: SourceFrame, labels: tuple[ExpertCandidateLabel, ...]
         "total_expert_score": np.asarray([label.total_expert_score for label in labels], dtype=np.float32),
         "selected_by_expert": np.asarray([label.selected_by_expert for label in labels], dtype=np.bool_),
         "selected_candidate_id": scalar_str(selected.candidate_id),
+        "label_source_type": scalar_str(label_source_type),
         "replay_only": scalar_bool(True),
         "not_executed": scalar_bool(True),
         "control_safe": scalar_bool(False),
         "raw_pwm_emitted": scalar_bool(False),
     }
+    if pack_version >= 4:
+        arrays.update(
+            {
+                "coverage_expert_score": np.asarray(
+                    [label.total_expert_score for label in coverage_labels],
+                    dtype=np.float32,
+                ),
+                "coverage_selected_by_expert": np.asarray(
+                    [label.selected_by_expert for label in coverage_labels],
+                    dtype=np.bool_,
+                ),
+                "coverage_expert_selected_candidate_id": scalar_str(coverage_selected.candidate_id),
+                "future_horizons_s": np.asarray([label.horizon_s for label in future_labels], dtype=np.float32),
+                "future_best_candidate_by_odom": np.asarray(
+                    [label.best_candidate_id for label in future_labels],
+                ),
+                "future_match_error": np.asarray([label.match_error for label in future_labels], dtype=np.float32),
+                "future_label_mask": np.asarray([label.mask for label in future_labels], dtype=np.float32),
+                "future_target_frame_id": np.asarray([label.target_frame_id for label in future_labels], dtype=np.int64),
+                "future_dx_dy_dyaw": np.asarray(
+                    [[label.dx, label.dy, label.dyaw] for label in future_labels],
+                    dtype=np.float32,
+                ),
+                "future_motion_primary_candidate_id": scalar_str(_primary_future_label(future_labels).best_candidate_id),
+                "future_motion_primary_match_error": scalar_float(_primary_future_label(future_labels).match_error),
+                "future_motion_primary_mask": scalar_float(_primary_future_label(future_labels).mask),
+            }
+        )
+    return arrays
 
 
 def _load_spatial_pack_frames(root: Path) -> tuple[list[SourceFrame], JsonDict]:
@@ -482,9 +623,303 @@ def _load_spatial_pack_frames(root: Path) -> tuple[list[SourceFrame], JsonDict]:
                 source_weight=source_weight_for_sanity(action_sanity),
                 action_sanity=action_sanity,
                 contract_flags=contract_flags,
+                base_pose=_base_pose_for_source_frame(manifest, decision_input.frame_id),
             )
         )
     return records, manifest
+
+
+def _base_pose_for_source_frame(manifest: JsonDict, frame_id: int) -> JsonDict | None:
+    source_log = manifest.get("source_log")
+    if not isinstance(source_log, str):
+        return None
+    associations_path = Path(source_log) / OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+    if not associations_path.exists():
+        return None
+    cache = getattr(_base_pose_for_source_frame, "_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(_base_pose_for_source_frame, "_cache", cache)
+    cached = cache.get(associations_path.as_posix())
+    if isinstance(cached, dict):
+        return cached.get(int(frame_id))
+    try:
+        associations = read_json(associations_path)
+    except Exception:  # noqa: BLE001
+        return None
+    frames = associations.get("frames")
+    if not isinstance(frames, list):
+        return None
+    pose_by_frame: dict[int, JsonDict] = {}
+    for record in frames:
+        if not isinstance(record, dict):
+            continue
+        record_frame_id = int(record.get("frame_id", -1))
+        base_pose = record.get("base_pose")
+        if isinstance(base_pose, dict):
+            pose_by_frame[record_frame_id] = base_pose
+            continue
+        odom = record.get("odom")
+        if isinstance(odom, dict) and isinstance(odom.get("pose"), dict):
+            pose_by_frame[record_frame_id] = odom["pose"]  # type: ignore[assignment]
+    cache[associations_path.as_posix()] = pose_by_frame
+    return pose_by_frame.get(int(frame_id))
+
+
+def _frames_by_future_motion_key(frames: list[SourceFrame]) -> dict[tuple[str, str], list[SourceFrame]]:
+    grouped: dict[tuple[str, str], list[SourceFrame]] = {}
+    for frame in frames:
+        grouped.setdefault((frame.source_name, frame.sequence_id), []).append(frame)
+    return {key: sorted(values, key=lambda item: item.timestamp_ns) for key, values in grouped.items()}
+
+
+def _future_motion_labels_for_frame(
+    frame: SourceFrame,
+    *,
+    frames_by_key: dict[tuple[str, str], list[SourceFrame]],
+    candidates: list[CandidateTrajectory],
+) -> tuple[FutureMotionLabel, ...]:
+    if frame.base_pose is None:
+        return tuple(_missing_future_label(horizon) for horizon in FUTURE_MOTION_HORIZONS_S)
+    sequence = frames_by_key.get((frame.source_name, frame.sequence_id), [])
+    labels: list[FutureMotionLabel] = []
+    for horizon_s in FUTURE_MOTION_HORIZONS_S:
+        target = _future_target_frame(sequence, frame.timestamp_ns, horizon_s)
+        if target is None or target.base_pose is None:
+            labels.append(_missing_future_label(horizon_s))
+            continue
+        dx, dy, dyaw = _relative_robot_delta(frame.base_pose, target.base_pose)
+        best_id, error = _best_matching_candidate(
+            dx=dx,
+            dy=dy,
+            dyaw=dyaw,
+            horizon_s=horizon_s,
+            candidates=candidates,
+        )
+        labels.append(
+            FutureMotionLabel(
+                horizon_s=float(horizon_s),
+                best_candidate_id=best_id,
+                match_error=float(error),
+                target_frame_id=target.frame_id,
+                dx=float(dx),
+                dy=float(dy),
+                dyaw=float(dyaw),
+                mask=1.0,
+            )
+        )
+    return tuple(labels)
+
+
+def _missing_future_label(horizon_s: float) -> FutureMotionLabel:
+    return FutureMotionLabel(
+        horizon_s=float(horizon_s),
+        best_candidate_id="missing",
+        match_error=float("inf"),
+        target_frame_id=-1,
+        dx=0.0,
+        dy=0.0,
+        dyaw=0.0,
+        mask=0.0,
+    )
+
+
+def _future_target_frame(sequence: list[SourceFrame], timestamp_ns: int, horizon_s: float) -> SourceFrame | None:
+    target_ns = int(timestamp_ns + round(horizon_s * 1_000_000_000))
+    candidates = [frame for frame in sequence if frame.timestamp_ns >= target_ns and frame.base_pose is not None]
+    return candidates[0] if candidates else None
+
+
+def _best_matching_candidate(
+    *,
+    dx: float,
+    dy: float,
+    dyaw: float,
+    horizon_s: float,
+    candidates: list[CandidateTrajectory],
+) -> tuple[str, float]:
+    best_id = candidates[0].id if candidates else "missing"
+    best_error = float("inf")
+    for candidate in candidates:
+        pose = _candidate_pose_at_horizon(candidate, horizon_s)
+        yaw_error = _angle_abs_diff(dyaw, pose.yaw_rad)
+        trans_error = math.hypot(dx - pose.x_m, dy - pose.y_m)
+        error = trans_error + 0.25 * yaw_error
+        if error < best_error:
+            best_error = float(error)
+            best_id = candidate.id
+    return best_id, best_error
+
+
+def _candidate_pose_at_horizon(candidate: CandidateTrajectory, horizon_s: float):
+    if not candidate.poses:
+        raise ValueError(f"candidate {candidate.id} has no poses")
+    if candidate.duration_s <= 0.0 or horizon_s >= candidate.duration_s:
+        return candidate.poses[-1]
+    index = int(round((horizon_s / candidate.duration_s) * (len(candidate.poses) - 1)))
+    index = max(0, min(index, len(candidate.poses) - 1))
+    return candidate.poses[index]
+
+
+def _angle_abs_diff(a: float, b: float) -> float:
+    diff = (a - b + math.pi) % (2.0 * math.pi) - math.pi
+    return abs(float(diff))
+
+
+def _relative_robot_delta(current_pose: JsonDict, target_pose: JsonDict) -> tuple[float, float, float]:
+    current = _pose_matrix(current_pose)
+    target = _pose_matrix(target_pose)
+    relative = np.linalg.inv(current) @ target
+    return (
+        float(relative[0, 3]),
+        float(relative[1, 3]),
+        float(math.atan2(float(relative[1, 0]), float(relative[0, 0]))),
+    )
+
+
+def _pose_matrix(pose: JsonDict) -> np.ndarray:
+    qx = float(pose["qx"])
+    qy = float(pose["qy"])
+    qz = float(pose["qz"])
+    qw = float(pose["qw"])
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm <= 0.0:
+        raise ValueError("robot pose quaternion has zero norm")
+    x = qx / norm
+    y = qy / norm
+    z = qz / norm
+    w = qw / norm
+    rotation = np.asarray(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+    transform = np.eye(4, dtype=np.float64)
+    transform[:3, :3] = rotation
+    transform[:3, 3] = [float(pose["tx"]), float(pose["ty"]), float(pose["tz"])]
+    return transform
+
+
+def _training_labels_for_v4(
+    *,
+    coverage_labels: tuple[ExpertCandidateLabel, ...],
+    future_labels: tuple[FutureMotionLabel, ...],
+    enabled: bool,
+) -> tuple[tuple[ExpertCandidateLabel, ...], str]:
+    if not enabled:
+        return coverage_labels, "coverage_risk_expert"
+    primary = _primary_future_label(future_labels)
+    if primary.mask <= 0.0 or primary.best_candidate_id == "missing":
+        return coverage_labels, "coverage_risk_expert"
+    return _labels_with_selected_candidate(coverage_labels, primary.best_candidate_id), "future_motion_odom"
+
+
+def _primary_future_label(labels: tuple[FutureMotionLabel, ...]) -> FutureMotionLabel:
+    valid = [label for label in labels if label.mask > 0.0]
+    if not valid:
+        return _missing_future_label(1.0)
+    return min(valid, key=lambda label: (abs(label.horizon_s - 1.0), label.match_error))
+
+
+def _labels_with_selected_candidate(
+    labels: tuple[ExpertCandidateLabel, ...],
+    selected_candidate_id: str,
+) -> tuple[ExpertCandidateLabel, ...]:
+    if selected_candidate_id not in {label.candidate_id for label in labels}:
+        return labels
+    min_score = min(label.total_expert_score for label in labels)
+    adjusted: list[ExpertCandidateLabel] = []
+    for label in labels:
+        selected = label.candidate_id == selected_candidate_id
+        score = min_score - 0.01 if selected else max(label.total_expert_score, min_score + 0.01)
+        adjusted.append(
+            ExpertCandidateLabel(
+                candidate_id=label.candidate_id,
+                collision_proxy=label.collision_proxy,
+                near_collision_proxy=label.near_collision_proxy,
+                unknown_penalty=label.unknown_penalty,
+                uncertainty_penalty=label.uncertainty_penalty,
+                coverage_gain=label.coverage_gain,
+                smoothness_cost=label.smoothness_cost,
+                total_expert_score=float(score),
+                selected_by_expert=selected,
+            )
+        )
+    return tuple(adjusted)
+
+
+def _balance_prepared_examples(examples: list[PreparedActionExample]) -> list[PreparedActionExample]:
+    if not examples:
+        return []
+    source_counts = _distribution([item.frame.source_name for item in examples])
+    source_total = sum(source_counts.values())
+    dominant_source, dominant_source_count = max(source_counts.items(), key=lambda item: item[1])
+    source_fraction = dominant_source_count / max(source_total, 1)
+    if source_fraction > 0.65:
+        other_source_count = source_total - dominant_source_count
+        source_cap = max(1, int((0.65 / 0.35) * max(other_source_count, 1)))
+    else:
+        source_cap = len(examples)
+    source_seen: dict[str, int] = {}
+    source_capped: list[PreparedActionExample] = []
+    for item in examples:
+        source = item.frame.source_name
+        if source == dominant_source and source_seen.get(source, 0) >= source_cap:
+            continue
+        source_seen[source] = source_seen.get(source, 0) + 1
+        source_capped.append(item)
+
+    action_counts = _distribution([_selected_label(item.training_labels).candidate_id for item in source_capped])
+    if len(action_counts) <= 1:
+        return source_capped
+    total = sum(action_counts.values())
+    dominant_action, dominant_count = max(action_counts.items(), key=lambda item: item[1])
+    dominant_fraction = dominant_count / max(total, 1)
+    if dominant_fraction <= 0.65:
+        return source_capped
+    other_count = total - dominant_count
+    action_cap = max(1, int((0.65 / 0.35) * max(other_count, 1)))
+    action_seen: dict[str, int] = {}
+    balanced: list[PreparedActionExample] = []
+    for item in source_capped:
+        action = _selected_label(item.training_labels).candidate_id
+        if action == dominant_action and action_seen.get(action, 0) >= action_cap:
+            continue
+        action_seen[action] = action_seen.get(action, 0) + 1
+        balanced.append(item)
+    return balanced
+
+
+def _balancing_record(
+    *,
+    enabled: bool,
+    raw_count: int,
+    balanced_count: int,
+    raw_source_distribution: dict[str, int],
+    raw_selected_distribution: dict[str, int],
+    balanced_source_distribution: dict[str, int],
+    balanced_selected_distribution: dict[str, int],
+) -> JsonDict:
+    return {
+        "enabled": bool(enabled),
+        "method": "deterministic_source_cap_then_action_cap" if enabled else "none",
+        "raw_example_count": int(raw_count),
+        "balanced_example_count": int(balanced_count),
+        "raw_source_distribution": dict(sorted(raw_source_distribution.items())),
+        "raw_selected_distribution": dict(sorted(raw_selected_distribution.items())),
+        "balanced_source_distribution": dict(sorted(balanced_source_distribution.items())),
+        "balanced_selected_distribution": dict(sorted(balanced_selected_distribution.items())),
+    }
+
+
+def _distribution(values: list[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _validate_source_flags(example: dict[str, np.ndarray], example_path: Path) -> None:
@@ -617,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source", action="append", required=True, help="Input controlled/reviewed BEV pack.")
     parser.add_argument("--out", required=True, help="Output ActionLabelPack directory.")
     parser.add_argument("--max-examples", type=int, default=None)
-    parser.add_argument("--pack-version", type=int, choices=(0, 1, 2, 3), default=0)
+    parser.add_argument("--pack-version", type=int, choices=(0, 1, 2, 3, 4), default=0)
     args = parser.parse_args(argv)
     manifest = build_action_label_pack(
         sources=[Path(source) for source in args.source],

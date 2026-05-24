@@ -172,3 +172,16 @@ Goal 11A did not add external datasets, model families, simulator/middleware, ha
 - Required at runtime: no. DINO, SpatialMemoryNet, and TrajectoryScorerNet are used only in replay/modeld experiments in this goal.
 - Mock/fallback status: tests use fake DINO features and synthetic/controlled packs; fake features remain marked `mock=true`, `synthetic=true`, and `real_perception=false`.
 - Risk: the OpenLORIS action labels collapse to a single motion candidate (`straight_short`) in the learned-scorer subset, and OpenLORIS license terms still need human/legal review before any product training use.
+
+## Goal 11B dependency update
+
+Goal 11B did not add new external model families, datasets, simulator/middleware, hardware-control libraries, or product-runtime dependencies.
+
+- DINOv2-small was reused as an offline frozen feature teacher on OpenLORIS `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; status remains `pending_human_review`.
+- PyTorch was reused for local SpatialMemoryNet and TrajectoryScorerNet training/eval; no new training framework was added.
+- OpenLORIS-Scene was reused for replay-only public robot-mounted RGB-D/IMU/odom/pose benchmark routes. Evaluated packages: `package/cafe1-1_2-package.tar` (`6.954` GB), `package/office1-1_7-package.tar` (`9.889` GB), and `package/corridor1-1.7z` (`12.902` GB). `home1-1_5` was selected but kept out because robot-frame BEV refused missing camera intrinsics.
+- OpenLORIS license name/status in HomeBrain remains `CC BY-ND 4.0` with `license_review_status=pending_human_review`.
+- Intended use: local replay/eval benchmark for robot-frame BEV, spatial memory, future-motion labels, and candidate trajectory scoring. It is not product-approved training data.
+- Required at runtime: no. DINO, SpatialMemoryNet, and TrajectoryScorerNet are used only for offline/replay Goal 11B experiments.
+- Mock/fallback status: no fake public routes, intrinsics, transforms, odometry, or poses were substituted. Geometry-only DA3/TUM/phone frames were explicitly excluded from ActionLabelPack v4 action supervision.
+- Risk: CC BY-ND terms still need human/legal review before any training/product use; true leave-one-route-out folds still diagnose held-out action-distribution concentration on corridor and office; all artifacts remain `replay_only=true`, `not_executed=true`, `control_safe=false`, and `product_training_approved=false`.

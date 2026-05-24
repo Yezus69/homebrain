@@ -137,6 +137,39 @@ def test_action_label_pack_v3_schema(tmp_path: Path) -> None:
     assert qa["action_label_pack_qa_pass"] is True
 
 
+def test_openloris_pose_deltas_and_action_label_pack_v4_future_motion(tmp_path: Path) -> None:
+    openloris_source = tmp_path / "openloris" / "cafe1-1"
+    route = tmp_path / "runs" / "openloris_route"
+    bev = route / "geometry" / "robot_rgbd_bev"
+    pack = tmp_path / "runs" / "openloris_pack"
+    controlled = tmp_path / "runs" / "controlled"
+    action_pack = tmp_path / "runs" / "actions_v4"
+
+    _write_openloris_fixture(openloris_source, frame_count=24, include_extrinsics=True)
+    openloris_to_route(source_dir=openloris_source, out_dir=route, max_frames=24)
+    robot_rgbd_to_bev(log_dir=route, out_dir=bev, grid_cells=32, meters_per_cell=0.05)
+    pack_spatial_dataset(log_dir=route, bev_dir=bev, out_dir=pack)
+    pack_manifest = json.loads((pack / "manifest.json").read_text(encoding="utf-8"))
+    assert pack_manifest["pose_label_count"] == 23
+    assert pack_manifest["pose_label_frame"] == "robot_base_relative_pose"
+
+    generate_controlled_bev_maps(out_dir=controlled, examples_per_scenario=2, grid_size=32, meters_per_cell=0.05)
+    build_action_label_pack(sources=[controlled, pack], out_dir=action_pack, pack_version=4)
+    qa = qa_action_label_pack(action_pack)
+    manifest = json.loads((action_pack / "manifest.json").read_text(encoding="utf-8"))
+    first = np.load(action_pack / manifest["examples"][0]["example_path"], allow_pickle=False)
+
+    assert manifest["schema_version"] == "homebrain.action_label_pack.v4"
+    assert manifest["future_motion_supervision"]["enabled"] is True
+    assert manifest["balancing"]["enabled"] is True
+    assert "raw_selected_distribution" in manifest
+    assert "balanced_selected_distribution" in manifest
+    assert "future_best_candidate_by_odom" in first
+    assert "coverage_expert_selected_candidate_id" in first
+    assert qa["future_motion_label_valid_count"] > 0
+    assert qa["control_safe"] is False
+
+
 def _write_openloris_fixture(root: Path, *, frame_count: int, include_extrinsics: bool) -> None:
     (root / "color").mkdir(parents=True, exist_ok=True)
     (root / "aligned_depth").mkdir(parents=True, exist_ok=True)
