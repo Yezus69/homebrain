@@ -253,3 +253,30 @@ install external repositories, train any model, or run policy/control loops.
 - Risk: SceneTeacherPack signal audits are gates for review or geometry-pretrain
   candidates only. Exact real model/checkpoint licenses and owned-route
   provenance must be audited before any product training or runtime use.
+
+## Goal 15C dependency update
+
+Goal 15C did not add external dependencies, install MoGe, download checkpoints,
+train models, run policies, or add product-runtime requirements.
+
+- Owned/local frames used: `data/inbox/room_walk_001/frames`, imported only with
+  explicit `--owned-or-license-approved` into
+  `runs/goal15c_room_walk_001_route`.
+- MoGe source/provenance remains operator-supplied local `external/moge`,
+  `HOMEBRAIN_MOGE_DIR`, local checkpoint, or
+  `HOMEBRAIN_MOGE_ADAPTER=module:function`; no official repo or checkpoint is
+  selected by HomeBrain.
+- License name/status in HomeBrain remains `pending_human_review`; no real MoGe
+  code or weights were present to audit, and nothing is marked runtime-safe,
+  product-safe, or product-training-approved.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Real backend setup status: blocked. The real MoGe run on the owned route
+  reported missing local `external/moge` or `HOMEBRAIN_MOGE_DIR` /
+  `HOMEBRAIN_MOGE_ADAPTER`; `external/models` contains only `da3`.
+- Risk: there is still no real MoGe signal to evaluate. The audit gate now
+  distinguishes `single_frame_geometry_pretrain_candidate` from
+  `temporal_memory_pretrain_candidate`; temporal promotion requires real teacher
+  extrinsics or route pose/odometry evidence. Any future real MoGe license and
+  checkpoint provenance still require human review before product training or
+  runtime use.

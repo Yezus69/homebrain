@@ -24,7 +24,12 @@ from homebrain.replay.segment_log import read_events
 from homebrain.teachers.scene_teacher import load_scene_teacher_manifest
 
 SCENE_TEACHER_SIGNAL_AUDIT_SCHEMA_VERSION = "homebrain.scene_teacher_signal_audit.v0"
-NEXT_ALLOWED_USES = ("review_only", "geometry_pretrain_candidate", "blocked")
+NEXT_ALLOWED_USES = (
+    "review_only",
+    "single_frame_geometry_pretrain_candidate",
+    "temporal_memory_pretrain_candidate",
+    "blocked",
+)
 GEOMETRY_PRETRAIN_SCALE_STATUSES = {"metric", "metric_or_route_measured", "measured_metric"}
 VALIDITY_MIN = 0.95
 
@@ -67,11 +72,9 @@ def audit_scene_teacher_signal(
         frame_count=frame_count,
         depth_valid_ratio=depth_valid_ratio,
         confidence_valid_ratio=confidence_valid_ratio,
-        pose_valid_ratio=pose_valid_ratio,
     )
-    promotable_to_spatial_pack = bool(
+    single_frame_geometry_pretrain_candidate = bool(
         not hard_blockers
-        and qa.get("promotable_to_spatial_pack") is True
         and real_perception
         and not mock
         and not synthetic
@@ -79,9 +82,22 @@ def audit_scene_teacher_signal(
         and route_truth["owned_or_license_approved"] is True
         and not action_supervision_ok
     )
+    temporal_memory_evidence = _temporal_memory_evidence(
+        manifest=manifest,
+        route_truth=route_truth,
+        frame_count=frame_count,
+        pose_valid_ratio=pose_valid_ratio,
+        real_perception=real_perception,
+        mock=mock,
+        synthetic=synthetic,
+    )
+    temporal_memory_pretrain_candidate = bool(
+        single_frame_geometry_pretrain_candidate and temporal_memory_evidence["pass"]
+    )
     next_allowed_use = _next_allowed_use(
         hard_blockers=hard_blockers,
-        promotable_to_spatial_pack=promotable_to_spatial_pack,
+        single_frame_geometry_pretrain_candidate=single_frame_geometry_pretrain_candidate,
+        temporal_memory_pretrain_candidate=temporal_memory_pretrain_candidate,
     )
     recommendations = _recommendations(
         next_allowed_use=next_allowed_use,
@@ -90,6 +106,7 @@ def audit_scene_teacher_signal(
         real_perception=real_perception,
         scale_status=scale_status,
         hard_blockers=hard_blockers,
+        temporal_memory_evidence=temporal_memory_evidence,
     )
 
     report: JsonDict = {
@@ -127,7 +144,10 @@ def audit_scene_teacher_signal(
         "route_metadata_sensor_truth": route_truth,
         "robot_frame_truth": robot_frame_truth,
         "action_supervision_ok": action_supervision_ok,
-        "promotable_to_spatial_pack": promotable_to_spatial_pack,
+        "single_frame_geometry_pretrain_candidate": single_frame_geometry_pretrain_candidate,
+        "temporal_memory_pretrain_candidate": temporal_memory_pretrain_candidate,
+        "temporal_memory_evidence": temporal_memory_evidence,
+        "promotable_to_spatial_pack": single_frame_geometry_pretrain_candidate,
         "next_allowed_use": next_allowed_use,
         "hard_blockers": hard_blockers,
         "qa_quarantine_reasons": sorted(str(item) for item in qa.get("quarantine_reasons", []) if isinstance(item, str)),
@@ -349,7 +369,6 @@ def _hard_blockers(
     frame_count: int,
     depth_valid_ratio: float,
     confidence_valid_ratio: float,
-    pose_valid_ratio: float,
 ) -> list[str]:
     blockers: list[str] = []
     blockers.extend(str(item) for item in route_truth.get("violations", []) if isinstance(item, str))
@@ -363,8 +382,6 @@ def _hard_blockers(
         blockers.append("depth_validity_below_gate")
     if confidence_valid_ratio < VALIDITY_MIN:
         blockers.append("confidence_validity_below_gate")
-    if pose_valid_ratio < VALIDITY_MIN:
-        blockers.append("pose_validity_below_gate")
     if manifest.get("control_safe") is True:
         blockers.append("scene_teacher_control_safe_claim_present")
     if manifest.get("product_training_approved") is True:
@@ -380,11 +397,74 @@ def _hard_blockers(
     return sorted(set(blockers))
 
 
-def _next_allowed_use(*, hard_blockers: list[str], promotable_to_spatial_pack: bool) -> str:
+def _temporal_memory_evidence(
+    *,
+    manifest: JsonDict,
+    route_truth: JsonDict,
+    frame_count: int,
+    pose_valid_ratio: float,
+    real_perception: bool,
+    mock: bool,
+    synthetic: bool,
+) -> JsonDict:
+    frame_extrinsics_count = _frame_artifact_count(manifest, "extrinsics")
+    teacher_temporal_extrinsics = bool(
+        real_perception
+        and not mock
+        and not synthetic
+        and frame_count >= 2
+        and frame_extrinsics_count == frame_count
+        and pose_valid_ratio >= VALIDITY_MIN
+    )
+    claims = route_truth.get("metadata_sensor_claims", {})
+    route_pose_or_odom = bool(
+        route_truth.get("truth_pass") is True
+        and (
+            claims.get("has_odometry") is True
+            or claims.get("has_wheel_odometry") is True
+            or claims.get("has_robot_base_pose") is True
+            or claims.get("has_groundtruth_pose") is True
+        )
+    )
+    missing: list[str] = []
+    if not teacher_temporal_extrinsics:
+        missing.append("teacher_temporal_extrinsics")
+    if not route_pose_or_odom:
+        missing.append("route_pose_or_odom")
+    return {
+        "pass": bool(teacher_temporal_extrinsics or route_pose_or_odom),
+        "teacher_temporal_extrinsics": teacher_temporal_extrinsics,
+        "frame_extrinsics_count": frame_extrinsics_count,
+        "frame_count": frame_count,
+        "pose_valid_ratio": pose_valid_ratio,
+        "route_pose_or_odom": route_pose_or_odom,
+        "missing_evidence": missing,
+    }
+
+
+def _frame_artifact_count(manifest: JsonDict, kind: str) -> int:
+    count = 0
+    for frame in manifest.get("frames", []):
+        if not isinstance(frame, dict):
+            continue
+        artifacts = frame.get("artifacts")
+        if isinstance(artifacts, dict) and kind in artifacts:
+            count += 1
+    return count
+
+
+def _next_allowed_use(
+    *,
+    hard_blockers: list[str],
+    single_frame_geometry_pretrain_candidate: bool,
+    temporal_memory_pretrain_candidate: bool,
+) -> str:
     if hard_blockers:
         return "blocked"
-    if promotable_to_spatial_pack:
-        return "geometry_pretrain_candidate"
+    if temporal_memory_pretrain_candidate:
+        return "temporal_memory_pretrain_candidate"
+    if single_frame_geometry_pretrain_candidate:
+        return "single_frame_geometry_pretrain_candidate"
     return "review_only"
 
 
@@ -396,6 +476,7 @@ def _recommendations(
     real_perception: bool,
     scale_status: str,
     hard_blockers: list[str],
+    temporal_memory_evidence: JsonDict,
 ) -> list[str]:
     if next_allowed_use == "blocked":
         return [
@@ -410,6 +491,21 @@ def _recommendations(
     if scale_status not in GEOMETRY_PRETRAIN_SCALE_STATUSES:
         return [
             "Use this artifact for review only until scale is metric or tied to measured route calibration.",
+        ]
+    if next_allowed_use == "single_frame_geometry_pretrain_candidate":
+        return [
+            "Review generated geometry before packing; this audit only marks a single-frame geometry candidate.",
+            "Do not use this artifact for temporal memory pretraining until real pose, extrinsics, or odometry evidence is present.",
+        ]
+    if next_allowed_use == "temporal_memory_pretrain_candidate":
+        evidence = (
+            "teacher extrinsics"
+            if temporal_memory_evidence.get("teacher_temporal_extrinsics")
+            else "route pose/odometry"
+        )
+        return [
+            f"Review generated geometry and temporal alignment before packing; temporal evidence came from {evidence}.",
+            "This is still offline pretraining signal only, not product-training approval or control-safety evidence.",
         ]
     return [
         "Review generated geometry before packing; this audit only marks a candidate, not product-training approval.",
@@ -461,6 +557,11 @@ def _write_markdown(path: Path, report: JsonDict) -> None:
         f"- robot_frame_truth_allowed: `{str(route.get('robot_frame_truth_allowed')).lower()}`",
         f"- robot_frame_truth: `{str(report['robot_frame_truth']).lower()}`",
         f"- action_supervision_ok: `{str(report['action_supervision_ok']).lower()}`",
+        "",
+        "## Allowed Use",
+        f"- single_frame_geometry_pretrain_candidate: `{str(report['single_frame_geometry_pretrain_candidate']).lower()}`",
+        f"- temporal_memory_pretrain_candidate: `{str(report['temporal_memory_pretrain_candidate']).lower()}`",
+        f"- temporal_memory_evidence_pass: `{str(report['temporal_memory_evidence']['pass']).lower()}`",
         "",
         "## Blockers",
         *([f"- `{item}`" for item in report["hard_blockers"]] if report["hard_blockers"] else ["- `none`"]),

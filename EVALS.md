@@ -1168,6 +1168,9 @@ mask_source_distribution
 route_metadata_sensor_truth
 robot_frame_truth
 action_supervision_ok
+single_frame_geometry_pretrain_candidate
+temporal_memory_pretrain_candidate
+temporal_memory_evidence
 promotable_to_spatial_pack
 next_allowed_use
 hard_blockers
@@ -1178,8 +1181,9 @@ Acceptance gates:
 - IMU, odom/wheel odometry, and command events must match route metadata; image-only routes must not invent these streams.
 - `robot_frame_truth=true` is forbidden unless measured camera-to-base and base pose/odom are present.
 - `action_supervision_ok` must remain false for SceneTeacherPack audits.
-- Fake or synthetic artifacts may only produce `next_allowed_use=review_only` or `blocked`, never `geometry_pretrain_candidate`.
-- `geometry_pretrain_candidate` requires real perception, non-mock/non-synthetic output, passing route-truth checks, passing structural QA, and metric or route-measured scale.
+- Fake or synthetic artifacts may only produce `next_allowed_use=review_only` or `blocked`, never a pretraining candidate.
+- `single_frame_geometry_pretrain_candidate` requires real perception, non-mock/non-synthetic output, passing route-truth checks, passing structural QA for geometry, and metric or route-measured scale. It does not require real temporal extrinsics.
+- `temporal_memory_pretrain_candidate` requires the single-frame geometry gate plus real teacher temporal extrinsics or route pose/odometry evidence.
 - All artifacts remain `replay_only=true`, `not_executed=true`, `control_safe=false`, `product_training_approved=false`, and no `cmd_vel` or raw PWM is emitted.
 
 Current Goal 15B outcome: fake MoGe verification on an explicitly approved
@@ -1189,3 +1193,15 @@ owned image-only fixture passed with `frame_count=4`, `missing_artifact_count=0`
 `route_metadata_sensor_truth.truth_pass=true`, `promotable_to_spatial_pack=false`,
 and `next_allowed_use=review_only`. Optional real MoGe and VGGT checks remain
 blocked by missing local assets/adapters, recorded in `BLOCKERS.md`.
+
+Current Goal 15C outcome: `data/inbox/room_walk_001/frames` was imported with
+`--owned-or-license-approved` to `runs/goal15c_room_walk_001_route`
+(`frame_count=350`, `image_load_error_count=0`, `owned_or_license_approved=true`).
+The required real MoGe run stopped before artifacts because the workspace has no
+`external/moge`, no local MoGe checkpoint, and no configured
+`HOMEBRAIN_MOGE_ADAPTER`, `HOMEBRAIN_MOGE_DIR`, or
+`HOMEBRAIN_MOGE_CHECKPOINT`. Therefore no real SceneTeacherPack, QA, signal
+audit, or visual review artifact exists yet. The audit vocabulary was split into
+`review_only`, `single_frame_geometry_pretrain_candidate`,
+`temporal_memory_pretrain_candidate`, and `blocked`; targeted tests and full
+pytest pass.

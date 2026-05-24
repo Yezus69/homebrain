@@ -15,7 +15,11 @@ from homebrain.teachers.moge_scene_teacher import (
 )
 from homebrain.teachers.qa_scene_teacher import run_scene_teacher_qa
 from homebrain.teachers.run_scene_teacher import main as run_scene_teacher_main
-from homebrain.teachers.scene_teacher import SceneTeacherRunConfig, load_scene_teacher_manifest
+from homebrain.teachers.scene_teacher import (
+    SceneTeacherRunConfig,
+    load_scene_teacher_manifest,
+    write_scene_teacher_json,
+)
 from homebrain.tools.audit_scene_teacher_signal import audit_scene_teacher_signal
 
 
@@ -163,6 +167,122 @@ def test_signal_audit_blocks_invented_sensor_claims(tmp_path: Path) -> None:
     assert "imu_events_present_but_metadata_does_not_claim_sensor" in blockers
     assert "wheel_odometry_events_present_but_metadata_does_not_claim_sensor" in blockers
     assert "commands_events_present_but_metadata_does_not_claim_sensor" in blockers
+
+
+def test_signal_audit_allows_single_frame_geometry_without_temporal_extrinsics(tmp_path: Path) -> None:
+    route = _owned_frame_route(tmp_path)
+    scene = tmp_path / "scene_moge_real_like_single_frame"
+    qa_path = tmp_path / "scene_moge_real_like_single_frame_qa.json"
+    run_moge_scene_teacher(route, scene, backend_name="fake")
+    manifest = load_scene_teacher_manifest(scene)
+    manifest.update(
+        {
+            "backend": "real",
+            "mock": False,
+            "synthetic": False,
+            "real_perception": True,
+            "scale_status": "metric",
+        }
+    )
+    manifest["artifact_kinds"] = [kind for kind in manifest["artifact_kinds"] if kind != "extrinsics"]
+    for frame in manifest["frames"]:
+        frame["scale_status"] = "metric"
+        frame["artifacts"].pop("extrinsics", None)
+        frame["pose_source"] = "missing_from_teacher"
+    write_scene_teacher_json(scene / "scene_teacher_manifest.json", manifest)
+    write_scene_teacher_json(
+        qa_path,
+        {
+            "schema_version": "homebrain.scene_teacher_qa.v0",
+            "backend": "real",
+            "mock": False,
+            "synthetic": False,
+            "real_perception": True,
+            "frame_count": 4,
+            "missing_artifact_count": 0,
+            "artifact_shape_error_count": 0,
+            "depth_valid_ratio": 1.0,
+            "confidence_valid_ratio": 1.0,
+            "pose_valid_ratio": 0.0,
+            "track_valid_ratio": 0.0,
+            "temporal_geometry_consistency": 0.0,
+            "scale_status": "metric",
+            "control_safe": False,
+            "promotable_to_spatial_pack": False,
+            "quarantine_reasons": ["low_pose_valid_ratio"],
+            "errors": [],
+        },
+    )
+
+    report = audit_scene_teacher_signal(
+        log_dir=route,
+        scene_teacher_dir=scene,
+        qa_path=qa_path,
+        out_json=tmp_path / "signal.json",
+        out_md=tmp_path / "signal.md",
+    )
+
+    assert report["next_allowed_use"] == "single_frame_geometry_pretrain_candidate"
+    assert report["single_frame_geometry_pretrain_candidate"] is True
+    assert report["temporal_memory_pretrain_candidate"] is False
+    assert report["temporal_memory_evidence"]["pass"] is False
+    assert report["hard_blockers"] == []
+
+
+def test_signal_audit_promotes_temporal_memory_only_with_pose_evidence(tmp_path: Path) -> None:
+    route = _owned_frame_route(tmp_path)
+    scene = tmp_path / "scene_moge_real_like_temporal"
+    qa_path = tmp_path / "scene_moge_real_like_temporal_qa.json"
+    run_moge_scene_teacher(route, scene, backend_name="fake")
+    manifest = load_scene_teacher_manifest(scene)
+    manifest.update(
+        {
+            "backend": "real",
+            "mock": False,
+            "synthetic": False,
+            "real_perception": True,
+            "scale_status": "metric",
+        }
+    )
+    for frame in manifest["frames"]:
+        frame["scale_status"] = "metric"
+    write_scene_teacher_json(scene / "scene_teacher_manifest.json", manifest)
+    write_scene_teacher_json(
+        qa_path,
+        {
+            "schema_version": "homebrain.scene_teacher_qa.v0",
+            "backend": "real",
+            "mock": False,
+            "synthetic": False,
+            "real_perception": True,
+            "frame_count": 4,
+            "missing_artifact_count": 0,
+            "artifact_shape_error_count": 0,
+            "depth_valid_ratio": 1.0,
+            "confidence_valid_ratio": 1.0,
+            "pose_valid_ratio": 1.0,
+            "track_valid_ratio": 0.0,
+            "temporal_geometry_consistency": 0.99,
+            "scale_status": "metric",
+            "control_safe": False,
+            "promotable_to_spatial_pack": True,
+            "quarantine_reasons": [],
+            "errors": [],
+        },
+    )
+
+    report = audit_scene_teacher_signal(
+        log_dir=route,
+        scene_teacher_dir=scene,
+        qa_path=qa_path,
+        out_json=tmp_path / "signal.json",
+        out_md=tmp_path / "signal.md",
+    )
+
+    assert report["next_allowed_use"] == "temporal_memory_pretrain_candidate"
+    assert report["single_frame_geometry_pretrain_candidate"] is True
+    assert report["temporal_memory_pretrain_candidate"] is True
+    assert report["temporal_memory_evidence"]["teacher_temporal_extrinsics"] is True
 
 
 def test_real_moge_backend_fails_clearly_without_local_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

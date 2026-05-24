@@ -6,16 +6,17 @@ default read-list.
 
 ## Current objective
 
-Goal 15B completed: add a real owned-route scene-teacher signal gate. The MoGe
-SceneTeacherPack v0 wrapper and audit tool can now distinguish fake review-only
-geometry from real, non-mock, truthful owned-route geometry-pretrain candidates
-without training SpatialMemoryNet, TrajectoryScorerNet, or any policy.
+Goal 15C completed on the setup-blocker branch: the owned
+`data/inbox/room_walk_001/frames` route was imported with explicit approval and
+the real MoGe CLI was attempted, but this workspace still lacks a local MoGe
+checkout/checkpoint or `HOMEBRAIN_MOGE_ADAPTER`. No real SceneTeacherPack, QA,
+audit, or visual review artifact could be produced.
 
 ## Last completed goal
 
-Goal 15B: real owned-route scene-teacher signal gate. Fake MoGe backend tests and
-tiny owned-route audit verification pass; real MoGe/VGGT remain optional local
-setup items, not required test dependencies.
+Goal 15C: real MoGe owned-route setup check. The route import and verification
+tests pass, audit allowed-use semantics were split, and the exact missing real
+MoGe setup is recorded as an active blocker.
 
 ## Current implementation status
 
@@ -58,6 +59,14 @@ setup items, not required test dependencies.
 - Goal 15B added `homebrain.tools.audit_scene_teacher_signal`, which combines
   route metadata truth, SceneTeacherPack QA, mask-source distribution, scale
   status, robot-frame/action-supervision claims, and `next_allowed_use`.
+- Goal 15C split scene-teacher signal audit outcomes into `review_only`,
+  `single_frame_geometry_pretrain_candidate`,
+  `temporal_memory_pretrain_candidate`, and `blocked`. Single-frame geometry
+  pretraining no longer requires temporal extrinsics; temporal-memory promotion
+  requires real teacher extrinsics or route pose/odometry evidence.
+- Goal 15C imported `data/inbox/room_walk_001/frames` to
+  `runs/goal15c_room_walk_001_route` with `owned_or_license_approved=true`, but
+  real MoGe did not run because local MoGe assets/adapters are missing.
 - Owned image/video route metadata can now explicitly record
   `owned_or_license_approved`; the audit blocks missing approval, invented
   IMU/odom/command streams, and robot-frame truth claims without measured
@@ -66,6 +75,60 @@ setup items, not required test dependencies.
   under `docs/blockers_archive/`.
 
 ## Goal completion log
+
+### 027 - Goal 15C real MoGe owned-route setup check
+
+Objective attempted: run real MoGe on owned indoor frames and decide whether the
+teacher path is worth continuing. The goal stopped at the required setup blocker
+because the owned route exists but real MoGe assets do not.
+
+Files changed: updated `homebrain/tools/audit_scene_teacher_signal.py`,
+`tests/test_goal15b_scene_teacher_signal.py`, `CURRENT_STATUS.md`, `EVALS.md`,
+`BLOCKERS.md`, and `LICENSE_AUDIT.md`.
+
+Commands run: required context reads; `python -m
+homebrain.ingest.image_sequence --frames data\inbox\room_walk_001\frames --out
+runs\goal15c_room_walk_001_route --camera front_rgb --fps 10
+--owned-or-license-approved`; `python -m
+homebrain.teachers.run_scene_teacher --teacher moge --backend real --log
+runs\goal15c_room_walk_001_route --out
+runs\goal15c_room_walk_001_route\teacher_artifacts\moge_scene_v0_real`; local
+checks for `external\moge`, `external\models`, and `HOMEBRAIN_MOGE*`;
+`python -m py_compile homebrain\tools\audit_scene_teacher_signal.py
+tests\test_goal15b_scene_teacher_signal.py`; targeted tests `python -m pytest
+tests\test_goal15b_scene_teacher_signal.py -q`; full `python -m pytest -q`.
+
+Pass/fail results: owned-route import passed with `350` frames and `0` image load
+errors. Real MoGe did not run; the CLI reported that it requires a local
+`external/moge` checkout via `--model-dir` or `HOMEBRAIN_MOGE_DIR`, or
+`HOMEBRAIN_MOGE_ADAPTER=module:function`, and that HomeBrain does not clone
+repositories during teacher runs. No real SceneTeacherPack exists, so
+scene-teacher QA, signal audit, and visual review were not run. Py_compile
+passed. Targeted tests passed with `5 passed`. Full pytest passed with
+`95 passed`.
+
+Artifacts created: `runs/goal15c_room_walk_001_route/` with copied approved
+image frames and route metadata. No real MoGe teacher artifact, QA JSON, audit
+JSON/Markdown, or visual contact sheet was created.
+
+Metrics observed: imported route metadata reports `frame_count=350`,
+`imported_frame_count=350`, `width=1920`, `height=1080`,
+`owned_or_license_approved=true`, `has_imu=false`,
+`has_wheel_odometry=false`, `has_commands=false`, `has_intrinsics=false`, and
+`scale_source=unknown_image_only`. The failed real MoGe output produced no depth,
+confidence, floor, obstacle, scale, or temporal metrics.
+
+Blockers/risks: the real teacher path remains undecidable in this workspace. The
+missing setup is exact: no `external/moge`, no MoGe checkpoint under
+`external/models`, and no `HOMEBRAIN_MOGE_ADAPTER`, `HOMEBRAIN_MOGE_DIR`, or
+`HOMEBRAIN_MOGE_CHECKPOINT` environment variable. No model was trained, no SAM2,
+ROS, Nav2, Isaac, Habitat, sim, `cmd_vel`, or raw PWM was added.
+
+Recommended next goal: install or point to a local MoGe checkout/checkpoint or a
+HomeBrain-compatible `HOMEBRAIN_MOGE_ADAPTER=module:function`, rerun the same
+owned route with the real backend, then produce SceneTeacherPack QA,
+`audit_scene_teacher_signal`, and an RGB/depth/confidence/floor/obstacle visual
+review artifact before deciding whether the teacher path is worth continuing.
 
 ### 026 - Goal 15B owned-route scene-teacher signal gate
 

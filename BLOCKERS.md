@@ -1,5 +1,38 @@
 # BLOCKERS.md
 
+## 2026-05-24 - Goal 15C real MoGe owned-route run blocked by missing local MoGe setup
+
+Exact failure: `python -m homebrain.teachers.run_scene_teacher --teacher moge
+--backend real --log runs\goal15c_room_walk_001_route --out
+runs\goal15c_room_walk_001_route\teacher_artifacts\moge_scene_v0_real` did not
+write a real SceneTeacherPack. The CLI reported: `moge scene teacher
+unavailable: Real MoGe backend requires a local external/moge checkout via
+--model-dir or HOMEBRAIN_MOGE_DIR, or HOMEBRAIN_MOGE_ADAPTER=module:function.
+HomeBrain does not clone repositories during teacher runs.`
+
+Likely cause: the owned inbox frames exist and were imported with explicit
+approval, but this workspace has no `external/moge`, no MoGe checkpoint under
+`external/models`, and no configured `HOMEBRAIN_MOGE_ADAPTER`,
+`HOMEBRAIN_MOGE_DIR`, or `HOMEBRAIN_MOGE_CHECKPOINT`. `external/models` contains
+only `da3`.
+
+Minimal next repair action: install or clone MoGe outside HomeBrain's teacher run
+path, place the selected checkpoint locally, and set `HOMEBRAIN_MOGE_DIR` plus
+`HOMEBRAIN_MOGE_CHECKPOINT` or provide a HomeBrain-compatible
+`HOMEBRAIN_MOGE_ADAPTER=module:function`. Then rerun the Goal 15C real backend
+on `runs\goal15c_room_walk_001_route`, followed by `qa_scene_teacher`,
+`audit_scene_teacher_signal`, and a visual RGB/depth/confidence/floor/obstacle
+review artifact.
+
+Command output summary: `python -m homebrain.ingest.image_sequence --frames
+data\inbox\room_walk_001\frames --out runs\goal15c_room_walk_001_route --camera
+front_rgb --fps 10 --owned-or-license-approved` imported `350` frames with `0`
+image load errors and `owned_or_license_approved=true`. The real MoGe command
+stopped before artifact creation; `runs\goal15c_room_walk_001_route\teacher_artifacts\moge_scene_v0_real`
+does not exist. No SceneTeacherPack QA, signal audit, or visual review artifact
+was possible. Py_compile passed, targeted tests passed with `5 passed`, and full
+pytest passed with `95 passed`.
+
 ## 2026-05-24 - Goal 10B TUM Pioneer robot-frame BEV blocked by missing transform semantics
 
 Exact failure: `python -m homebrain.geometry.robot_rgbd_to_bev --log runs/tum_freiburg2_pioneer_slam_route --out runs/tum_freiburg2_pioneer_slam_route/geometry/robot_rgbd_bev` refused to write robot-frame BEV: `camera_to_base transform is missing; rerun with --review-assumed-extrinsics only for review artifacts marked robot_frame_truth=false`.
