@@ -1124,3 +1124,68 @@ with `frame_count=6`, `missing_artifact_count=0`, `depth_valid_ratio=1.0`,
 uses synthetic test scale. Review BEV validation passed with `bev_frame_count=6`,
 zero missing/shape/nan errors, `weak_label=true`, and `control_safe=false`.
 Optional real VGGT remains a local setup item and is not required for tests.
+
+## Gate 1.11: owned-route scene-teacher signal audit
+
+MoGe/VGGT foundation geometry teachers may be used only as offline teachers on
+owned or explicitly license-approved route logs. This gate does not train
+SpatialMemoryNet, TrajectoryScorerNet, or any policy.
+
+Fake MoGe backend and signal-audit verification:
+```bash
+python -m homebrain.ingest.image_sequence --frames runs\goal15b_scene_teacher_signal_fake_input --out runs\goal15b_scene_teacher_signal_fake_route --camera front_rgb --fps 10 --max-frames 4 --owned-or-license-approved
+python -m homebrain.teachers.run_scene_teacher --teacher moge --backend fake --log runs\goal15b_scene_teacher_signal_fake_route --out runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake
+python -m homebrain.teachers.qa_scene_teacher --artifacts runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake --out runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake_qa.json
+python -m homebrain.tools.audit_scene_teacher_signal --log runs\goal15b_scene_teacher_signal_fake_route --scene-teacher runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake --qa runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake_qa.json --out-json runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake_signal_audit.json --out-md runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_fake_signal_audit.md
+```
+
+Optional real-backend setup checks:
+```bash
+python -m homebrain.teachers.run_scene_teacher --teacher moge --backend real --log runs\goal15b_scene_teacher_signal_fake_route --out runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_real_optional
+python -m homebrain.teachers.run_scene_teacher --teacher vggt --backend real --log runs\goal15b_scene_teacher_signal_fake_route --out runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\vggt_scene_v0_real_optional
+```
+
+MoGe real backend requirements:
+```text
+external/moge checkout or HOMEBRAIN_MOGE_DIR
+local checkpoint via HOMEBRAIN_MOGE_CHECKPOINT or --checkpoint unless the operator adapter handles it
+optional HOMEBRAIN_MOGE_ADAPTER=module:function
+no HomeBrain clone/download during teacher runs
+```
+
+Signal-audit metrics:
+```text
+frame_count
+real_perception
+mock
+synthetic
+scale_status
+depth_validity.depth_valid_ratio
+confidence_validity.confidence_valid_ratio
+pose_validity.pose_valid_ratio
+temporal_consistency
+mask_source_distribution
+route_metadata_sensor_truth
+robot_frame_truth
+action_supervision_ok
+promotable_to_spatial_pack
+next_allowed_use
+hard_blockers
+```
+
+Acceptance gates:
+- `owned_or_license_approved` must be explicitly present in `route_metadata.json`.
+- IMU, odom/wheel odometry, and command events must match route metadata; image-only routes must not invent these streams.
+- `robot_frame_truth=true` is forbidden unless measured camera-to-base and base pose/odom are present.
+- `action_supervision_ok` must remain false for SceneTeacherPack audits.
+- Fake or synthetic artifacts may only produce `next_allowed_use=review_only` or `blocked`, never `geometry_pretrain_candidate`.
+- `geometry_pretrain_candidate` requires real perception, non-mock/non-synthetic output, passing route-truth checks, passing structural QA, and metric or route-measured scale.
+- All artifacts remain `replay_only=true`, `not_executed=true`, `control_safe=false`, `product_training_approved=false`, and no `cmd_vel` or raw PWM is emitted.
+
+Current Goal 15B outcome: fake MoGe verification on an explicitly approved
+owned image-only fixture passed with `frame_count=4`, `missing_artifact_count=0`,
+`depth_valid_ratio=1.0`, `confidence_valid_ratio=1.0`, `pose_valid_ratio=1.0`,
+`temporal_geometry_consistency=0.9944600196821349`,
+`route_metadata_sensor_truth.truth_pass=true`, `promotable_to_spatial_pack=false`,
+and `next_allowed_use=review_only`. Optional real MoGe and VGGT checks remain
+blocked by missing local assets/adapters, recorded in `BLOCKERS.md`.

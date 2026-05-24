@@ -98,3 +98,41 @@ pytest passed. The optional real VGGT unavailability is not a Goal 15A failure.
 All fake and review BEV artifacts remain `replay_only=true`,
 `not_executed=true`, `control_safe=false`, `product_training_approved=false`,
 and no `cmd_vel` or raw PWM was emitted.
+
+## 2026-05-24 - Goal 15B optional real MoGe/VGGT owned-route run not configured
+
+Exact failure: optional real-backend checks on the Goal 15B owned fixture did not
+run real foundation geometry inference. `python -m
+homebrain.teachers.run_scene_teacher --teacher moge --backend real --log
+runs\goal15b_scene_teacher_signal_fake_route --out
+runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\moge_scene_v0_real_optional`
+reported that real MoGe requires a local `external/moge` checkout or
+`HOMEBRAIN_MOGE_DIR`, or `HOMEBRAIN_MOGE_ADAPTER=module:function`, and that
+HomeBrain does not clone repositories during teacher runs. `python -m
+homebrain.teachers.run_scene_teacher --teacher vggt --backend real --log
+runs\goal15b_scene_teacher_signal_fake_route --out
+runs\goal15b_scene_teacher_signal_fake_route\teacher_artifacts\vggt_scene_v0_real_optional`
+reported that real VGGT requires a local `external/vggt` checkout or
+`--model-dir`, and that HomeBrain does not clone repositories or download
+weights during teacher runs.
+
+Likely cause: this workspace has owned-looking inbox frames under
+`data/inbox/room_walk_001/frames`, but it has no local `external/moge` checkout,
+no local `external/vggt` checkout, no configured `HOMEBRAIN_MOGE_ADAPTER`,
+`HOMEBRAIN_MOGE_DIR`, `HOMEBRAIN_MOGE_CHECKPOINT`,
+`HOMEBRAIN_VGGT_ADAPTER`, `HOMEBRAIN_VGGT_DIR`, or
+`HOMEBRAIN_VGGT_CHECKPOINT`.
+
+Minimal next repair action: install the selected MoGe or VGGT repo/checkpoint
+outside HomeBrain's teacher run path, set the matching environment variables or
+pass `--model-dir` and `--checkpoint`, and provide
+`HOMEBRAIN_MOGE_ADAPTER=module:function` or
+`HOMEBRAIN_VGGT_ADAPTER=module:function` when the local package does not expose a
+HomeBrain-compatible callable. Re-import the owned inbox frames with
+`--owned-or-license-approved`, then rerun the real backend and
+`audit_scene_teacher_signal`.
+
+Command output summary: fake Goal 15B MoGe SceneTeacherPack and signal audit
+passed on the tiny fixture with `next_allowed_use=review_only`. No real MoGe or
+VGGT artifacts were written. This is optional setup, not a Goal 15B fake-backend
+verification failure.

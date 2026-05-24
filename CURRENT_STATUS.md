@@ -6,16 +6,16 @@ default read-list.
 
 ## Current objective
 
-Goal 15A completed: stop policy/scorer training and add a foundation scene-teacher
-layer for raw indoor video. The new SceneTeacherPack v0 path writes richer
-depth/point-map/camera/track/mask artifacts, QA metrics, and review-only BEV
-targets while keeping all outputs replay-only and not control-safe.
+Goal 15B completed: add a real owned-route scene-teacher signal gate. The MoGe
+SceneTeacherPack v0 wrapper and audit tool can now distinguish fake review-only
+geometry from real, non-mock, truthful owned-route geometry-pretrain candidates
+without training SpatialMemoryNet, TrajectoryScorerNet, or any policy.
 
 ## Last completed goal
 
-Goal 15A: foundation scene-teacher stack for raw indoor video. Fake VGGT-style
-backend tests and fake route end-to-end verification pass; real VGGT remains an
-optional local setup item, not a required test dependency.
+Goal 15B: real owned-route scene-teacher signal gate. Fake MoGe backend tests and
+tiny owned-route audit verification pass; real MoGe/VGGT remain optional local
+setup items, not required test dependencies.
 
 ## Current implementation status
 
@@ -50,10 +50,89 @@ optional local setup item, not a required test dependency.
   `robot_frame_truth=false`, `action_supervision_ok=false`, `replay_only=true`,
   `not_executed=true`, `control_safe=false`, and
   `product_training_approved=false`.
+- Goal 15B added `homebrain.teachers.moge_scene_teacher` with fake and real
+  backends following SceneTeacherPack v0. The real backend requires local
+  operator-supplied MoGe assets or `HOMEBRAIN_MOGE_ADAPTER=module:function`;
+  HomeBrain still does not clone or download teacher repos/checkpoints during
+  runs.
+- Goal 15B added `homebrain.tools.audit_scene_teacher_signal`, which combines
+  route metadata truth, SceneTeacherPack QA, mask-source distribution, scale
+  status, robot-frame/action-supervision claims, and `next_allowed_use`.
+- Owned image/video route metadata can now explicitly record
+  `owned_or_license_approved`; the audit blocks missing approval, invented
+  IMU/odom/command streams, and robot-frame truth claims without measured
+  camera-to-base plus base pose/odom.
 - Active blockers are tracked in `BLOCKERS.md`; resolved old blockers are archived
   under `docs/blockers_archive/`.
 
 ## Goal completion log
+
+### 026 - Goal 15B owned-route scene-teacher signal gate
+
+Objective attempted: create the smallest path that can tell whether real
+foundation geometry teachers produce useful spatial supervision on owned indoor
+video, without training SpatialMemoryNet, TrajectoryScorerNet, or any policy.
+
+Files changed: added `homebrain/teachers/moge_scene_teacher.py`,
+`homebrain/tools/audit_scene_teacher_signal.py`, and
+`tests/test_goal15b_scene_teacher_signal.py`; updated
+`homebrain/teachers/run_scene_teacher.py`, `homebrain/teachers/__init__.py`,
+`homebrain/ingest/image_sequence.py`, `CURRENT_STATUS.md`, `EVALS.md`,
+`BLOCKERS.md`, and `LICENSE_AUDIT.md`.
+
+Commands run: required context reads; `python -m py_compile
+homebrain\teachers\moge_scene_teacher.py
+homebrain\teachers\run_scene_teacher.py
+homebrain\tools\audit_scene_teacher_signal.py
+homebrain\ingest\image_sequence.py tests\test_goal15b_scene_teacher_signal.py`;
+targeted tests `python -m pytest tests\test_goal15b_scene_teacher_signal.py
+tests\test_goal15a_scene_teacher.py tests\test_ingest_image_sequence.py -q`;
+tiny fixture frame generation under
+`runs\goal15b_scene_teacher_signal_fake_input`; owned fixture import; fake MoGe
+scene-teacher run; scene-teacher QA; scene-teacher signal audit; optional real
+MoGe and VGGT availability checks; full `python -m pytest -q`.
+
+Pass/fail results: py_compile passed. Targeted tests passed with `11 passed`.
+Full pytest passed with `93 passed`. Fake MoGe SceneTeacherPack and the
+owned-route signal audit ran end to end. Optional real MoGe and VGGT checks
+returned clear unavailable setup messages because no local teacher checkout,
+checkpoint, or adapter environment variables are configured; this is recorded as
+optional setup, not a fake-backend gate failure.
+
+Artifacts created: `runs/goal15b_scene_teacher_signal_fake_input/`,
+`runs/goal15b_scene_teacher_signal_fake_route/`,
+`runs/goal15b_scene_teacher_signal_fake_route/teacher_artifacts/moge_scene_v0_fake/`,
+`runs/goal15b_scene_teacher_signal_fake_route/teacher_artifacts/moge_scene_v0_fake_qa.json`,
+`runs/goal15b_scene_teacher_signal_fake_route/teacher_artifacts/moge_scene_v0_fake_signal_audit.json`,
+and
+`runs/goal15b_scene_teacher_signal_fake_route/teacher_artifacts/moge_scene_v0_fake_signal_audit.md`.
+
+Metrics observed: fake MoGe QA reported `frame_count=4`,
+`missing_artifact_count=0`, `artifact_shape_error_count=0`,
+`depth_valid_ratio=1.0`, `confidence_valid_ratio=1.0`,
+`pose_valid_ratio=1.0`, `temporal_geometry_consistency=0.9944600196821349`,
+`scale_status=synthetic_metric_test_scale`, `control_safe=false`, and
+`promotable_to_spatial_pack=false` with quarantine reasons
+`mock_or_synthetic_teacher` and `relative_or_unknown_scale`. Signal audit
+reported `next_allowed_use=review_only`, `hard_blockers=[]`,
+`route_metadata_sensor_truth.truth_pass=true`,
+`owned_or_license_approved=true`, `robot_frame_truth=false`,
+`action_supervision_ok=false`, `promotable_to_spatial_pack=false`, and mask
+sources from teacher output for confidence, validity, floor, obstacle, and
+dynamic masks.
+
+Blockers/risks: fake artifacts remain mock/synthetic and never promotable. Real
+MoGe/VGGT signal on owned inbox video remains optional setup blocked because this
+workspace lacks `external/moge`, `external/vggt`, local checkpoints, and
+`HOMEBRAIN_MOGE_*`/`HOMEBRAIN_VGGT_*` adapter environment variables. Scene
+teacher outputs are still offline geometry review artifacts, not robot-frame
+action truth, not control safe, and not product-training approved.
+
+Recommended next goal: install one real local MoGe or VGGT teacher adapter plus
+checkpoint outside HomeBrain's run path, re-import `data/inbox/room_walk_001`
+with explicit `--owned-or-license-approved`, run the real backend, and use
+`audit_scene_teacher_signal` to decide whether the result stays `review_only` or
+becomes a `geometry_pretrain_candidate`.
 
 ### 025 - Goal 15A foundation scene-teacher stack
 

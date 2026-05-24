@@ -5,13 +5,18 @@ from pathlib import Path
 import sys
 
 from homebrain.teachers.scene_teacher import SceneTeacherRunConfig
+from homebrain.teachers.moge_scene_teacher import (
+    MOGE_DEFAULT_MODEL_ID,
+    MoGeSceneTeacherUnavailableError,
+    create_moge_scene_teacher,
+)
 from homebrain.teachers.vggt_scene_teacher import (
     VGGT_DEFAULT_MODEL_ID,
     VGGTSceneTeacherUnavailableError,
     create_vggt_scene_teacher,
 )
 
-SCENE_TEACHER_NAMES: tuple[str, ...] = ("vggt",)
+SCENE_TEACHER_NAMES: tuple[str, ...] = ("vggt", "moge")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,26 +26,39 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log", required=True, help="Input route log directory.")
     parser.add_argument("--out", required=True, help="Output SceneTeacherPack directory.")
     parser.add_argument("--device", default=None, help="Optional real backend device.")
-    parser.add_argument("--model-id", default=VGGT_DEFAULT_MODEL_ID, help="Model id recorded in metadata.")
-    parser.add_argument("--model-dir", default=None, help="Optional local external/vggt checkout or adapter path.")
-    parser.add_argument("--checkpoint", default=None, help="Optional local VGGT checkpoint path.")
+    parser.add_argument("--model-id", default=None, help="Model id recorded in metadata.")
+    parser.add_argument("--model-dir", default=None, help="Optional local teacher checkout or adapter path.")
+    parser.add_argument("--checkpoint", default=None, help="Optional local teacher checkpoint path.")
     parser.add_argument("--max-frames", type=int, default=None, help="Optional frame cap.")
     parser.add_argument("--stride", type=int, default=1, help="Optional frame stride.")
     args = parser.parse_args(argv)
 
     try:
-        teacher = create_vggt_scene_teacher(
-            backend_name=args.backend,
-            model_id=args.model_id,
-            model_dir=args.model_dir,
-            checkpoint=args.checkpoint,
-            device=args.device,
-            max_frames=args.max_frames,
-            stride=args.stride,
-        )
+        if args.teacher == "vggt":
+            teacher = create_vggt_scene_teacher(
+                backend_name=args.backend,
+                model_id=args.model_id or VGGT_DEFAULT_MODEL_ID,
+                model_dir=args.model_dir,
+                checkpoint=args.checkpoint,
+                device=args.device,
+                max_frames=args.max_frames,
+                stride=args.stride,
+            )
+        elif args.teacher == "moge":
+            teacher = create_moge_scene_teacher(
+                backend_name=args.backend,
+                model_id=args.model_id or MOGE_DEFAULT_MODEL_ID,
+                model_dir=args.model_dir,
+                checkpoint=args.checkpoint,
+                device=args.device,
+                max_frames=args.max_frames,
+                stride=args.stride,
+            )
+        else:
+            raise ValueError(f"unsupported scene teacher {args.teacher!r}")
         summary = teacher.run(SceneTeacherRunConfig(log_dir=Path(args.log), out_dir=Path(args.out)))
-    except VGGTSceneTeacherUnavailableError as exc:
-        print(f"VGGT scene teacher unavailable: {exc}", file=sys.stderr)
+    except (VGGTSceneTeacherUnavailableError, MoGeSceneTeacherUnavailableError) as exc:
+        print(f"{args.teacher} scene teacher unavailable: {exc}", file=sys.stderr)
         return 2
 
     print(

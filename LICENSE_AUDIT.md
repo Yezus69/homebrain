@@ -223,4 +223,33 @@ or install external repositories.
   not clone repositories or auto-download weights during scene-teacher runs.
 - Risk: SceneTeacherPack and derived scene-teacher BEVs are weak review geometry,
   not robot-frame action truth or control-safety evidence. Exact real
-  model/checkpoint licenses must be audited before any training/product use.
+model/checkpoint licenses must be audited before any training/product use.
+
+## Goal 15B dependency update
+
+Goal 15B added a MoGe SceneTeacherPack v0 wrapper and an owned-route signal
+audit. It did not add product-runtime dependencies, download real model weights,
+install external repositories, train any model, or run policy/control loops.
+
+- MoGe source/provenance: operator-supplied local `external/moge` checkout,
+  `HOMEBRAIN_MOGE_DIR`, local checkpoint, or
+  `HOMEBRAIN_MOGE_ADAPTER=module:function`; no official repo or checkpoint is
+  selected by HomeBrain in this goal.
+- License name/status in HomeBrain: `pending_human_review`; do not mark as
+  runtime-safe, product-safe, or product-training-approved.
+- Intended use: offline scene/geometry teacher producing depth, point maps,
+  intrinsics, confidence/validity masks, and optional mask metadata for owned or
+  license-approved indoor routes.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Mock/fallback status: fake MoGe backend exists only when explicitly selected
+  with `--backend fake`; artifacts are marked `mock=true`, `synthetic=true`,
+  `real_perception=false`, `replay_only=true`, `not_executed=true`,
+  `control_safe=false`, and `product_training_approved=false`.
+- Real backend setup status: optional real checks reported local MoGe and VGGT
+  unavailable because no local checkout/checkpoint/adapter was configured.
+  HomeBrain does not clone repositories or auto-download weights during
+  scene-teacher runs.
+- Risk: SceneTeacherPack signal audits are gates for review or geometry-pretrain
+  candidates only. Exact real model/checkpoint licenses and owned-route
+  provenance must be audited before any product training or runtime use.

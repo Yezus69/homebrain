@@ -84,6 +84,7 @@ def ingest_image_sequence(
     fps: float,
     max_frames: int | None = None,
     stride: int = 1,
+    owned_or_license_approved: bool = False,
 ) -> ImageSequenceIngestSummary:
     if fps <= 0.0:
         raise ValueError("fps must be greater than zero")
@@ -177,6 +178,7 @@ def ingest_image_sequence(
         image_load_errors=image_load_errors,
         source_frame_interval_ns=source_frame_interval_ns,
         expected_import_interval_ns=expected_import_interval_ns,
+        owned_or_license_approved=owned_or_license_approved,
     )
     metadata_path = write_route_metadata(output_root, metadata)
     artifact_files = [record.data_ref for record in records]
@@ -341,6 +343,7 @@ def _build_route_metadata(
     image_load_errors: list[JsonDict],
     source_frame_interval_ns: int,
     expected_import_interval_ns: int,
+    owned_or_license_approved: bool,
 ) -> JsonDict:
     width = records[0].width
     height = records[0].height
@@ -385,6 +388,7 @@ def _build_route_metadata(
         "has_imu": False,
         "has_wheel_odometry": False,
         "has_commands": False,
+        "owned_or_license_approved": bool(owned_or_license_approved),
         "has_intrinsics": False,
         "calibration_class": "uncalibrated_visual",
         "intrinsics_source": "missing_not_supplied",
@@ -392,7 +396,7 @@ def _build_route_metadata(
         "pose_source": "missing_not_supplied",
         "scale_source": "unknown_image_only",
         "gravity_floor_source": "missing_not_supplied",
-        "user_owned_or_license_unknown": True,
+        "user_owned_or_license_unknown": not bool(owned_or_license_approved),
         "image_load_error_count": len(image_load_errors),
         "image_load_errors": image_load_errors,
         "missing_sensor_notices": missing_sensor_notices,
@@ -422,6 +426,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fps", required=True, type=float, help="Source image sequence frame rate.")
     parser.add_argument("--max-frames", type=int, default=None, help="Optional imported frame cap.")
     parser.add_argument("--stride", type=int, default=1, help="Import every Nth sorted frame.")
+    parser.add_argument(
+        "--owned-or-license-approved",
+        action="store_true",
+        help="Record that the operator explicitly approved this input for local HomeBrain review.",
+    )
     args = parser.parse_args(argv)
 
     summary = ingest_image_sequence(
@@ -431,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         fps=args.fps,
         max_frames=args.max_frames,
         stride=args.stride,
+        owned_or_license_approved=args.owned_or_license_approved,
     )
     print(
         f"imported {summary.frame_count} frame(s) to {summary.out_dir.as_posix()} "
