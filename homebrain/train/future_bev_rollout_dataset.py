@@ -152,11 +152,20 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
             "horizon_valid": torch.from_numpy(np.asarray(example["horizon_valid"], dtype=np.float32)),
             "pose_delta_to_future": torch.from_numpy(np.asarray(example["pose_delta_to_future"], dtype=np.float32)),
             "candidate_collision": torch.from_numpy(np.asarray(example["candidate_collision"], dtype=np.float32)),
+            "candidate_future_collision": torch.from_numpy(
+                np.asarray(example.get("candidate_future_collision", example["candidate_collision"]), dtype=np.float32)
+            ),
+            "candidate_unsafe_now": torch.from_numpy(
+                np.asarray(example.get("candidate_unsafe_now", np.zeros_like(example["candidate_collision"])), dtype=np.float32)
+            ),
             "candidate_unknown_exposure": torch.from_numpy(
                 np.asarray(example["candidate_unknown_exposure"], dtype=np.float32)
             ),
             "candidate_new_area_gain": torch.from_numpy(np.asarray(example["candidate_new_area_gain"], dtype=np.float32)),
             "candidate_progress": torch.from_numpy(np.asarray(example["candidate_progress"], dtype=np.float32)),
+            "candidate_oracle_cost": torch.from_numpy(
+                _candidate_oracle_cost_from_example(example).astype(np.float32)
+            ),
             "candidate_valid_mask": torch.from_numpy(np.asarray(example["candidate_valid_mask"], dtype=np.float32)),
             "frame_id": torch.tensor(int(np.asarray(example["frame_id"]).item()), dtype=torch.int64),
             "timestamp_ns": torch.tensor(int(np.asarray(example["timestamp_ns"]).item()), dtype=torch.int64),
@@ -325,6 +334,11 @@ def build_future_rollout_targets_for_frame(
     stacked_changed = np.stack(cleared_or_changed, axis=0).astype(np.float32)
     candidate_labels = candidate_outcome_labels(
         candidates=candidates,
+        current_occupied=current_occupied,
+        current_risky=current_bev[4],
+        current_unknown=current_unknown,
+        current_free=current_free,
+        current_traversable=current_bev[3],
         future_occupied=stacked_occupied,
         future_unknown=stacked_unknown,
         newly_observed=stacked_new,
@@ -430,48 +444,107 @@ def candidate_outcome_labels(
     newly_observed: np.ndarray,
     future_free: np.ndarray,
     horizon_valid: np.ndarray,
+    current_occupied: np.ndarray | None = None,
+    current_risky: np.ndarray | None = None,
+    current_unknown: np.ndarray | None = None,
+    current_free: np.ndarray | None = None,
+    current_traversable: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     horizons, height, width = future_occupied.shape
     valid_horizons = np.asarray(horizon_valid, dtype=np.float32) > 0.0
     any_valid = bool(np.any(valid_horizons))
     max_forward = max((max((pose.x_m for pose in candidate.poses), default=0.0) for candidate in candidates), default=1.0)
     max_forward = max(float(max_forward), 1.0e-6)
+    max_turn = max(
+        (max((abs(float(pose.yaw_rad)) for pose in candidate.poses), default=0.0) for candidate in candidates),
+        default=1.0,
+    )
+    max_turn = max(float(max_turn), 1.0e-6)
+    current_occupied = _optional_grid(current_occupied, height, width, fill=0.0)
+    current_risky = _optional_grid(current_risky, height, width, fill=0.0)
+    current_unknown = _optional_grid(current_unknown, height, width, fill=0.0)
+    current_free = _optional_grid(current_free, height, width, fill=0.0)
+    current_traversable = _optional_grid(current_traversable, height, width, fill=0.0)
     collision: list[float] = []
+    future_collision: list[float] = []
+    unsafe_now: list[float] = []
     unknown_exposure: list[float] = []
     new_area_gain: list[float] = []
     progress: list[float] = []
+    oracle_cost: list[float] = []
     valid_mask: list[float] = []
     for candidate in candidates:
         cells = tuple(candidate.footprint_cells)
-        if not cells or not any_valid:
+        if not cells:
             collision.append(0.0)
+            future_collision.append(0.0)
+            unsafe_now.append(0.0)
             unknown_exposure.append(0.0)
             new_area_gain.append(0.0)
             progress.append(0.0)
+            oracle_cost.append(0.0)
             valid_mask.append(0.0)
             continue
-        occupied_values = _cells_over_horizons(future_occupied, cells, default=1.0)
-        unknown_values = _cells_over_horizons(future_unknown, cells, default=1.0)
-        new_values = _cells_over_horizons(newly_observed, cells, default=0.0)
-        free_values = _cells_over_horizons(future_free, cells, default=0.0)
-        occupied_values = occupied_values[valid_horizons]
-        unknown_values = unknown_values[valid_horizons]
-        new_values = new_values[valid_horizons]
-        free_values = free_values[valid_horizons]
+        label_cells = _candidate_label_cells(candidate, height, width)
+        occupied_values = _cells_over_horizons(future_occupied, cells, default=1.0)[valid_horizons]
+        unknown_values = _cells_over_horizons(future_unknown, label_cells, default=1.0)[valid_horizons]
+        new_values = _cells_over_horizons(newly_observed, label_cells, default=0.0)[valid_horizons]
+        free_values = _cells_over_horizons(future_free, label_cells, default=0.0)[valid_horizons]
+        current_occupied_values = _cells_on_grid(current_occupied, cells, default=1.0)
+        current_risky_values = _cells_on_grid(current_risky, cells, default=1.0)
+        current_unknown_values = _cells_on_grid(current_unknown, label_cells, default=1.0)
+        current_free_values = _cells_on_grid(current_free, label_cells, default=0.0)
+        current_traversable_values = _cells_on_grid(current_traversable, label_cells, default=0.0)
         terminal = candidate.poses[-1] if candidate.poses else None
         forward_norm = 0.0 if terminal is None else max(0.0, float(terminal.x_m)) / max_forward
-        collision_value = float(np.max(occupied_values)) if occupied_values.size else 0.0
-        free_mean = float(np.mean(free_values)) if free_values.size else 0.0
-        collision.append(collision_value)
-        unknown_exposure.append(float(np.mean(unknown_values)) if unknown_values.size else 0.0)
-        new_area_gain.append(float(np.mean(new_values)) if new_values.size else 0.0)
-        progress.append(float(forward_norm * free_mean * (1.0 - min(1.0, collision_value))))
+        turn_norm = 0.0 if terminal is None else abs(float(terminal.yaw_rad)) / max_turn
+        future_collision_value = _risk_value(occupied_values) if any_valid else 0.0
+        current_occupied_risk = _risk_value(current_occupied_values)
+        current_risky_risk = _risk_value(current_risky_values)
+        current_unknown_mean = _mean_array(current_unknown_values)
+        current_free_mean = _mean_array(np.maximum(current_free_values, current_traversable_values))
+        low_free_risk = max(0.0, 1.0 - current_free_mean)
+        physical_unsafe_value = max(
+            current_occupied_risk,
+            0.85 * current_risky_risk,
+        )
+        unsafe_value = max(
+            physical_unsafe_value,
+            0.25 * current_unknown_mean,
+            0.15 * low_free_risk,
+        )
+        future_unknown_mean = _mean_array(unknown_values) if any_valid else 0.0
+        unknown_value = max(current_unknown_mean, future_unknown_mean)
+        new_value = _mean_array(new_values) if any_valid else 0.0
+        future_free_mean = _mean_array(free_values) if any_valid else 0.0
+        free_mean = max(current_free_mean, future_free_mean)
+        collision_value = max(future_collision_value, physical_unsafe_value, 0.5 * unsafe_value)
+        progress_value = (0.85 * forward_norm + 0.15 * turn_norm) * free_mean * (1.0 - min(1.0, collision_value))
+        stop_penalty = 0.8 if candidate.id == "stop" else 0.0
+        cost_value = (
+            8.0 * collision_value
+            + 2.0 * unsafe_value
+            + 1.25 * unknown_value
+            - 2.4 * new_value
+            - 2.0 * progress_value
+            + stop_penalty
+        )
+        collision.append(float(np.clip(collision_value, 0.0, 1.0)))
+        future_collision.append(float(np.clip(future_collision_value, 0.0, 1.0)))
+        unsafe_now.append(float(np.clip(unsafe_value, 0.0, 1.0)))
+        unknown_exposure.append(float(np.clip(unknown_value, 0.0, 1.0)))
+        new_area_gain.append(float(np.clip(new_value, 0.0, 1.0)))
+        progress.append(float(np.clip(progress_value, 0.0, 1.0)))
+        oracle_cost.append(float(cost_value))
         valid_mask.append(1.0)
     return {
         "candidate_collision": np.asarray(collision, dtype=np.float32),
+        "candidate_future_collision": np.asarray(future_collision, dtype=np.float32),
+        "candidate_unsafe_now": np.asarray(unsafe_now, dtype=np.float32),
         "candidate_unknown_exposure": np.asarray(unknown_exposure, dtype=np.float32),
         "candidate_new_area_gain": np.asarray(new_area_gain, dtype=np.float32),
         "candidate_progress": np.asarray(progress, dtype=np.float32),
+        "candidate_oracle_cost": np.asarray(oracle_cost, dtype=np.float32),
         "candidate_valid_mask": np.asarray(valid_mask, dtype=np.float32),
     }
 
@@ -716,6 +789,66 @@ def _empty_future(height: int, width: int) -> dict[str, Any]:
     }
 
 
+def _candidate_oracle_cost_from_example(example: dict[str, np.ndarray]) -> np.ndarray:
+    if "candidate_oracle_cost" in example:
+        return np.asarray(example["candidate_oracle_cost"], dtype=np.float32)
+    collision = np.asarray(example["candidate_collision"], dtype=np.float32)
+    unsafe_now = np.asarray(example.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
+    unknown = np.asarray(example["candidate_unknown_exposure"], dtype=np.float32)
+    gain = np.asarray(example["candidate_new_area_gain"], dtype=np.float32)
+    progress = np.asarray(example["candidate_progress"], dtype=np.float32)
+    return (8.0 * collision + 2.0 * unsafe_now + 1.25 * unknown - 2.4 * gain - 2.0 * progress).astype(np.float32)
+
+
+def _optional_grid(array: np.ndarray | None, height: int, width: int, *, fill: float) -> np.ndarray:
+    if array is None:
+        return np.full((height, width), float(fill), dtype=np.float32)
+    grid = np.asarray(array, dtype=np.float32)
+    if grid.shape != (height, width):
+        return np.full((height, width), float(fill), dtype=np.float32)
+    return np.clip(grid, 0.0, 1.0).astype(np.float32)
+
+
+def _candidate_label_cells(candidate: CandidateTrajectory, height: int, width: int) -> tuple[tuple[int, int], ...]:
+    cells = set(candidate.footprint_cells)
+    linear = abs(float(candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0)))
+    angular = abs(float(candidate.cmd_vel_proxy.get("angular_velocity_radps", 0.0)))
+    if angular > 0.0 and linear < 1.0e-6:
+        cells = set(_dilate_cells(tuple(cells), height, width, radius_cells=2))
+    return tuple(sorted(cells))
+
+
+def _dilate_cells(
+    cells: tuple[tuple[int, int], ...],
+    height: int,
+    width: int,
+    *,
+    radius_cells: int,
+) -> tuple[tuple[int, int], ...]:
+    expanded: set[tuple[int, int]] = set()
+    for row, col in cells:
+        for row_offset in range(-radius_cells, radius_cells + 1):
+            for col_offset in range(-radius_cells, radius_cells + 1):
+                if row_offset * row_offset + col_offset * col_offset > radius_cells * radius_cells:
+                    continue
+                out_row = row + row_offset
+                out_col = col + col_offset
+                if 0 <= out_row < height and 0 <= out_col < width:
+                    expanded.add((out_row, out_col))
+    return tuple(sorted(expanded))
+
+
+def _cells_on_grid(values: np.ndarray, cells: tuple[tuple[int, int], ...], *, default: float) -> np.ndarray:
+    result = np.full((max(len(cells), 1),), float(default), dtype=np.float32)
+    if not cells:
+        return result
+    height, width = values.shape[0], values.shape[1]
+    for cell_index, (row, col) in enumerate(cells):
+        if 0 <= row < height and 0 <= col < width:
+            result[cell_index] = float(values[row, col])
+    return result
+
+
 def _cells_over_horizons(values: np.ndarray, cells: tuple[tuple[int, int], ...], *, default: float) -> np.ndarray:
     horizons = int(values.shape[0])
     result = np.full((horizons, max(len(cells), 1)), float(default), dtype=np.float32)
@@ -726,6 +859,20 @@ def _cells_over_horizons(values: np.ndarray, cells: tuple[tuple[int, int], ...],
         if 0 <= row < height and 0 <= col < width:
             result[:, cell_index] = values[:, row, col].astype(np.float32)
     return result
+
+
+def _risk_value(values: np.ndarray) -> float:
+    array = np.asarray(values, dtype=np.float32).reshape(-1)
+    if array.size == 0:
+        return 0.0
+    return float(np.clip(0.6 * float(np.max(array)) + 0.4 * float(np.mean(array)), 0.0, 1.0))
+
+
+def _mean_array(values: np.ndarray) -> float:
+    array = np.asarray(values, dtype=np.float32).reshape(-1)
+    if array.size == 0:
+        return 0.0
+    return float(np.clip(float(np.mean(array)), 0.0, 1.0))
 
 
 def _scalar_float(example: dict[str, np.ndarray], field: str, default: float) -> float:

@@ -86,8 +86,14 @@ def train_future_bev_rollout_v1(
     loss_reduction_ratio = (start_loss - end_loss) / start_loss if start_loss > 0.0 else 0.0
     val_loss_reduction_ratio = (val_start_loss - val_end_loss) / val_start_loss if val_start_loss > 0.0 else 0.0
     failure_flags: list[str] = []
-    if max_steps > 0 and loss_reduction_ratio <= 0.0:
+    if not np.isfinite(end_loss) or not np.isfinite(val_end_loss):
+        failure_flags.append("non_finite_loss")
+    if max_steps > 0 and np.isfinite(loss_reduction_ratio) and loss_reduction_ratio <= 0.0:
         failure_flags.append("train_loss_not_reduced")
+    if float(final_val["action_entropy"]) <= 1.0e-6:
+        failure_flags.append("action_entropy_zero")
+    if float(final_val["dominant_action_fraction"]) >= 0.95:
+        failure_flags.append("action_distribution_collapsed")
     metrics: dict[str, Any] = {
         "schema_version": "homebrain.future_bev_rollout_v1_train_metrics.v1",
         "model": FUTURE_BEV_ROLLOUT_V1_SOURCE,
@@ -115,12 +121,33 @@ def train_future_bev_rollout_v1(
         "val_loss_reduction_ratio": float(val_loss_reduction_ratio),
         "future_free_iou_or_proxy": float(final_val["future_free_iou_or_proxy"]),
         "future_occupied_iou_or_proxy": float(final_val["future_occupied_iou_or_proxy"]),
+        "future_unknown_iou_or_proxy": float(final_val["future_unknown_iou_or_proxy"]),
+        "future_free_all_zero_iou_baseline": float(final_val["future_free_all_zero_iou_baseline"]),
+        "future_occupied_all_zero_iou_baseline": float(final_val["future_occupied_all_zero_iou_baseline"]),
+        "future_unknown_all_one_iou_baseline": float(final_val["future_unknown_all_one_iou_baseline"]),
         "newly_observed_precision": float(final_val["newly_observed_precision"]),
         "newly_observed_recall": float(final_val["newly_observed_recall"]),
         "unknown_reduction_prediction_quality": float(final_val["unknown_reduction_prediction_quality"]),
         "candidate_collision_auroc": final_val["candidate_collision_auroc"],
         "candidate_collision_accuracy": float(final_val["candidate_collision_accuracy"]),
+        "candidate_collision_positive_rate": float(final_val["candidate_collision_positive_rate"]),
+        "candidate_future_collision_positive_rate": float(final_val["candidate_future_collision_positive_rate"]),
+        "candidate_unsafe_now_positive_rate": float(final_val["candidate_unsafe_now_positive_rate"]),
+        "candidate_collision_mse": float(final_val["candidate_collision_mse"]),
+        "candidate_collision_always_zero_mse_baseline": float(final_val["candidate_collision_always_zero_mse_baseline"]),
+        "candidate_collision_always_negative_accuracy_baseline": float(
+            final_val["candidate_collision_always_negative_accuracy_baseline"]
+        ),
+        "candidate_unknown_exposure_mse": float(final_val["candidate_unknown_exposure_mse"]),
+        "candidate_unknown_exposure_always_one_mse_baseline": float(
+            final_val["candidate_unknown_exposure_always_one_mse_baseline"]
+        ),
         "candidate_new_area_gain_ranking_quality": float(final_val["candidate_new_area_gain_ranking_quality"]),
+        "candidate_oracle_match_fraction": float(final_val["candidate_oracle_match_fraction"]),
+        "candidate_oracle_selected_distribution": final_val["candidate_oracle_selected_distribution"],
+        "beats_collision_always_negative_baseline": bool(final_val["beats_collision_always_negative_baseline"]),
+        "beats_unknown_always_one_baseline": bool(final_val["beats_unknown_always_one_baseline"]),
+        "beats_future_all_unknown_baseline": bool(final_val["beats_future_all_unknown_baseline"]),
         "action_entropy": float(final_val["action_entropy"]),
         "dominant_action_fraction": float(final_val["dominant_action_fraction"]),
         "route_held_out_generalization": final_val["route_held_out_generalization"],
@@ -187,18 +214,34 @@ def compute_future_bev_rollout_losses(
 ) -> dict[str, torch.Tensor]:
     future_mask = batch["future_valid_mask"]
     future_labels = batch["future_bev"]
-    raw_bce = F.binary_cross_entropy_with_logits(outputs["future_bev_logits"], future_labels, reduction="none")
-    future_bev_loss = (raw_bce * future_mask).sum() / future_mask.sum().clamp_min(1.0)
+    future_bev_loss = _masked_balanced_bce_with_logits(
+        outputs["future_bev_logits"],
+        future_labels,
+        future_mask,
+        focal_gamma=0.75,
+    )
     unknown_target = future_labels[:, :, 2:3]
     uncertainty_bce = F.binary_cross_entropy_with_logits(outputs["uncertainty_logits"], unknown_target, reduction="none")
     uncertainty_loss = (uncertainty_bce * future_mask).sum() / future_mask.sum().clamp_min(1.0)
     candidate_mask = batch["candidate_valid_mask"]
-    collision_loss_raw = F.binary_cross_entropy_with_logits(
+    collision_loss = _masked_balanced_bce_with_logits(
         outputs["candidate_collision_logit"],
         batch["candidate_collision"],
-        reduction="none",
+        candidate_mask,
+        focal_gamma=1.5,
     )
-    collision_loss = (collision_loss_raw * candidate_mask).sum() / candidate_mask.sum().clamp_min(1.0)
+    future_collision_loss = _masked_balanced_bce_with_logits(
+        outputs["candidate_future_collision_logit"],
+        batch["candidate_future_collision"],
+        candidate_mask,
+        focal_gamma=1.5,
+    )
+    unsafe_now_loss = _masked_balanced_bce_with_logits(
+        outputs["candidate_unsafe_now_logit"],
+        batch["candidate_unsafe_now"],
+        candidate_mask,
+        focal_gamma=1.0,
+    )
     unknown_loss = _masked_mse(
         torch.sigmoid(outputs["candidate_unknown_exposure_logit"]),
         batch["candidate_unknown_exposure"],
@@ -214,13 +257,20 @@ def compute_future_bev_rollout_losses(
         batch["candidate_progress"],
         candidate_mask,
     )
-    candidate_loss = collision_loss + 0.5 * (unknown_loss + gain_loss + progress_loss)
+    candidate_loss = (
+        collision_loss
+        + 0.5 * future_collision_loss
+        + 0.5 * unsafe_now_loss
+        + 0.5 * (unknown_loss + gain_loss + progress_loss)
+    )
     total = future_bev_loss + 0.15 * uncertainty_loss + 0.75 * candidate_loss
     return {
         "loss": total,
         "future_bev_loss": future_bev_loss,
         "uncertainty_loss": uncertainty_loss,
         "candidate_collision_loss": collision_loss,
+        "candidate_future_collision_loss": future_collision_loss,
+        "candidate_unsafe_now_loss": unsafe_now_loss,
         "candidate_outcome_loss": candidate_loss,
     }
 
@@ -238,14 +288,32 @@ def evaluate_future_bev_rollout_v1(
     bev_losses: list[float] = []
     free_iou_parts = _IouParts()
     occupied_iou_parts = _IouParts()
+    unknown_iou_parts = _IouParts()
+    free_all_zero_parts = _IouParts()
+    occupied_all_zero_parts = _IouParts()
+    unknown_all_one_parts = _IouParts()
+    future_channel_positive_sum = torch.zeros((3,), dtype=torch.float64)
+    future_channel_total = 0.0
     newly_tp = newly_fp = newly_fn = 0.0
     unknown_reduction_mse: list[float] = []
     collision_scores: list[float] = []
     collision_labels: list[float] = []
     collision_correct = 0.0
     collision_total = 0.0
+    collision_mse_sum = 0.0
+    collision_zero_mse_sum = 0.0
+    future_collision_mse_sum = 0.0
+    unsafe_now_mse_sum = 0.0
+    unknown_exposure_mse_sum = 0.0
+    unknown_exposure_one_mse_sum = 0.0
+    valid_candidate_total = 0.0
+    future_collision_positive = 0.0
+    unsafe_now_positive = 0.0
     ranking_values: list[float] = []
+    oracle_matches = 0.0
+    oracle_total = 0.0
     selected_ids: list[str] = []
+    oracle_selected_ids: list[str] = []
     inference_examples = 0
     started = time.perf_counter()
 
@@ -260,6 +328,25 @@ def evaluate_future_bev_rollout_v1(
         mask = batch["future_valid_mask"] > 0.0
         _update_iou(free_iou_parts, probs[:, :, 0:1] > 0.5, batch["future_bev"][:, :, 0:1] > 0.5, mask)
         _update_iou(occupied_iou_parts, probs[:, :, 1:2] > 0.5, batch["future_bev"][:, :, 1:2] > 0.5, mask)
+        _update_iou(unknown_iou_parts, probs[:, :, 2:3] > 0.5, batch["future_bev"][:, :, 2:3] > 0.5, mask)
+        _update_iou(free_all_zero_parts, torch.zeros_like(probs[:, :, 0:1], dtype=torch.bool), batch["future_bev"][:, :, 0:1] > 0.5, mask)
+        _update_iou(
+            occupied_all_zero_parts,
+            torch.zeros_like(probs[:, :, 1:2], dtype=torch.bool),
+            batch["future_bev"][:, :, 1:2] > 0.5,
+            mask,
+        )
+        _update_iou(
+            unknown_all_one_parts,
+            torch.ones_like(probs[:, :, 2:3], dtype=torch.bool),
+            batch["future_bev"][:, :, 2:3] > 0.5,
+            mask,
+        )
+        channel_mask = mask.to(dtype=torch.float32).expand_as(batch["future_bev"])
+        future_channel_positive_sum += (batch["future_bev"].detach().cpu().double() * channel_mask.detach().cpu().double()).sum(
+            dim=(0, 1, 3, 4)
+        )
+        future_channel_total += float(channel_mask[:, :, 0:1].sum().detach().cpu())
 
         current_unknown = (batch["current_bev"][:, 2:3] > 0.5).unsqueeze(1)
         predicted_observed = ((probs[:, :, 0:1] > 0.5) | (probs[:, :, 1:2] > 0.5)) & mask & current_unknown
@@ -275,6 +362,8 @@ def evaluate_future_bev_rollout_v1(
 
         candidate_mask = batch["candidate_valid_mask"] > 0.0
         collision_prob = torch.sigmoid(outputs["candidate_collision_logit"])
+        future_collision_prob = torch.sigmoid(outputs["candidate_future_collision_logit"])
+        unsafe_now_prob = torch.sigmoid(outputs["candidate_unsafe_now_logit"])
         collision_pred = collision_prob >= 0.5
         collision_target = batch["candidate_collision"] >= 0.5
         if torch.count_nonzero(candidate_mask) > 0:
@@ -282,6 +371,28 @@ def evaluate_future_bev_rollout_v1(
             collision_total += float(torch.count_nonzero(candidate_mask).detach().cpu())
             collision_scores.extend(collision_prob[candidate_mask].detach().cpu().numpy().astype(float).tolist())
             collision_labels.extend(batch["candidate_collision"][candidate_mask].detach().cpu().numpy().astype(float).tolist())
+            valid_candidate_total += float(torch.count_nonzero(candidate_mask).detach().cpu())
+            collision_mse_sum += float((((collision_prob - batch["candidate_collision"]) ** 2)[candidate_mask]).sum().detach().cpu())
+            collision_zero_mse_sum += float(((batch["candidate_collision"] ** 2)[candidate_mask]).sum().detach().cpu())
+            future_collision_mse_sum += float(
+                (((future_collision_prob - batch["candidate_future_collision"]) ** 2)[candidate_mask]).sum().detach().cpu()
+            )
+            unsafe_now_mse_sum += float(
+                (((unsafe_now_prob - batch["candidate_unsafe_now"]) ** 2)[candidate_mask]).sum().detach().cpu()
+            )
+            future_collision_positive += float(
+                torch.count_nonzero((batch["candidate_future_collision"] >= 0.05) & candidate_mask).detach().cpu()
+            )
+            unsafe_now_positive += float(
+                torch.count_nonzero((batch["candidate_unsafe_now"] >= 0.05) & candidate_mask).detach().cpu()
+            )
+            unknown_pred = torch.sigmoid(outputs["candidate_unknown_exposure_logit"])
+            unknown_exposure_mse_sum += float(
+                (((unknown_pred - batch["candidate_unknown_exposure"]) ** 2)[candidate_mask]).sum().detach().cpu()
+            )
+            unknown_exposure_one_mse_sum += float(
+                (((1.0 - batch["candidate_unknown_exposure"]) ** 2)[candidate_mask]).sum().detach().cpu()
+            )
         ranking_values.extend(
             _pairwise_ranking_quality(
                 torch.sigmoid(outputs["candidate_new_area_gain_logit"]),
@@ -289,16 +400,24 @@ def evaluate_future_bev_rollout_v1(
                 batch["candidate_valid_mask"],
             )
         )
-        lower_score = (
-            8.0 * collision_prob
-            + 1.25 * torch.sigmoid(outputs["candidate_unknown_exposure_logit"])
-            - 1.6 * torch.sigmoid(outputs["candidate_new_area_gain_logit"])
-            - 0.8 * torch.sigmoid(outputs["candidate_progress_logit"])
-        )
+        lower_score = _candidate_lower_score(outputs, candidate_ids=candidate_ids)
         selected = torch.argmin(lower_score, dim=1).detach().cpu().numpy().astype(int).tolist()
+        oracle_cost = batch.get("candidate_oracle_cost")
+        if oracle_cost is not None:
+            masked_oracle = oracle_cost.clone()
+            masked_oracle = masked_oracle.masked_fill(~candidate_mask, float("inf"))
+            oracle_selected = torch.argmin(masked_oracle, dim=1).detach().cpu().numpy().astype(int).tolist()
+        else:
+            oracle_selected = []
         for index in selected:
             if 0 <= index < len(candidate_ids):
                 selected_ids.append(candidate_ids[index])
+        for batch_index, index in enumerate(oracle_selected):
+            if 0 <= index < len(candidate_ids) and bool(torch.any(candidate_mask[batch_index]).detach().cpu()):
+                oracle_selected_ids.append(candidate_ids[index])
+                oracle_total += 1.0
+                if batch_index < len(selected) and int(selected[batch_index]) == int(index):
+                    oracle_matches += 1.0
         inference_examples += int(batch["current_bev"].shape[0])
 
     elapsed = max(time.perf_counter() - started, 1.0e-9)
@@ -306,17 +425,56 @@ def evaluate_future_bev_rollout_v1(
     recall = newly_tp / max(newly_tp + newly_fn, 1.0)
     collision_auroc = _binary_auroc(collision_scores, collision_labels)
     selected_distribution = _distribution(selected_ids)
+    oracle_distribution = _distribution(oracle_selected_ids)
+    collision_positive_rate = sum(1 for value in collision_labels if float(value) >= 0.05) / max(len(collision_labels), 1)
+    collision_always_negative_accuracy = sum(1 for value in collision_labels if float(value) < 0.5) / max(
+        len(collision_labels),
+        1,
+    )
+    future_ratios = (future_channel_positive_sum / max(future_channel_total, 1.0)).numpy().astype(float).tolist()
+    collision_mse = collision_mse_sum / max(valid_candidate_total, 1.0)
+    collision_zero_mse = collision_zero_mse_sum / max(valid_candidate_total, 1.0)
+    unknown_exposure_mse = unknown_exposure_mse_sum / max(valid_candidate_total, 1.0)
+    unknown_exposure_one_mse = unknown_exposure_one_mse_sum / max(valid_candidate_total, 1.0)
     return {
         "loss": _mean(losses),
         "future_bev_loss": _mean(bev_losses),
         "future_free_iou_or_proxy": free_iou_parts.value(),
         "future_occupied_iou_or_proxy": occupied_iou_parts.value(),
+        "future_unknown_iou_or_proxy": unknown_iou_parts.value(),
+        "future_free_all_zero_iou_baseline": free_all_zero_parts.value(),
+        "future_occupied_all_zero_iou_baseline": occupied_all_zero_parts.value(),
+        "future_unknown_all_one_iou_baseline": unknown_all_one_parts.value(),
+        "future_free_target_ratio": float(future_ratios[0]) if len(future_ratios) > 0 else 0.0,
+        "future_occupied_target_ratio": float(future_ratios[1]) if len(future_ratios) > 1 else 0.0,
+        "future_unknown_target_ratio": float(future_ratios[2]) if len(future_ratios) > 2 else 0.0,
         "newly_observed_precision": float(precision),
         "newly_observed_recall": float(recall),
         "unknown_reduction_prediction_quality": float(1.0 / (1.0 + _mean(unknown_reduction_mse))),
         "candidate_collision_auroc": collision_auroc,
         "candidate_collision_accuracy": float(collision_correct / max(collision_total, 1.0)),
+        "candidate_collision_positive_rate": float(collision_positive_rate),
+        "candidate_future_collision_positive_rate": float(future_collision_positive / max(valid_candidate_total, 1.0)),
+        "candidate_unsafe_now_positive_rate": float(unsafe_now_positive / max(valid_candidate_total, 1.0)),
+        "candidate_collision_mse": float(collision_mse),
+        "candidate_collision_always_zero_mse_baseline": float(collision_zero_mse),
+        "candidate_collision_always_negative_accuracy_baseline": float(collision_always_negative_accuracy),
+        "candidate_future_collision_mse": float(future_collision_mse_sum / max(valid_candidate_total, 1.0)),
+        "candidate_unsafe_now_mse": float(unsafe_now_mse_sum / max(valid_candidate_total, 1.0)),
+        "candidate_unknown_exposure_mse": float(unknown_exposure_mse),
+        "candidate_unknown_exposure_always_one_mse_baseline": float(unknown_exposure_one_mse),
         "candidate_new_area_gain_ranking_quality": _mean(ranking_values),
+        "candidate_oracle_match_fraction": float(oracle_matches / max(oracle_total, 1.0)),
+        "candidate_oracle_selected_distribution": oracle_distribution,
+        "beats_collision_always_negative_baseline": bool(
+            collision_mse < collision_zero_mse or (collision_correct / max(collision_total, 1.0)) > collision_always_negative_accuracy
+        ),
+        "beats_unknown_always_one_baseline": bool(unknown_exposure_mse < unknown_exposure_one_mse),
+        "beats_future_all_unknown_baseline": bool(
+            free_iou_parts.value() > free_all_zero_parts.value()
+            or occupied_iou_parts.value() > occupied_all_zero_parts.value()
+            or unknown_iou_parts.value() > unknown_all_one_parts.value()
+        ),
         "action_entropy": _entropy(selected_distribution),
         "dominant_action_fraction": _dominant_fraction(selected_distribution),
         "selected_distribution": selected_distribution,
@@ -344,6 +502,52 @@ def _update_iou(parts: _IouParts, pred: torch.Tensor, target: torch.Tensor, mask
     target = target & mask
     parts.intersection += float(torch.count_nonzero(pred & target).detach().cpu())
     parts.union += float(torch.count_nonzero(pred | target).detach().cpu())
+
+
+def _masked_balanced_bce_with_logits(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    focal_gamma: float = 0.0,
+) -> torch.Tensor:
+    target = target.to(dtype=logits.dtype)
+    mask = mask.to(device=logits.device, dtype=logits.dtype)
+    while mask.ndim < logits.ndim:
+        mask = mask.unsqueeze(1)
+    mask = torch.broadcast_to(mask, logits.shape)
+    positive = ((target >= 0.05).to(logits.dtype) * mask).sum()
+    negative = ((target < 0.05).to(logits.dtype) * mask).sum()
+    total = (positive + negative).clamp_min(1.0)
+    positive_weight = (0.5 * total / positive.clamp_min(1.0)).clamp(max=20.0)
+    negative_weight = (0.5 * total / negative.clamp_min(1.0)).clamp(max=20.0)
+    weights = torch.where(target >= 0.05, positive_weight, negative_weight)
+    raw = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    if focal_gamma > 0.0:
+        prob = torch.sigmoid(logits)
+        pt = prob * target + (1.0 - prob) * (1.0 - target)
+        raw = raw * torch.pow(1.0 - pt.clamp(0.0, 1.0), focal_gamma)
+    return (raw * weights * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def _candidate_lower_score(
+    outputs: dict[str, torch.Tensor],
+    *,
+    candidate_ids: list[str] | None = None,
+) -> torch.Tensor:
+    score = (
+        8.0 * torch.sigmoid(outputs["candidate_collision_logit"])
+        + 2.0 * torch.sigmoid(outputs["candidate_unsafe_now_logit"])
+        + 1.25 * torch.sigmoid(outputs["candidate_unknown_exposure_logit"])
+        - 2.4 * torch.sigmoid(outputs["candidate_new_area_gain_logit"])
+        - 2.0 * torch.sigmoid(outputs["candidate_progress_logit"])
+    )
+    if candidate_ids:
+        stop_penalty_values = [0.8 if candidate_id == "stop" else 0.0 for candidate_id in candidate_ids]
+    else:
+        stop_penalty_values = [0.8] + [0.0 for _index in range(max(int(score.shape[1]) - 1, 0))]
+    stop_penalty = torch.tensor(stop_penalty_values, dtype=score.dtype, device=score.device)
+    return score + stop_penalty.view(1, -1)
 
 
 def _masked_mse(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

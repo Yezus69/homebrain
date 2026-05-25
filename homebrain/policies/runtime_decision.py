@@ -142,6 +142,14 @@ def decide_trajectory(
         scorer_mode = "future_rollout"
         future_rollout_arrays = {
             "future_rollout_candidate_collision": np.asarray(future_scores["candidate_collision"], dtype=np.float32),
+            "future_rollout_candidate_future_collision": np.asarray(
+                future_scores.get("candidate_future_collision", future_scores["candidate_collision"]),
+                dtype=np.float32,
+            ),
+            "future_rollout_candidate_unsafe_now": np.asarray(
+                future_scores.get("candidate_unsafe_now", np.zeros_like(future_scores["candidate_collision"])),
+                dtype=np.float32,
+            ),
             "future_rollout_candidate_unknown_exposure": np.asarray(
                 future_scores["candidate_unknown_exposure"],
                 dtype=np.float32,
@@ -323,6 +331,8 @@ def _future_rollout_candidate_score_records(
     selected_candidate_id: str,
 ) -> list[JsonDict]:
     collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
+    future_collision = np.asarray(future_scores.get("candidate_future_collision", collision), dtype=np.float32)
+    unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
     unknown = np.asarray(future_scores["candidate_unknown_exposure"], dtype=np.float32)
     gain = np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32)
     progress = np.asarray(future_scores["candidate_progress"], dtype=np.float32)
@@ -338,6 +348,8 @@ def _future_rollout_candidate_score_records(
                     "scorer": FUTURE_BEV_ROLLOUT_V1_SOURCE,
                     "candidate_id": candidate.id,
                     "future_collision_probability": round(float(collision[index]), 6),
+                    "future_collision_only_probability": round(float(future_collision[index]), 6),
+                    "unsafe_now_probability": round(float(unsafe_now[index]), 6),
                     "future_unknown_exposure": round(float(unknown[index]), 6),
                     "future_new_area_gain": round(float(gain[index]), 6),
                     "future_progress": round(float(progress[index]), 6),

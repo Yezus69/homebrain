@@ -48,7 +48,7 @@ control_safe=false
 raw_pwm_emitted=false
 ```
 
-## Latest Known Model/Policy Result
+## Latest Accepted Runtime Policy Result
 
 Goal 22A best checkpoint:
 
@@ -71,53 +71,63 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Future BEV Rollout v1: self-supervised future local spatial-state and
-candidate-outcome pretraining from SpatialTrainPack-style RGB-D/pose route data.
+Goal23A: real-route Future BEV Rollout v1 training, diagnosis, and repair.
 
-## Future BEV Rollout v1 Proof
+## Goal23A Result
 
-Objective attempted: add a real replay-only future BEV rollout block that warps
-future BEV labels into the current robot frame with route pose, derives
-candidate collision/unknown/new-area/progress labels, trains a small rollout
-model, evaluates future/candidate metrics, and can shadow-score runtime replay
-candidates without emitting commands.
+Objective attempted: make Future BEV Rollout v1 produce a meaningful route-held-out
+result on existing OpenLORIS public route packs without adding a new architecture
+or promoting unsafe policy behavior.
 
-Files changed: added `homebrain/train/future_bev_rollout_dataset.py`,
-`homebrain/train/build_future_bev_rollout_pack.py`,
+Files changed: hardened `homebrain/train/build_future_bev_rollout_pack.py`,
+`homebrain/train/future_bev_rollout_dataset.py`,
 `homebrain/brain/future_bev_rollout_v1.py`,
 `homebrain/train/train_future_bev_rollout_v1.py`,
-`homebrain/eval/eval_future_bev_rollout_v1.py`, and
-`tests/test_future_bev_rollout_v1.py`; updated `modeld`, `replayd`,
-runtime trajectory decisions, checkpoint constants, and this status file.
+`homebrain/eval/eval_future_bev_rollout_v1.py`,
+`homebrain/policies/runtime_decision.py`, checkpoint constants, and
+`tests/test_future_bev_rollout_v1.py`; updated this status file.
 
-Commands run: required docs were read; repo files and candidate/replay modules
-were inspected with `rg`/PowerShell; `python -m py_compile` on new/modified
-rollout, runtime, modeld, replayd, and test modules; `python -m pytest
-tests\test_future_bev_rollout_v1.py -q`; `python -m pytest
-tests\test_goal11a_trajectory_scorer_v0.py tests\test_goal12a_spatial_memory_v1.py -q`;
-full `python -m pytest -q`; `git diff --check`; `git status --short`.
+Commands run: required docs were read; built a pre-repair source-order pack;
+built repaired route-balanced all-route, cafe+office train, and held-out
+corridor packs using DINO features; trained cafe+office and all-route rollout
+checkpoints; evaluated cafe+office val, held-out corridor `--split all`, and
+all-route val; `python -m py_compile` on touched rollout/runtime modules;
+`python -m pytest tests\test_future_bev_rollout_v1.py -q`; related trajectory,
+memory, closed-loop, collapse, and runtime scorer tests; full `python -m pytest
+-q`.
 
-Pass/fail results: py_compile passed; focused Future BEV Rollout tests passed
-with `5 passed`; related replay/modeld scorer tests passed with `13 passed`;
-full pytest passed with `125 passed in 185.34s`; `git diff --check` passed.
+Pass/fail results: focused rollout tests passed with `7 passed`; related tests
+passed with `23 passed`; full pytest passed with `127 passed in 193.85s`.
 PowerShell tool output still appends a non-project `-Command` warning after
 commands.
 
-Artifacts created: no persistent real-data artifact was created. The new CLIs
-write deterministic `future_bev_rollout_pack` manifests/examples, checkpoints,
-and eval metrics when run on local SpatialTrainPack/public route data; tests use
-temporary tiny fixtures only.
+Artifacts created:
 
-What this enables next: train on available OpenLORIS/TUM-style public indoor
-routes to pretrain "what will happen if I take this candidate" before hardware,
-then fine-tune the same future/candidate heads on real robot logs later.
+```text
+runs/goal23a_future_bev_rollout_route_heldout/GOAL23A_REPORT.md
+runs/goal23a_future_bev_rollout_route_heldout/after_route_balanced_pack
+runs/goal23a_future_bev_rollout_route_heldout/train_cafe_office_seed23/checkpoint.pt
+runs/goal23a_future_bev_rollout_route_heldout/eval_heldout_corridor_all.json
+runs/goal23a_future_bev_rollout_route_heldout/train_all_routes_seed23/checkpoint.pt
+runs/goal23a_future_bev_rollout_route_heldout/eval_all_routes_val.json
+```
 
-Remaining risks: current proof is tiny-fixture smoke plus unit coverage, not a
-real public-route result yet; labels remain weak, replay-only, and pose/BEV
-quality-bound; candidate outcomes are not control safety evidence and runtime
-still reports `cmd_vel=None`, `replay_only=true`, `not_executed=true`,
-`control_safe=false`.
+Held-out corridor result: future free/occupied/unknown IoU/proxy
+`0.2708681769803862 / 0.37841249065071053 / 0.9333786353592012`, collision AUROC
+`0.7643962934968226`, action entropy `0.6904558764306521`, dominant action
+fraction `0.5366666666666666`, selected distribution
+`{"rotate_left": 161, "rotate_right": 139}`. It beats simple scalar/BEV
+baselines but does not beat Goal22A as a useful replay policy.
 
-Recommended next goal: build a real FutureBEVRolloutPack from local public route
-packs, train/evaluate route-held-out metrics, and compare shadow candidate
-diversity against the current learned trajectory scorer.
+Blunt outcome: do not integrate the Future BEV Rollout scorer as the default
+runtime scorer yet. Keep it as a trained checkpoint plus diagnosis. It repaired
+the data/label/eval path and produced nonzero route-held-out rollout metrics,
+but replay decisions are rotate-heavy and candidate oracle agreement is low.
+
+Remaining risks: labels remain weak, replay-only, and pose/BEV quality-bound;
+candidate outcomes are not control safety evidence; runtime still reports
+`cmd_vel=None`, `replay_only=true`, `not_executed=true`, `control_safe=false`.
+
+Recommended next goal: repair candidate score alignment within the existing
+rollout heads, using a stable ranking/objective that does not collapse before
+running replay comparison against Goal22A.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -91,6 +92,70 @@ def test_candidate_collision_and_new_area_labels_on_tiny_bev() -> None:
     assert labels["candidate_valid_mask"][straight_index] == 1.0
 
 
+def test_candidate_labels_separate_unsafe_now_and_make_rotate_meaningful() -> None:
+    candidates = generate_default_candidates(grid_shape=(12, 12), meters_per_cell=0.1, robot_radius_m=0.05)
+    straight_index = [candidate.id for candidate in candidates].index("straight_short")
+    stop_index = [candidate.id for candidate in candidates].index("stop")
+    rotate_index = [candidate.id for candidate in candidates].index("rotate_left")
+    straight = candidates[straight_index]
+    future_occupied = np.zeros((1, 12, 12), dtype=np.float32)
+    future_unknown = np.zeros((1, 12, 12), dtype=np.float32)
+    future_free = np.ones((1, 12, 12), dtype=np.float32)
+    newly_observed = np.zeros((1, 12, 12), dtype=np.float32)
+    current_occupied = np.zeros((12, 12), dtype=np.float32)
+    current_risky = np.zeros((12, 12), dtype=np.float32)
+    current_unknown = np.zeros((12, 12), dtype=np.float32)
+    current_free = np.ones((12, 12), dtype=np.float32)
+    for row, col in straight.footprint_cells:
+        if row < 10:
+            current_occupied[row, col] = 1.0
+    labels = candidate_outcome_labels(
+        candidates=candidates,
+        current_occupied=current_occupied,
+        current_risky=current_risky,
+        current_unknown=current_unknown,
+        current_free=current_free,
+        current_traversable=current_free,
+        future_occupied=future_occupied,
+        future_unknown=future_unknown,
+        newly_observed=newly_observed,
+        future_free=future_free,
+        horizon_valid=np.asarray([1.0], dtype=np.float32),
+    )
+    assert labels["candidate_future_collision"][straight_index] == 0.0
+    assert labels["candidate_unsafe_now"][straight_index] > 0.0
+    assert labels["candidate_collision"][straight_index] >= labels["candidate_unsafe_now"][straight_index]
+    assert labels["candidate_progress"][rotate_index] > labels["candidate_progress"][stop_index]
+
+
+def test_route_balanced_sampling_preserves_routes_splits_and_writes_qa(tmp_path: Path) -> None:
+    sources = [
+        _write_spatial_pack(tmp_path / "spatial_a", count=12, source_name="route_a", include_review=True),
+        _write_spatial_pack(tmp_path / "spatial_b", count=12, source_name="route_b", include_review=True),
+        _write_spatial_pack(tmp_path / "spatial_c", count=12, source_name="route_c", include_review=True),
+    ]
+    out = tmp_path / "future_pack"
+    build_future_bev_rollout_pack(
+        sources=sources,
+        out_dir=out,
+        horizons_s=(1.0,),
+        max_examples=18,
+        sampling_strategy="route_balanced",
+    )
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    included = {record["source_name"]: int(record["included_example_count"]) for record in manifest["sources"]}
+    assert set(included) == {"route_a", "route_b", "route_c"}
+    assert all(count > 0 for count in included.values())
+    examples = manifest["examples"]
+    assert {record["source_name"] for record in examples} == {"route_a", "route_b", "route_c"}
+    assert {"train", "val", "review"}.issubset({record["split"] for record in examples})
+    label_qa = json.loads((out / "label_qa.json").read_text(encoding="utf-8"))
+    assert "route_a::train" in label_qa["by_route_split"]
+    assert label_qa["by_route_split"]["route_a::train"]["future_horizon_valid_fraction"] >= 0.0
+    assert manifest["sampling_strategy"] == "route_balanced"
+    assert manifest["label_qa_path"] == "label_qa.json"
+
+
 def test_future_bev_rollout_train_eval_smoke(tmp_path: Path) -> None:
     spatial = _write_spatial_pack(tmp_path / "spatial", count=7)
     pack = tmp_path / "future_pack"
@@ -153,6 +218,8 @@ def _write_spatial_pack(
     count: int,
     missing_pose_frame_ids: set[int] | None = None,
     robot_frame_truth: bool = True,
+    source_name: str = "unit_route",
+    include_review: bool = False,
 ) -> Path:
     missing_pose_frame_ids = missing_pose_frame_ids or set()
     examples_dir = root / "examples"
@@ -162,7 +229,10 @@ def _write_spatial_pack(
     records = []
     association_frames = []
     for frame_id in range(count):
-        split = "train" if frame_id < max(2, count - 2) else "val"
+        if include_review and count >= 6:
+            split = "train" if frame_id < count - 4 else ("val" if frame_id < count - 2 else "review")
+        else:
+            split = "train" if frame_id < max(2, count - 2) else "val"
         arrays = _bev_arrays(frame_id)
         example_path = examples_dir / f"frame_{frame_id:06d}.npz"
         timestamp_ns = frame_id * 1_000_000_000
@@ -182,12 +252,12 @@ def _write_spatial_pack(
                 "control_safe": scalar_bool(False),
                 "not_robot_frame_truth": scalar_bool(not robot_frame_truth),
                 "split": scalar_str(split),
-                "split_unit_id": scalar_str("route_a"),
+                "split_unit_id": scalar_str(source_name),
                 "pose_delta_mask": scalar_float(1.0),
                 "action_label_mask": scalar_float(0.0),
                 "imu_label_mask": scalar_float(0.0),
                 "wheel_label_mask": scalar_float(0.0),
-                "source_name": scalar_str("unit_route"),
+                "source_name": scalar_str(source_name),
                 "source_family": scalar_str("public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose"),
                 "supervision_grade": scalar_str("public_robot_frame_geometry" if robot_frame_truth else "public_rgbd_anchor"),
                 "dataset_frame_type": scalar_str("public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose_geometry"),
@@ -201,8 +271,8 @@ def _write_spatial_pack(
                 "frame_id": frame_id,
                 "timestamp_ns": timestamp_ns,
                 "split": split,
-                "split_unit_id": "route_a",
-                "source_name": "unit_route",
+                "split_unit_id": source_name,
+                "source_name": source_name,
                 "source_family": "public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose",
                 "supervision_grade": "public_robot_frame_geometry" if robot_frame_truth else "public_rgbd_anchor",
                 "dataset_frame_type": "public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose_geometry",
@@ -226,7 +296,7 @@ def _write_spatial_pack(
             "schema_version": "homebrain.spatial_train_pack.v0",
             "package_type": "SpatialTrainPack",
             "source_log": route_dir.as_posix(),
-            "source_name": "unit_route",
+            "source_name": source_name,
             "source_family": "public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose",
             "dataset_frame_type": "public_robot_mounted" if robot_frame_truth else "public_rgbd_camera_pose_geometry",
             "robot_supervision_grade": "public_robot_frame_geometry" if robot_frame_truth else "public_rgbd_anchor",

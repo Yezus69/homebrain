@@ -19,6 +19,8 @@ FUTURE_BEV_ROLLOUT_V1_SOURCE = "future_bev_rollout_v1"
 FUTURE_BEV_ROLLOUT_V1_CONFIG_SCHEMA_VERSION = "homebrain.future_bev_rollout_v1.config.v1"
 CANDIDATE_OUTCOME_CHANNELS: tuple[str, ...] = (
     "collision",
+    "future_collision",
+    "unsafe_now",
     "unknown_exposure",
     "new_area_gain",
     "progress",
@@ -190,12 +192,16 @@ class FutureBEVRolloutV1(nn.Module):
             "uncertainty_grid": torch.sigmoid(uncertainty),
             "candidate_outcome_logits": candidate_raw,
             "candidate_collision_logit": candidate_raw[..., 0],
-            "candidate_unknown_exposure_logit": candidate_raw[..., 1],
-            "candidate_new_area_gain_logit": candidate_raw[..., 2],
-            "candidate_progress_logit": candidate_raw[..., 3],
-            "candidate_unknown_exposure": torch.sigmoid(candidate_raw[..., 1]),
-            "candidate_new_area_gain": torch.sigmoid(candidate_raw[..., 2]),
-            "candidate_progress": torch.sigmoid(candidate_raw[..., 3]),
+            "candidate_future_collision_logit": candidate_raw[..., 1],
+            "candidate_unsafe_now_logit": candidate_raw[..., 2],
+            "candidate_unknown_exposure_logit": candidate_raw[..., 3],
+            "candidate_new_area_gain_logit": candidate_raw[..., 4],
+            "candidate_progress_logit": candidate_raw[..., 5],
+            "candidate_future_collision": torch.sigmoid(candidate_raw[..., 1]),
+            "candidate_unsafe_now": torch.sigmoid(candidate_raw[..., 2]),
+            "candidate_unknown_exposure": torch.sigmoid(candidate_raw[..., 3]),
+            "candidate_new_area_gain": torch.sigmoid(candidate_raw[..., 4]),
+            "candidate_progress": torch.sigmoid(candidate_raw[..., 5]),
         }
 
     def _candidate_pool(self, latent: torch.Tensor) -> torch.Tensor:
@@ -260,18 +266,28 @@ def score_local_bev_with_future_rollout(
     with torch.no_grad():
         outputs = model(current, features, feature_mask, sensor)
     collision = torch.sigmoid(outputs["candidate_collision_logit"])[0].detach().cpu().numpy().astype(np.float32)
+    future_collision = outputs["candidate_future_collision"][0].detach().cpu().numpy().astype(np.float32)
+    unsafe_now = outputs["candidate_unsafe_now"][0].detach().cpu().numpy().astype(np.float32)
     unknown = outputs["candidate_unknown_exposure"][0].detach().cpu().numpy().astype(np.float32)
     gain = outputs["candidate_new_area_gain"][0].detach().cpu().numpy().astype(np.float32)
     progress = outputs["candidate_progress"][0].detach().cpu().numpy().astype(np.float32)
-    lower_score = (8.0 * collision + 1.25 * unknown - 1.6 * gain - 0.8 * progress).astype(np.float32)
+    stop_penalty = np.asarray([0.8 if candidate_id == "stop" else 0.0 for candidate_id in model.candidate_ids], dtype=np.float32)
+    lower_score = (
+        8.0 * collision + 2.0 * unsafe_now + 1.25 * unknown - 2.4 * gain - 2.0 * progress + stop_penalty
+    ).astype(np.float32)
     return {
         "candidate_ids": list(model.candidate_ids),
         "candidate_collision": collision,
+        "candidate_future_collision": future_collision,
+        "candidate_unsafe_now": unsafe_now,
         "candidate_unknown_exposure": unknown,
         "candidate_new_area_gain": gain,
         "candidate_progress": progress,
         "candidate_lower_is_better_score": lower_score,
-        "scoring_formula": "8*collision + 1.25*unknown - 1.6*new_area_gain - 0.8*progress",
+        "scoring_formula": (
+            "8*combined_collision + 2*unsafe_now + 1.25*unknown "
+            "- 2.4*new_area_gain - 2*progress + 0.8*stop"
+        ),
     }
 
 

@@ -32,7 +32,8 @@ def eval_future_bev_rollout_v1(
     resolved_pack = rollout_pack or metadata.get("rollout_pack")
     if not isinstance(resolved_pack, (str, Path)):
         raise ValueError("supply --rollout-pack or train with rollout_pack metadata")
-    dataset = FutureBEVRolloutDataset(resolved_pack, split=split)
+    resolved_split = None if split in {None, "all", "*"} else split
+    dataset = FutureBEVRolloutDataset(resolved_pack, split=resolved_split)
     loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=False)
     eval_metrics = evaluate_future_bev_rollout_v1(model, loader, device=device, dataset=dataset)
     train_metrics = payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {}
@@ -40,7 +41,7 @@ def eval_future_bev_rollout_v1(
         "schema_version": "homebrain.future_bev_rollout_v1_eval_metrics.v1",
         "checkpoint": Path(checkpoint).as_posix(),
         "rollout_pack": Path(resolved_pack).as_posix(),
-        "split": split,
+        "split": resolved_split,
         "batch_size": int(batch_size),
         "device": str(device),
         "eval_command": command,
