@@ -26,6 +26,8 @@ def train_trajectory_scorer_v1(
     bev_source: str = "oracle",
     modeld_dir: str | Path | None = None,
     class_balanced_loss: bool = True,
+    candidate_feature_mode: str = "all",
+    mirror_left_right: bool = False,
 ) -> dict:
     manifest = read_json(Path(action_pack) / "manifest.json")
     if manifest.get("schema_version") != "homebrain.action_label_pack.v5":
@@ -44,6 +46,8 @@ def train_trajectory_scorer_v1(
         bev_source=bev_source,
         modeld_dir=modeld_dir,
         class_balanced_loss=class_balanced_loss,
+        candidate_feature_mode=candidate_feature_mode,
+        mirror_left_right=mirror_left_right,
     )
     metrics = dict(metrics)
     metrics.update(
@@ -55,6 +59,8 @@ def train_trajectory_scorer_v1(
             "action_pack_version": 5,
             "not_synthetic_expert": True,
             "class_balanced_loss": bool(class_balanced_loss),
+            "candidate_feature_mode": str(candidate_feature_mode),
+            "mirror_left_right": bool(mirror_left_right),
         }
     )
     write_json(Path(out_dir) / "train_metrics.json", metrics, pretty=True)
@@ -73,9 +79,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=14)
-    parser.add_argument("--bev-source", choices=("oracle", "model"), default="oracle")
+    parser.add_argument(
+        "--bev-source",
+        choices=("oracle", "model", "v1_current_bev", "v1_memory_bev", "model_current", "model_memory"),
+        default="oracle",
+    )
     parser.add_argument("--modeld", default=None)
     parser.add_argument("--no-class-balanced-loss", action="store_true")
+    parser.add_argument(
+        "--candidate-feature-mode",
+        choices=("all", "all_features", "signed_ablation", "signed_feature_ablation"),
+        default="all",
+    )
+    parser.add_argument("--mirror-left-right", action="store_true")
     args = parser.parse_args(argv)
     metrics = train_trajectory_scorer_v1(
         action_pack=args.action_pack,
@@ -91,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         bev_source=args.bev_source,
         modeld_dir=args.modeld,
         class_balanced_loss=not args.no_class_balanced_loss,
+        candidate_feature_mode=args.candidate_feature_mode,
+        mirror_left_right=args.mirror_left_right,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0

@@ -102,6 +102,8 @@ def decide_trajectory(
             candidates=candidates,
             coverage_memory=coverage_memory,
             device=learned_scorer.device,
+            candidate_feature_mode=str(learned_scorer.metadata.get("candidate_feature_mode", "all")),
+            logit_bias_by_candidate_id=learned_scorer.metadata,
         )
         candidate_records = candidate_score_records(
             candidates=candidates,

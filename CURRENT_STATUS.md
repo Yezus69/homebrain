@@ -6,19 +6,18 @@ default read-list.
 
 ## Current objective
 
-Goal 21A completed the closed-loop policy-collapse diagnosis. The learned scorer
-collapsed to `arc_right_medium` on cafe, office, and corridor in both current and
-memory BEV modes, while the transparent scorer did not collapse. The next repair
-should retrain or recalibrate the trajectory scorer on runtime model-BEV inputs
-with a focused left/right feature ablation and explicit checks that memory deltas
-can alter candidate ranking. No hardware execution, `cmd_vel`, raw PWM, new
-training, MoGe SpatialTrainPack generation, or product/control-safety claim was
-added.
+Goal 22A repaired the closed-loop learned trajectory scorer enough to break the
+Goal 21A runtime model-BEV single-action collapse in replay evaluation. The best
+checkpoint is
+`runs/goal22a_overnight_runtime_scorer_repair/train/model_current_all_features_seed21_pair_constrained_search2/checkpoint.pt`.
+It is still a narrow two-action scorer (`straight_medium` and `arc_right_small`),
+so the next repair should widen runtime-BEV action supervision/calibration
+without regressing the per-route collapse gates. No hardware execution, `cmd_vel`,
+raw PWM, or product/control-safety claim was added.
 
 ## Last completed goal
 
-Goal 21A: closed-loop policy collapse audit for the Goal 20A runtime decision
-path across cafe, office, and corridor replay routes.
+Goal 22A: runtime-BEV trajectory scorer repair and closed-loop replay audit.
 
 ## Current implementation status
 
@@ -48,6 +47,16 @@ path across cafe, office, and corridor replay routes.
   and the likely repair target is runtime model-BEV scorer training/calibration
   with a left/right feature-bias ablation. Current safety flags remain
   `replay_only=true`, `not_executed=true`, and `control_safe=false`.
+- Goal 22A added explicit v1 runtime-BEV scorer data support for
+  `v1_current_bev` and `v1_memory_bev`, signed-feature ablation,
+  left/right mirror augmentation, and fixed logit-bias calibration metadata that
+  runtime replay honors. The best runtime-BEV checkpoint passed cafe/office/
+  corridor closed-loop collapse gates in both current and memory policy modes:
+  `0/6` learned logs collapsed, max dominant fraction `0.73053152039555`, mean
+  entropy `0.9406909534104936`, weighted v5 agreement
+  `0.25760193503800966` versus Goal 21A old `0.050103662750518314`, aggregate
+  left/right absolute margin mean `0.47974001661992316` versus old
+  `0.7257370331359717`, and `cmd_vel_non_null_count=0`.
 - SpatialMemoryNet v1 has explicit persistent BEV memory, route-pose/odom warp
   defaults, conservative update masks, hard validation, and true route-out folds.
   Goal 12C showed useful memory in spatial eval, but not control-safe behavior.
@@ -149,6 +158,77 @@ path across cafe, office, and corridor replay routes.
   are separated below them for history.
 
 ## Goal completion log
+
+### 036 - Goal 22A Overnight runtime-BEV trajectory scorer repair
+
+Objective attempted: repair and evaluate the learned trajectory scorer on the
+same runtime SpatialMemoryNet/model-BEV inputs used by closed-loop replay, after
+Goal 21A showed the old Goal14 oracle-trained checkpoint collapsed to
+`arc_right_medium` on cafe/office/corridor.
+
+Files changed: updated `homebrain/policies/trajectory_scorer_net_v0.py`,
+`homebrain/policies/train_trajectory_scorer_v1.py`,
+`homebrain/policies/eval_trajectory_scorer_v1.py`, and
+`homebrain/policies/runtime_decision.py`; added
+`homebrain/policies/calibrate_trajectory_scorer_bias.py`; added
+`tests/test_goal22a_runtime_scorer_data.py`; updated `CURRENT_STATUS.md`.
+
+Commands run: required context reads; source inspection of scorer train/eval,
+runtime decision, replay, modeld, and collapse audit paths; py_compile for
+modified modules; `python -m pytest tests\test_goal22a_runtime_scorer_data.py -q`;
+`python -m pytest tests\test_goal11a_trajectory_scorer_v0.py
+tests\test_goal20a_closed_loop_replay.py
+tests\test_goal21a_closed_loop_policy_collapse.py -q`; full
+`python -m pytest -q`; `git diff --check`; SpatialMemoryNet v1 modeld generation
+for OpenLORIS cafe/office/corridor; old Goal14 model-BEV baseline evals; six
+runtime-BEV scorer trainings; validation evals; logit-bias calibrations; and
+closed-loop replay plus Goal21A-style collapse audit for every trained variant
+and selected calibration candidate.
+
+Pass/fail results: focused Goal22A tests passed with `4 passed`; neighboring
+scorer/replay/collapse tests passed with `8 passed`; full pytest passed with
+`119 passed`; `git diff --check` found no whitespace errors. The best checkpoint
+passed the Goal22A replay acceptance gates. Uncalibrated current-BEV,
+signed-ablation, and mirrored variants still failed collapse gates; memory-BEV
+variants avoided single-candidate collapse but exceeded the `0.75` route
+dominance gate on at least one route/mode.
+
+Artifacts created: `runs/goal22a_overnight_runtime_scorer_repair/modeld/`,
+`runs/goal22a_overnight_runtime_scorer_repair/train/`,
+`runs/goal22a_overnight_runtime_scorer_repair/eval/`,
+`runs/goal22a_overnight_runtime_scorer_repair/replays/`,
+`runs/goal22a_overnight_runtime_scorer_repair/audits/`,
+`runs/goal22a_overnight_runtime_scorer_repair/report.md`,
+`runs/goal22a_overnight_runtime_scorer_repair/report.json`,
+`runs/goal22a_overnight_runtime_scorer_repair/commands.log`, and
+`runs/goal22a_overnight_runtime_scorer_repair/MORNING_REPORT.md`.
+
+Metrics observed: old Goal14 checkpoint on runtime model-BEV val selected
+`arc_right_medium=579`, entropy `0.0`, dominant fraction `1.0`, and v5 agreement
+`0.05008635578583765`. Best Goal22A checkpoint
+`runs/goal22a_overnight_runtime_scorer_repair/train/model_current_all_features_seed21_pair_constrained_search2/checkpoint.pt`
+reported val agreement `0.3454231433506045`, val entropy
+`0.825335738573542`, val dominant fraction `0.7409326424870466`, and selected
+distribution `straight_medium=429`, `arc_right_small=150`. Closed-loop audit
+reported `0/6` learned logs collapsed, max dominant fraction
+`0.73053152039555`, mean entropy `0.9406909534104936`, weighted v5 agreement
+`0.25760193503800966`, current-vs-memory selected difference mean
+`0.14535537700865267`, aggregate left/right absolute margin mean
+`0.47974001661992316` versus Goal21A old `0.7257370331359717`, and
+`cmd_vel_non_null_count=0`.
+
+Blockers/risks: the repaired scorer is non-collapsed but still narrow: closed-loop
+selection uses only `straight_medium` and `arc_right_small`. The pair-constrained
+calibration reduced aggregate left/right signed-margin magnitude, but the
+small-arc and rotate pairs still have directional bias and need a follow-up
+repair. All artifacts remain replay/eval only, not executed, not control-safe,
+and not product-training approved.
+
+Recommended next goal: build a route-aware/runtime-BEV action-diversity repair:
+rebalance or enrich v5 labels on runtime current/memory BEVs, add a calibration
+gate that penalizes two-action policies per route, and rerun the Goal22A
+closed-loop audit until left/right, stop, straight-short, and arc choices recover
+without exceeding the `0.75` dominant-action gate.
 
 ### 035 - Goal 21A closed-loop policy collapse diagnosis
 

@@ -61,6 +61,31 @@ CANDIDATE_FEATURE_NAMES: tuple[str, ...] = (
     "terminal_yaw_norm",
 )
 
+SIGNED_CANDIDATE_FEATURE_NAMES: tuple[str, ...] = (
+    "angular_velocity_norm",
+    "terminal_left_norm",
+    "terminal_yaw_norm",
+)
+
+MODEL_BEV_SOURCES: tuple[str, ...] = ("model", "v1_current_bev", "v1_memory_bev")
+BEV_SOURCE_ALIASES: dict[str, str] = {
+    "model_current": "v1_current_bev",
+    "model_memory": "v1_memory_bev",
+}
+CANDIDATE_FEATURE_MODES: tuple[str, ...] = ("all", "signed_ablation")
+CANDIDATE_FEATURE_MODE_ALIASES: dict[str, str] = {
+    "all_features": "all",
+    "signed_feature_ablation": "signed_ablation",
+}
+LEFT_RIGHT_CANDIDATE_MIRROR: dict[str, str] = {
+    "arc_left_small": "arc_right_small",
+    "arc_right_small": "arc_left_small",
+    "arc_left_medium": "arc_right_medium",
+    "arc_right_medium": "arc_left_medium",
+    "rotate_left": "rotate_right",
+    "rotate_right": "rotate_left",
+}
+
 GEOMETRY_ONLY_SOURCE_FAMILIES: frozenset[str] = frozenset(
     {
         "phone_or_teacher_estimated_geometry",
@@ -170,14 +195,18 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
         val_modulus: int = 5,
         max_examples: int | None = None,
         allow_geometry_only: bool = False,
+        candidate_feature_mode: str = "all",
+        mirror_left_right: bool = False,
     ) -> None:
         if split not in {None, "train", "val"}:
             raise ValueError("split must be 'train', 'val', or None")
-        if bev_source not in {"oracle", "model"}:
-            raise ValueError("bev_source must be 'oracle' or 'model'")
+        bev_source = _normalize_bev_source(bev_source)
+        if bev_source not in {"oracle", *MODEL_BEV_SOURCES}:
+            raise ValueError("bev_source must be 'oracle', 'model', 'v1_current_bev', or 'v1_memory_bev'")
+        candidate_feature_mode = _normalize_candidate_feature_mode(candidate_feature_mode)
         if val_modulus < 2:
             raise ValueError("val_modulus must be at least 2")
-        if bev_source == "model" and modeld_dir is None:
+        if bev_source in MODEL_BEV_SOURCES and modeld_dir is None:
             raise ValueError("modeld_dir is required for model-BEV action scorer data")
 
         self.root = Path(action_pack)
@@ -187,6 +216,8 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
         if self.manifest.get("control_safe") is not False:
             raise ValueError("ActionLabelPack must remain control_safe=false")
         self.bev_source = bev_source
+        self.candidate_feature_mode = candidate_feature_mode
+        self.mirror_left_right = bool(mirror_left_right)
         self.split = split
         self.val_modulus = val_modulus
         self.source_roots = _resolve_source_roots(self.root, self.manifest)
@@ -208,7 +239,7 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
         examples = self.manifest.get("examples")
         if not isinstance(examples, list):
             raise ValueError("ActionLabelPack manifest examples must be a list")
-        model_bev_map = _load_model_bev_map(modeld_dir) if bev_source == "model" else {}
+        model_bev_map = _load_model_bev_map(modeld_dir, bev_source=bev_source) if bev_source in MODEL_BEV_SOURCES else {}
         filtered_records = _filter_records(
             examples,
             split=split,
@@ -230,6 +261,8 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
         self.selected_distribution = _distribution(self.candidate_ids[sample.selected_index] for sample in self.samples)
         self.feature_alignment = {
             "bev_source": bev_source,
+            "candidate_feature_mode": candidate_feature_mode,
+            "mirror_left_right": bool(mirror_left_right),
             "example_count": len(self.samples),
             "model_bev_frame_count": len(model_bev_map),
             "missing_model_bev_count": 0,
@@ -261,12 +294,14 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
     ) -> list[ActionScorerSample]:
         samples: list[ActionScorerSample] = []
         coverage_by_key: dict[tuple[str, str, str], np.ndarray] = {}
+        mirrored_coverage_by_key: dict[tuple[str, str, str], np.ndarray] = {}
+        mirror_indices = _candidate_mirror_indices(self.candidate_ids)
         for _global_index, record in records:
             action_example_path = self.root / str(record["example_path"])
             action_example = load_example_npz(action_example_path)
             _validate_action_example_flags(action_example, action_example_path)
             source_example_path = self._source_example_path(str(record["source_ref"]))
-            if self.bev_source == "model":
+            if self.bev_source in MODEL_BEV_SOURCES:
                 key = (str(record["sequence_id"]), int(record["frame_id"]))
                 bev = model_bev_map.get(key)
                 if bev is None:
@@ -288,7 +323,6 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
                 candidates=self.candidates,
                 coverage_mask=covered,
             )
-            _update_coverage_mask(covered, bev)
             total_scores = np.asarray(action_example["total_expert_score"], dtype=np.float32)
             selected_by_expert = np.asarray(action_example["selected_by_expert"], dtype=np.bool_)
             if total_scores.shape != (len(self.candidates),):
@@ -297,20 +331,48 @@ class ActionLabelScorerDataset(Dataset[dict[str, Any]]):
                 raise ValueError(f"selected_by_expert must select exactly one candidate: {action_example_path}")
             selected_index = int(np.flatnonzero(selected_by_expert)[0])
             samples.append(
-                ActionScorerSample(
+                _make_action_scorer_sample(
                     record=record,
                     source_example_path=source_example_path,
                     action_example_path=action_example_path,
                     bev=bev,
-                    bev_tensor=bev_tensor(bev),
                     candidate_features=candidate_features,
-                    candidate_mask=np.ones((len(self.candidates),), dtype=np.float32),
-                    total_expert_score=total_scores,
-                    target_logits=_target_logits_from_expert_scores(total_scores),
+                    total_scores=total_scores,
                     selected_index=selected_index,
                     source_weight=_record_source_weight(record),
+                    candidate_feature_mode=self.candidate_feature_mode,
                 )
             )
+            if self.mirror_left_right:
+                mirrored_bev = _mirror_local_bev(bev)
+                mirrored_covered = mirrored_coverage_by_key.setdefault(
+                    coverage_key,
+                    np.zeros(mirrored_bev.shape, dtype=np.bool_),
+                )
+                mirrored_features = candidate_feature_matrix(
+                    bev=mirrored_bev,
+                    candidates=self.candidates,
+                    coverage_mask=mirrored_covered,
+                )
+                mirrored_scores = _mirror_candidate_vector(total_scores, mirror_indices)
+                mirrored_selected_index = int(mirror_indices[selected_index])
+                mirrored_record = dict(record)
+                mirrored_record["augmentation"] = "left_right_mirror"
+                samples.append(
+                    _make_action_scorer_sample(
+                        record=mirrored_record,
+                        source_example_path=source_example_path,
+                        action_example_path=action_example_path,
+                        bev=mirrored_bev,
+                        candidate_features=mirrored_features,
+                        total_scores=mirrored_scores,
+                        selected_index=mirrored_selected_index,
+                        source_weight=_record_source_weight(record),
+                        candidate_feature_mode=self.candidate_feature_mode,
+                    )
+                )
+                _update_coverage_mask(mirrored_covered, mirrored_bev)
+            _update_coverage_mask(covered, bev)
         return samples
 
     def _source_example_path(self, source_ref: str) -> Path:
@@ -416,6 +478,18 @@ def candidate_feature_matrix(
     return np.asarray(values, dtype=np.float32)
 
 
+def apply_candidate_feature_mode(features: np.ndarray, mode: str) -> np.ndarray:
+    mode = _normalize_candidate_feature_mode(mode)
+    transformed = np.asarray(features, dtype=np.float32).copy()
+    if mode == "all":
+        return transformed
+    if mode == "signed_ablation":
+        for name in SIGNED_CANDIDATE_FEATURE_NAMES:
+            transformed[..., CANDIDATE_FEATURE_NAMES.index(name)] = 0.0
+        return transformed
+    raise ValueError(f"unsupported candidate_feature_mode: {mode}")
+
+
 def train_trajectory_scorer_v0(
     *,
     action_pack: str | Path,
@@ -431,8 +505,12 @@ def train_trajectory_scorer_v0(
     bev_source: str = "oracle",
     modeld_dir: str | Path | None = None,
     class_balanced_loss: bool = False,
+    candidate_feature_mode: str = "all",
+    mirror_left_right: bool = False,
 ) -> JsonDict:
     torch.manual_seed(seed)
+    bev_source = _normalize_bev_source(bev_source)
+    candidate_feature_mode = _normalize_candidate_feature_mode(candidate_feature_mode)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     train_dataset = ActionLabelScorerDataset(
         action_pack,
@@ -442,6 +520,8 @@ def train_trajectory_scorer_v0(
         max_examples=max_examples,
         bev_source=bev_source,
         modeld_dir=modeld_dir,
+        candidate_feature_mode=candidate_feature_mode,
+        mirror_left_right=mirror_left_right,
     )
     val_dataset = ActionLabelScorerDataset(
         action_pack,
@@ -451,6 +531,8 @@ def train_trajectory_scorer_v0(
         max_examples=max_examples,
         bev_source=bev_source,
         modeld_dir=modeld_dir,
+        candidate_feature_mode=candidate_feature_mode,
+        mirror_left_right=mirror_left_right,
     )
     config = TrajectoryScorerNetConfig(
         bev_channels=int(train_dataset.samples[0].bev_tensor.shape[0]),
@@ -500,6 +582,8 @@ def train_trajectory_scorer_v0(
         "bev_source": bev_source,
         "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
         "class_balanced_loss": bool(class_balanced_loss),
+        "candidate_feature_mode": candidate_feature_mode,
+        "mirror_left_right": bool(mirror_left_right),
         "example_count": len(train_dataset),
         "val_example_count": len(val_dataset),
         "source_filters": {
@@ -547,6 +631,8 @@ def train_trajectory_scorer_v0(
             "bev_source": bev_source,
             "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
             "class_balanced_loss": bool(class_balanced_loss),
+            "candidate_feature_mode": candidate_feature_mode,
+            "mirror_left_right": bool(mirror_left_right),
             "replay_only": True,
             "not_executed": True,
             "control_safe": False,
@@ -574,6 +660,8 @@ def train_trajectory_scorer_v0(
             "bev_source": bev_source,
             "modeld_dir": Path(modeld_dir).as_posix() if modeld_dir is not None else None,
             "class_balanced_loss": bool(class_balanced_loss),
+            "candidate_feature_mode": candidate_feature_mode,
+            "mirror_left_right": bool(mirror_left_right),
         },
         metrics=metrics,
     )
@@ -594,10 +682,16 @@ def eval_trajectory_scorer_v0(
     max_examples: int | None = None,
     viz_dir: str | Path | None = None,
     max_viz_frames: int = 24,
+    candidate_feature_mode: str | None = None,
 ) -> JsonDict:
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_trajectory_scorer_checkpoint(checkpoint, map_location=device)
     model.to(device)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    bev_source = _normalize_bev_source(bev_source)
+    resolved_feature_mode = _normalize_candidate_feature_mode(
+        candidate_feature_mode or str(metadata.get("candidate_feature_mode", "all"))
+    )
     dataset = ActionLabelScorerDataset(
         action_pack,
         split=split,
@@ -606,8 +700,10 @@ def eval_trajectory_scorer_v0(
         bev_source=bev_source,
         modeld_dir=modeld_dir,
         max_examples=max_examples,
+        candidate_feature_mode=resolved_feature_mode,
     )
-    predictions, inference_fps = _predict_dataset(model, dataset, device=device)
+    logit_bias = _logit_bias_vector(dataset.candidate_ids, metadata)
+    predictions, inference_fps = _predict_dataset(model, dataset, device=device, logit_bias=logit_bias)
     metrics = _prediction_metrics(
         predictions=predictions,
         dataset=dataset,
@@ -618,6 +714,7 @@ def eval_trajectory_scorer_v0(
         modeld_dir=Path(modeld_dir) if modeld_dir is not None else None,
         inference_fps=inference_fps,
         train_metrics=payload.get("metrics") if isinstance(payload.get("metrics"), dict) else {},
+        logit_bias_applied=logit_bias is not None,
     )
     output_path = Path(out_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -714,9 +811,12 @@ def score_local_bev_with_model(
     candidates: list[CandidateTrajectory],
     coverage_memory: CoverageMemory | None,
     device: torch.device,
+    candidate_feature_mode: str = "all",
+    logit_bias_by_candidate_id: JsonDict | None = None,
 ) -> tuple[np.ndarray, str, np.ndarray]:
     coverage_mask = coverage_memory.covered if coverage_memory is not None else None
     features = candidate_feature_matrix(bev=bev, candidates=candidates, coverage_mask=coverage_mask)
+    features = apply_candidate_feature_mode(features, candidate_feature_mode)
     model.eval()
     with torch.no_grad():
         logits = model(
@@ -725,6 +825,9 @@ def score_local_bev_with_model(
             torch.ones((1, len(candidates)), dtype=torch.float32, device=device),
         )[0]
     logits_np = logits.detach().cpu().numpy().astype(np.float32)
+    bias = _logit_bias_vector([candidate.id for candidate in candidates], logit_bias_by_candidate_id)
+    if bias is not None:
+        logits_np = (logits_np + bias).astype(np.float32)
     selected_index = int(np.argmax(logits_np))
     return logits_np, candidates[selected_index].id, features
 
@@ -843,6 +946,7 @@ def _predict_dataset(
     dataset: ActionLabelScorerDataset,
     *,
     device: torch.device,
+    logit_bias: np.ndarray | None = None,
 ) -> tuple[list[JsonDict], float]:
     model.eval()
     predictions: list[JsonDict] = []
@@ -854,6 +958,9 @@ def _predict_dataset(
                 torch.from_numpy(sample.candidate_features[None, ...]).to(device),
                 torch.from_numpy(sample.candidate_mask[None, ...]).to(device),
             )[0].detach().cpu().numpy()
+            raw_logits = logits.astype(np.float32)
+            if logit_bias is not None:
+                logits = (raw_logits + logit_bias).astype(np.float32)
             learned_index = int(np.argmax(logits))
             expert_index = int(sample.selected_index)
             learned_selected = dataset.candidate_ids[learned_index]
@@ -881,6 +988,10 @@ def _predict_dataset(
                         {
                             "candidate_id": candidate_id,
                             "learned_logit": round(float(logits[candidate_index]), 6),
+                            "raw_learned_logit": round(float(raw_logits[candidate_index]), 6),
+                            "logit_bias": round(float(logit_bias[candidate_index]), 6)
+                            if logit_bias is not None
+                            else 0.0,
                             "expert_total_score": round(float(sample.total_expert_score[candidate_index]), 6),
                             "expert_utility": round(float(-sample.total_expert_score[candidate_index]), 6),
                             "selected_by_expert": candidate_index == expert_index,
@@ -922,6 +1033,7 @@ def _prediction_metrics(
     modeld_dir: Path | None,
     inference_fps: float,
     train_metrics: JsonDict,
+    logit_bias_applied: bool,
 ) -> JsonDict:
     learned_ids = [str(item["learned_selected_candidate_id"]) for item in predictions]
     expert_ids = [str(item["expert_selected_candidate_id"]) for item in predictions]
@@ -986,6 +1098,9 @@ def _prediction_metrics(
         "split": split,
         "bev_source": bev_source,
         "modeld_dir": modeld_dir.as_posix() if modeld_dir is not None else None,
+        "candidate_feature_mode": dataset.candidate_feature_mode,
+        "mirror_left_right": dataset.mirror_left_right,
+        "logit_bias_applied": bool(logit_bias_applied),
         "example_count": len(predictions),
         "candidate_count": len(dataset.candidate_ids),
         "candidate_ids": list(dataset.candidate_ids),
@@ -1034,9 +1149,10 @@ def _prediction_metrics(
     }
 
 
-def _load_model_bev_map(modeld_dir: str | Path | None) -> dict[tuple[str, int], LocalBev]:
+def _load_model_bev_map(modeld_dir: str | Path | None, *, bev_source: str) -> dict[tuple[str, int], LocalBev]:
     if modeld_dir is None:
         return {}
+    bev_source = _normalize_bev_source(bev_source)
     root = Path(modeld_dir)
     records: dict[tuple[str, int], LocalBev] = {}
     for event_root in _modeld_event_roots(root):
@@ -1050,18 +1166,63 @@ def _load_model_bev_map(modeld_dir: str | Path | None) -> dict[tuple[str, int], 
                 continue
             artifact_path = event_root / event.local_bev_ref
             with np.load(artifact_path, allow_pickle=False) as data:
-                uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32)
+                free, occupied, unknown, traversable, risky, uncertainty = _model_bev_arrays(
+                    data,
+                    bev_source=bev_source,
+                    artifact_path=artifact_path,
+                )
                 records[(event.sequence_id, frame_id)] = LocalBev(
-                    free=np.asarray(data["bev_free_prob"], dtype=np.float32),
-                    occupied=np.asarray(data["bev_occupied_prob"], dtype=np.float32),
-                    unknown=np.asarray(data["bev_unknown_prob"], dtype=np.float32),
-                    traversable=np.asarray(data["bev_traversable_prob"], dtype=np.float32),
-                    risky=np.asarray(data["bev_risky_prob"], dtype=np.float32),
-                    confidence=(np.float32(1.0) - uncertainty).astype(np.float32),
+                    free=free,
+                    occupied=occupied,
+                    unknown=unknown,
+                    traversable=traversable,
+                    risky=risky,
+                    confidence=(np.float32(1.0) - uncertainty).astype(np.float32) if uncertainty is not None else None,
                     uncertainty=uncertainty,
-                    source="model",
+                    source=bev_source,
                 )
     return records
+
+
+def _model_bev_arrays(
+    data: np.lib.npyio.NpzFile,
+    *,
+    bev_source: str,
+    artifact_path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    if bev_source == "model":
+        if "bev_free_prob" not in data.files:
+            raise ValueError(
+                "v1 modeld artifacts require explicit bev_source='v1_current_bev' "
+                f"or 'v1_memory_bev': {artifact_path}"
+            )
+        prefix = "bev"
+    elif bev_source == "v1_current_bev":
+        prefix = "current_bev"
+    elif bev_source == "v1_memory_bev":
+        prefix = "memory_bev"
+    else:
+        raise ValueError(f"unsupported model BEV source: {bev_source}")
+
+    required = (
+        f"{prefix}_free_prob",
+        f"{prefix}_occupied_prob",
+        f"{prefix}_unknown_prob",
+        f"{prefix}_traversable_prob",
+        f"{prefix}_risky_prob",
+    )
+    missing = [name for name in required if name not in data.files]
+    if missing:
+        raise ValueError(f"model BEV artifact is missing {bev_source} arrays {missing}: {artifact_path}")
+    uncertainty = np.asarray(data["uncertainty_grid"], dtype=np.float32) if "uncertainty_grid" in data.files else None
+    return (
+        np.asarray(data[f"{prefix}_free_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_occupied_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_unknown_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_traversable_prob"], dtype=np.float32),
+        np.asarray(data[f"{prefix}_risky_prob"], dtype=np.float32),
+        uncertainty,
+    )
 
 
 def _modeld_event_roots(root: Path) -> list[Path]:
@@ -1091,6 +1252,98 @@ def _load_oracle_bev(path: Path) -> LocalBev:
         uncertainty=(np.float32(1.0) - _prob(confidence)).astype(np.float32),
         source="labels",
     )
+
+
+def _make_action_scorer_sample(
+    *,
+    record: JsonDict,
+    source_example_path: Path,
+    action_example_path: Path,
+    bev: LocalBev,
+    candidate_features: np.ndarray,
+    total_scores: np.ndarray,
+    selected_index: int,
+    source_weight: float,
+    candidate_feature_mode: str,
+) -> ActionScorerSample:
+    return ActionScorerSample(
+        record=record,
+        source_example_path=source_example_path,
+        action_example_path=action_example_path,
+        bev=bev,
+        bev_tensor=bev_tensor(bev),
+        candidate_features=apply_candidate_feature_mode(candidate_features, candidate_feature_mode),
+        candidate_mask=np.ones((candidate_features.shape[0],), dtype=np.float32),
+        total_expert_score=np.asarray(total_scores, dtype=np.float32),
+        target_logits=_target_logits_from_expert_scores(total_scores),
+        selected_index=int(selected_index),
+        source_weight=float(source_weight),
+    )
+
+
+def _mirror_local_bev(bev: LocalBev) -> LocalBev:
+    def mirror_optional(array: np.ndarray | None) -> np.ndarray | None:
+        if array is None:
+            return None
+        return np.fliplr(np.asarray(array, dtype=np.float32)).copy()
+
+    return LocalBev(
+        free=np.fliplr(_prob(bev.free)).copy(),
+        occupied=np.fliplr(_prob(bev.occupied)).copy(),
+        unknown=np.fliplr(_prob(bev.unknown)).copy(),
+        traversable=mirror_optional(bev.traversable),
+        risky=mirror_optional(bev.risky),
+        confidence=mirror_optional(bev.confidence),
+        uncertainty=mirror_optional(bev.uncertainty),
+        source=f"{bev.source}_left_right_mirror",
+    )
+
+
+def _candidate_mirror_indices(candidate_ids: list[str]) -> np.ndarray:
+    by_id = {candidate_id: index for index, candidate_id in enumerate(candidate_ids)}
+    indices: list[int] = []
+    for candidate_id in candidate_ids:
+        mirrored_id = LEFT_RIGHT_CANDIDATE_MIRROR.get(candidate_id, candidate_id)
+        if mirrored_id not in by_id:
+            raise ValueError(f"candidate mirror target {mirrored_id!r} missing from candidate ids")
+        indices.append(int(by_id[mirrored_id]))
+    return np.asarray(indices, dtype=np.int64)
+
+
+def _mirror_candidate_vector(values: np.ndarray, mirror_indices: np.ndarray) -> np.ndarray:
+    array = np.asarray(values, dtype=np.float32)
+    if array.shape != (mirror_indices.shape[0],):
+        raise ValueError(f"candidate vector shape {array.shape} does not match mirror map")
+    return array[mirror_indices].astype(np.float32)
+
+
+def _normalize_bev_source(bev_source: str) -> str:
+    return BEV_SOURCE_ALIASES.get(str(bev_source), str(bev_source))
+
+
+def _normalize_candidate_feature_mode(mode: str) -> str:
+    normalized = CANDIDATE_FEATURE_MODE_ALIASES.get(str(mode), str(mode))
+    if normalized not in CANDIDATE_FEATURE_MODES:
+        raise ValueError(f"candidate_feature_mode must be one of {CANDIDATE_FEATURE_MODES}")
+    return normalized
+
+
+def _logit_bias_vector(candidate_ids: Iterable[str], metadata: JsonDict | None) -> np.ndarray | None:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("logit_bias_by_candidate_id")
+    if not isinstance(raw, dict):
+        return None
+    values: list[float] = []
+    has_nonzero = False
+    for candidate_id in candidate_ids:
+        value = raw.get(str(candidate_id), 0.0)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"logit bias for candidate {candidate_id!r} must be numeric")
+        number = float(value)
+        values.append(number)
+        has_nonzero = has_nonzero or abs(number) > 1.0e-9
+    return np.asarray(values, dtype=np.float32) if has_nonzero else None
 
 
 def _filter_records(
@@ -1361,8 +1614,18 @@ def train_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--seed", type=int, default=11)
-    parser.add_argument("--bev-source", choices=("oracle", "model"), default="oracle")
+    parser.add_argument(
+        "--bev-source",
+        choices=("oracle", "model", "v1_current_bev", "v1_memory_bev", "model_current", "model_memory"),
+        default="oracle",
+    )
     parser.add_argument("--modeld", default=None)
+    parser.add_argument(
+        "--candidate-feature-mode",
+        choices=("all", "all_features", "signed_ablation", "signed_feature_ablation"),
+        default="all",
+    )
+    parser.add_argument("--mirror-left-right", action="store_true")
     args = parser.parse_args(argv)
     metrics = train_trajectory_scorer_v0(
         action_pack=args.action_pack,
@@ -1377,6 +1640,8 @@ def train_main(argv: list[str] | None = None) -> int:
         seed=args.seed,
         bev_source=args.bev_source,
         modeld_dir=args.modeld,
+        candidate_feature_mode=args.candidate_feature_mode,
+        mirror_left_right=args.mirror_left_right,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0
@@ -1389,13 +1654,22 @@ def eval_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--source-name", action="append", default=None)
     parser.add_argument("--source-family", action="append", default=None)
-    parser.add_argument("--bev-source", choices=("oracle", "model"), default="oracle")
+    parser.add_argument(
+        "--bev-source",
+        choices=("oracle", "model", "v1_current_bev", "v1_memory_bev", "model_current", "model_memory"),
+        default="oracle",
+    )
     parser.add_argument("--modeld", default=None)
     parser.add_argument("--split", default="val", help="train, val, all, none, or empty string for all examples")
     parser.add_argument("--device", default=None)
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--viz-out", default=None)
     parser.add_argument("--max-viz-frames", type=int, default=24)
+    parser.add_argument(
+        "--candidate-feature-mode",
+        choices=("checkpoint", "all", "all_features", "signed_ablation", "signed_feature_ablation"),
+        default="checkpoint",
+    )
     args = parser.parse_args(argv)
     metrics = eval_trajectory_scorer_v0(
         checkpoint=args.checkpoint,
@@ -1410,6 +1684,7 @@ def eval_main(argv: list[str] | None = None) -> int:
         max_examples=args.max_examples,
         viz_dir=args.viz_out,
         max_viz_frames=args.max_viz_frames,
+        candidate_feature_mode=None if args.candidate_feature_mode == "checkpoint" else args.candidate_feature_mode,
     )
     print(json.dumps(metrics, sort_keys=True))
     return 0
