@@ -7,6 +7,11 @@ from typing import Any
 import numpy as np
 import torch
 
+from homebrain.brain.future_bev_rollout_v1 import (
+    FUTURE_BEV_ROLLOUT_V1_SOURCE,
+    load_checkpoint as load_future_rollout_checkpoint,
+    score_local_bev_with_future_rollout,
+)
 from homebrain.messages.schema import JsonDict
 from homebrain.policies.candidate_trajectories import CandidateTrajectory
 from homebrain.policies.trajectory_scorer import (
@@ -30,6 +35,14 @@ TRANSPARENT_TRAJECTORY_SCORER_SOURCE = "transparent_coverage_risk_v0"
 
 @dataclass(frozen=True)
 class RuntimeTrajectoryScorer:
+    model: torch.nn.Module
+    checkpoint: Path
+    metadata: JsonDict
+    device: torch.device
+
+
+@dataclass(frozen=True)
+class RuntimeFutureRolloutScorer:
     model: torch.nn.Module
     checkpoint: Path
     metadata: JsonDict
@@ -62,6 +75,22 @@ def load_runtime_trajectory_scorer(
     )
 
 
+def load_runtime_future_rollout_scorer(
+    checkpoint: str | Path,
+    *,
+    device: torch.device,
+) -> RuntimeFutureRolloutScorer:
+    model, payload = load_future_rollout_checkpoint(checkpoint, map_location=device)
+    model.to(device)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    return RuntimeFutureRolloutScorer(
+        model=model,
+        checkpoint=Path(checkpoint),
+        metadata=dict(metadata),
+        device=device,
+    )
+
+
 def decide_trajectory(
     *,
     bev: LocalBev,
@@ -69,6 +98,9 @@ def decide_trajectory(
     coverage_memory: CoverageMemory,
     pose_delta: tuple[float, float, float] | None,
     learned_scorer: RuntimeTrajectoryScorer | None = None,
+    future_rollout_scorer: RuntimeFutureRolloutScorer | None = None,
+    patch_features: np.ndarray | None = None,
+    sensor_mask: np.ndarray | None = None,
     policy_bev_source: str,
     coverage_memory_reset: bool = False,
 ) -> RuntimeDecisionResult:
@@ -87,7 +119,38 @@ def decide_trajectory(
 
     learned_logits: np.ndarray | None = None
     learned_features: np.ndarray | None = None
-    if learned_scorer is None:
+    future_rollout_arrays: dict[str, np.ndarray] = {}
+    if future_rollout_scorer is not None:
+        future_scores = score_local_bev_with_future_rollout(
+            model=future_rollout_scorer.model,  # type: ignore[arg-type]
+            bev=bev,
+            patch_features=patch_features,
+            sensor_mask=sensor_mask,
+            device=future_rollout_scorer.device,
+        )
+        _validate_future_candidate_ids(candidates, future_scores)
+        lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
+        selected_index_raw = int(np.argmin(lower_score))
+        selected_candidate_id = candidates[selected_index_raw].id
+        candidate_records = _future_rollout_candidate_score_records(
+            candidates=candidates,
+            future_scores=future_scores,
+            selected_candidate_id=selected_candidate_id,
+        )
+        _attach_transparent_scores(candidate_records, transparent_decision)
+        scorer_name = FUTURE_BEV_ROLLOUT_V1_SOURCE
+        scorer_mode = "future_rollout"
+        future_rollout_arrays = {
+            "future_rollout_candidate_collision": np.asarray(future_scores["candidate_collision"], dtype=np.float32),
+            "future_rollout_candidate_unknown_exposure": np.asarray(
+                future_scores["candidate_unknown_exposure"],
+                dtype=np.float32,
+            ),
+            "future_rollout_candidate_new_area_gain": np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32),
+            "future_rollout_candidate_progress": np.asarray(future_scores["candidate_progress"], dtype=np.float32),
+            "future_rollout_candidate_lower_is_better_score": lower_score,
+        }
+    elif learned_scorer is None:
         selected_candidate_id = transparent_decision.selected_candidate_id
         candidate_records = _transparent_candidate_score_records(
             candidates=candidates,
@@ -146,6 +209,7 @@ def decide_trajectory(
         artifact_arrays["trajectory_logits"] = learned_logits.astype(np.float32)
     if learned_features is not None:
         artifact_arrays["trajectory_candidate_features"] = learned_features.astype(np.float32)
+    artifact_arrays.update(future_rollout_arrays)
 
     debug: JsonDict = {
         "schema_version": RUNTIME_DECISION_SCHEMA_VERSION,
@@ -176,6 +240,16 @@ def decide_trajectory(
                 "trajectory_scorer_checkpoint": learned_scorer.checkpoint.as_posix(),
                 "trajectory_scorer_checkpoint_sha256": scorer_checkpoint_hash(learned_scorer.checkpoint),
                 "trajectory_scorer_metadata": learned_scorer.metadata,
+            }
+        )
+    if future_rollout_scorer is not None:
+        debug.update(
+            {
+                "future_rollout_checkpoint": future_rollout_scorer.checkpoint.as_posix(),
+                "future_rollout_checkpoint_sha256": _file_sha256(future_rollout_scorer.checkpoint),
+                "future_rollout_metadata": future_rollout_scorer.metadata,
+                "future_rollout_replay_only": True,
+                "future_rollout_control_safe": False,
             }
         )
 
@@ -242,6 +316,59 @@ def _attach_transparent_scores(records: list[JsonDict], decision: TrajectoryDeci
         }
 
 
+def _future_rollout_candidate_score_records(
+    *,
+    candidates: list[CandidateTrajectory],
+    future_scores: dict[str, np.ndarray | list[str] | str],
+    selected_candidate_id: str,
+) -> list[JsonDict]:
+    collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
+    unknown = np.asarray(future_scores["candidate_unknown_exposure"], dtype=np.float32)
+    gain = np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32)
+    progress = np.asarray(future_scores["candidate_progress"], dtype=np.float32)
+    lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
+    formula = str(future_scores.get("scoring_formula", "unknown"))
+    records: list[JsonDict] = []
+    for index, candidate in enumerate(candidates):
+        records.append(
+            {
+                **candidate.to_dict(),
+                "trajectory_score": {
+                    "schema_version": "homebrain.future_bev_rollout_trajectory_score.v1",
+                    "scorer": FUTURE_BEV_ROLLOUT_V1_SOURCE,
+                    "candidate_id": candidate.id,
+                    "future_collision_probability": round(float(collision[index]), 6),
+                    "future_unknown_exposure": round(float(unknown[index]), 6),
+                    "future_new_area_gain": round(float(gain[index]), 6),
+                    "future_progress": round(float(progress[index]), 6),
+                    "total_score": round(float(lower_score[index]), 6),
+                    "scoring_formula": formula,
+                    "lower_is_better": True,
+                    "selected_by_runtime_policy": candidate.id == selected_candidate_id,
+                    "replay_only": True,
+                    "not_executed": True,
+                    "control_safe": False,
+                    "product_training_approved": False,
+                },
+                "replay_only": True,
+                "not_executed": True,
+                "control_safe": False,
+                "product_training_approved": False,
+            }
+        )
+    return records
+
+
+def _validate_future_candidate_ids(
+    candidates: list[CandidateTrajectory],
+    future_scores: dict[str, np.ndarray | list[str] | str],
+) -> None:
+    scored_ids = [str(value) for value in future_scores.get("candidate_ids", [])]
+    expected = [candidate.id for candidate in candidates]
+    if scored_ids != expected:
+        raise ValueError(f"Future BEV rollout candidate ids do not match runtime candidates: {scored_ids} != {expected}")
+
+
 def _selected_candidate_index(candidates: list[CandidateTrajectory], selected_candidate_id: str) -> int:
     for index, candidate in enumerate(candidates):
         if candidate.id == selected_candidate_id:
@@ -282,3 +409,13 @@ def metadata_float(metadata: dict[str, Any], key: str, default: float) -> float:
             if np.isfinite(number) and number > 0.0:
                 return number
     return default
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()

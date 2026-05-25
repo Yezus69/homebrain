@@ -19,6 +19,8 @@ Implemented:
 - SpatialMemoryNet v0/v1 with explicit local BEV memory;
 - fixed candidate trajectories, transparent scorer, learned scorer, future
   motion action labels, and closed-loop replay reports.
+- Future BEV Rollout v1 pack builder, dataset, model, train/eval CLIs, and
+  replay-only runtime candidate scoring option.
 
 Not implemented:
 
@@ -69,44 +71,53 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Goal 23B: cleanup stale Codex goal/history docs, relax local POC dataset/model
-policy, and keep the repo focused on robot-useful code.
+Future BEV Rollout v1: self-supervised future local spatial-state and
+candidate-outcome pretraining from SpatialTrainPack-style RGB-D/pose route data.
 
-## Goal 23B Proof
+## Future BEV Rollout v1 Proof
 
-Objective attempted: remove stale Codex prompt/history clutter, reduce default
-context, and relax public-dataset/open-weight model restrictions for local POC
-work without claiming product/control safety.
+Objective attempted: add a real replay-only future BEV rollout block that warps
+future BEV labels into the current robot frame with route pose, derives
+candidate collision/unknown/new-area/progress labels, trains a small rollout
+model, evaluates future/candidate metrics, and can shadow-score runtime replay
+candidates without emitting commands.
 
-Files changed: deleted old goal prompt/history docs; trimmed `AGENTS.md`,
-`README.md`, `EVALS.md`, `LICENSE_AUDIT.md`, `BLOCKERS.md`, and
-`CURRENT_STATUS.md`; updated dataset/license policy code and scene-teacher audit
-logic; adjusted related docs/tests.
+Files changed: added `homebrain/train/future_bev_rollout_dataset.py`,
+`homebrain/train/build_future_bev_rollout_pack.py`,
+`homebrain/brain/future_bev_rollout_v1.py`,
+`homebrain/train/train_future_bev_rollout_v1.py`,
+`homebrain/eval/eval_future_bev_rollout_v1.py`, and
+`tests/test_future_bev_rollout_v1.py`; updated `modeld`, `replayd`,
+runtime trajectory decisions, checkpoint constants, and this status file.
 
-Commands run: required first docs were read; repo files were listed with
-`rg --files`/PowerShell; policy and license references were searched with `rg`;
-`python -m py_compile homebrain\tools\audit_scene_teacher_signal.py
-homebrain\datasets\usage_policy.py homebrain\datasets\openloris_scene.py
-homebrain\datasets\openloris_to_route.py tests\test_goal15b_scene_teacher_signal.py`;
-`python -m pytest tests\test_goal15b_scene_teacher_signal.py
-tests\test_goal12c_hard_validation.py -q`; full `python -m pytest -q`;
-`git diff --stat`; final `git diff --check` and `git status --short`.
+Commands run: required docs were read; repo files and candidate/replay modules
+were inspected with `rg`/PowerShell; `python -m py_compile` on new/modified
+rollout, runtime, modeld, replayd, and test modules; `python -m pytest
+tests\test_future_bev_rollout_v1.py -q`; `python -m pytest
+tests\test_goal11a_trajectory_scorer_v0.py tests\test_goal12a_spatial_memory_v1.py -q`;
+full `python -m pytest -q`; `git diff --check`; `git status --short`.
 
-Pass/fail results: py_compile passed; focused tests passed with `20 passed in
-5.68s`; full pytest passed with `120 passed in 179.78s`; `git diff --check`
-passed. PowerShell tool output still appends a non-project `-NoProfile` warning
-after commands.
+Pass/fail results: py_compile passed; focused Future BEV Rollout tests passed
+with `5 passed`; related replay/modeld scorer tests passed with `13 passed`;
+full pytest passed with `125 passed in 185.34s`; `git diff --check` passed.
+PowerShell tool output still appends a non-project `-Command` warning after
+commands.
 
-Artifacts created: none.
+Artifacts created: no persistent real-data artifact was created. The new CLIs
+write deterministic `future_bev_rollout_pack` manifests/examples, checkpoints,
+and eval metrics when run on local SpatialTrainPack/public route data; tests use
+temporary tiny fixtures only.
 
-Metrics observed: tracked diff removes about `4093` old lines and adds about
-`455` focused lines; old Codex prompt/archive docs are gone; Markdown files now
-list as 17 concise docs; OpenLORIS-style POC usage is allowed when
-`poc_training_eval_allowed=true`.
+What this enables next: train on available OpenLORIS/TUM-style public indoor
+routes to pretrain "what will happen if I take this candidate" before hardware,
+then fine-tune the same future/candidate heads on real robot logs later.
 
-Blockers/risks: safety flags still matter. POC data/model permission must not be
-misread as product approval or permission to execute on hardware.
+Remaining risks: current proof is tiny-fixture smoke plus unit coverage, not a
+real public-route result yet; labels remain weak, replay-only, and pose/BEV
+quality-bound; candidate outcomes are not control safety evidence and runtime
+still reports `cmd_vel=None`, `replay_only=true`, `not_executed=true`,
+`control_safe=false`.
 
-Recommended next goal: run a route-diversity POC loop on more public
-robot-mounted routes and widen learned policy action diversity before adding
-hardware integration.
+Recommended next goal: build a real FutureBEVRolloutPack from local public route
+packs, train/evaluate route-held-out metrics, and compare shadow candidate
+diversity against the current learned trajectory scorer.

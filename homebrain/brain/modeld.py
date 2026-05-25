@@ -20,8 +20,10 @@ from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, OdomE
 from homebrain.policies.candidate_trajectories import generate_default_candidates
 from homebrain.policies.trajectory_scorer import CoverageMemory, LocalBev
 from homebrain.policies.runtime_decision import (
+    RuntimeFutureRolloutScorer,
     RuntimeTrajectoryScorer,
     decide_trajectory,
+    load_runtime_future_rollout_scorer,
     load_runtime_trajectory_scorer,
     metadata_float,
 )
@@ -99,6 +101,7 @@ def replay_events_with_spatial_model(
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
     v1_policy_bev_source: str = "memory",
@@ -111,6 +114,7 @@ def replay_events_with_spatial_model(
         checkpoint=checkpoint,
         feature_dir=feature_dir,
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
+        future_rollout_checkpoint=future_rollout_checkpoint,
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
@@ -145,6 +149,7 @@ def write_spatial_model_outputs(
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
     v1_policy_bev_source: str = "memory",
@@ -158,6 +163,7 @@ def write_spatial_model_outputs(
         checkpoint=checkpoint,
         feature_dir=feature_dir,
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
+        future_rollout_checkpoint=future_rollout_checkpoint,
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
@@ -179,10 +185,13 @@ def spatial_model_outputs(
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
     v1_policy_bev_source: str = "memory",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
+    if trajectory_scorer_checkpoint is not None and future_rollout_checkpoint is not None:
+        raise ValueError("use either --trajectory-scorer-checkpoint or --future-rollout-checkpoint, not both")
     if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
         return _spatial_v1_model_outputs(
             events,
@@ -190,6 +199,7 @@ def spatial_model_outputs(
             checkpoint=checkpoint,
             feature_dir=feature_dir,
             trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
+            future_rollout_checkpoint=future_rollout_checkpoint,
             device_name=device_name,
             pose_warp_source=v1_pose_warp_source,
             policy_bev_source=v1_policy_bev_source,
@@ -204,12 +214,18 @@ def spatial_model_outputs(
         raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
     feature_store = DINOFeatureStore(resolved_feature_dir)
     trajectory_scorer: RuntimeTrajectoryScorer | None = None
+    future_rollout_scorer: RuntimeFutureRolloutScorer | None = None
     trajectory_candidates = None
     trajectory_coverage: CoverageMemory | None = None
-    if trajectory_scorer_checkpoint is not None:
-        trajectory_scorer = load_runtime_trajectory_scorer(trajectory_scorer_checkpoint, device=device)
-        meters_per_cell = metadata_float(trajectory_scorer.metadata, "meters_per_cell", 0.05)
-        robot_radius_m = metadata_float(trajectory_scorer.metadata, "robot_radius_m", 0.18)
+    if trajectory_scorer_checkpoint is not None or future_rollout_checkpoint is not None:
+        if trajectory_scorer_checkpoint is not None:
+            trajectory_scorer = load_runtime_trajectory_scorer(trajectory_scorer_checkpoint, device=device)
+            trajectory_metadata = trajectory_scorer.metadata
+        else:
+            future_rollout_scorer = load_runtime_future_rollout_scorer(future_rollout_checkpoint, device=device)  # type: ignore[arg-type]
+            trajectory_metadata = future_rollout_scorer.metadata
+        meters_per_cell = metadata_float(trajectory_metadata, "meters_per_cell", 0.05)
+        robot_radius_m = metadata_float(trajectory_metadata, "robot_radius_m", 0.18)
         trajectory_candidates = generate_default_candidates(
             grid_shape=model.config.bev_shape,
             meters_per_cell=meters_per_cell,
@@ -230,6 +246,7 @@ def spatial_model_outputs(
             checkpoint=Path(checkpoint),
             feature_dir=Path(resolved_feature_dir),
             trajectory_scorer=trajectory_scorer,
+            future_rollout_scorer=future_rollout_scorer,
             trajectory_candidates=trajectory_candidates,
             trajectory_coverage=trajectory_coverage,
             start_timestamp_ns=start_timestamp_ns,
@@ -247,6 +264,7 @@ def _spatial_v1_model_outputs(
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     pose_warp_source: str = "route_pose",
     policy_bev_source: str = "memory",
@@ -274,7 +292,18 @@ def _spatial_v1_model_outputs(
         if trajectory_scorer_checkpoint is not None
         else None
     )
-    trajectory_metadata = trajectory_scorer.metadata if trajectory_scorer is not None else metadata
+    future_rollout_scorer = (
+        load_runtime_future_rollout_scorer(future_rollout_checkpoint, device=device)
+        if future_rollout_checkpoint is not None
+        else None
+    )
+    trajectory_metadata = (
+        future_rollout_scorer.metadata
+        if future_rollout_scorer is not None
+        else trajectory_scorer.metadata
+        if trajectory_scorer is not None
+        else metadata
+    )
     meters_per_cell = metadata_float(trajectory_metadata, "meters_per_cell", metadata_float(metadata, "meters_per_cell", 0.05))
     robot_radius_m = metadata_float(trajectory_metadata, "robot_radius_m", metadata_float(metadata, "robot_radius_m", 0.18))
     trajectory_candidates = generate_default_candidates(
@@ -327,6 +356,7 @@ def _spatial_v1_model_outputs(
             reset_memory=reset,
             state=None if reset else state,
             trajectory_scorer=trajectory_scorer,
+            future_rollout_scorer=future_rollout_scorer,
             trajectory_candidates=trajectory_candidates,
             trajectory_coverage=trajectory_coverage,
             policy_bev_source=policy_bev_source,
@@ -348,6 +378,7 @@ def _spatial_output_for_frame(
     checkpoint: Path,
     feature_dir: Path,
     trajectory_scorer: RuntimeTrajectoryScorer | None,
+    future_rollout_scorer: RuntimeFutureRolloutScorer | None,
     trajectory_candidates: list | None,
     trajectory_coverage: CoverageMemory | None,
     start_timestamp_ns: int,
@@ -397,7 +428,7 @@ def _spatial_output_for_frame(
     trajectory_debug: dict[str, object] = {
         "trajectory_scoring": False,
     }
-    if trajectory_scorer is not None:
+    if trajectory_scorer is not None or future_rollout_scorer is not None:
         if trajectory_candidates is None or trajectory_coverage is None:
             raise ValueError("trajectory scorer runtime is incomplete")
         decision = decide_trajectory(
@@ -406,6 +437,9 @@ def _spatial_output_for_frame(
             coverage_memory=trajectory_coverage,
             pose_delta=pose_delta,  # type: ignore[arg-type]
             learned_scorer=trajectory_scorer,
+            future_rollout_scorer=future_rollout_scorer,
+            patch_features=patch_features,
+            sensor_mask=sensor_mask.detach().cpu().numpy()[0],
             policy_bev_source="model",
         )
         arrays.update(decision.artifact_arrays)
@@ -468,6 +502,7 @@ def _spatial_v1_output_for_frame(
     reset_memory: bool,
     state: SpatialMemoryState | None,
     trajectory_scorer: RuntimeTrajectoryScorer | None,
+    future_rollout_scorer: RuntimeFutureRolloutScorer | None,
     trajectory_candidates: list,
     trajectory_coverage: CoverageMemory,
     policy_bev_source: str,
@@ -560,6 +595,9 @@ def _spatial_v1_output_for_frame(
         coverage_memory=trajectory_coverage,
         pose_delta=coverage_pose_delta,  # type: ignore[arg-type]
         learned_scorer=trajectory_scorer,
+        future_rollout_scorer=future_rollout_scorer,
+        patch_features=patch_features,
+        sensor_mask=sensor_mask.detach().cpu().numpy()[0],
         policy_bev_source=policy_bev_source,
         coverage_memory_reset=reset_memory,
     )
@@ -716,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet v0 checkpoint.")
     parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
     parser.add_argument("--trajectory-scorer-checkpoint", default=None, help="Optional TrajectoryScorerNet v0 checkpoint.")
+    parser.add_argument("--future-rollout-checkpoint", default=None, help="Optional Future BEV Rollout v1 checkpoint.")
     parser.add_argument(
         "--v1-pose-warp-source",
         choices=V1_POSE_WARP_SOURCES,
@@ -737,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint=args.checkpoint,
             feature_dir=args.features,
             trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
+            future_rollout_checkpoint=args.future_rollout_checkpoint,
             device_name=args.device,
             v1_pose_warp_source=args.v1_pose_warp_source,
             v1_policy_bev_source=args.v1_policy_bev_source,

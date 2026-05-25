@@ -36,6 +36,7 @@ def replay_log(
     checkpoint: str | Path | None = None,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
     v1_policy_bev_source: str = "memory",
@@ -56,6 +57,7 @@ def replay_log(
             checkpoint=checkpoint,
             feature_dir=feature_dir,
             trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
+            future_rollout_checkpoint=future_rollout_checkpoint,
             device_name=device_name,
             v1_pose_warp_source=v1_pose_warp_source,
             v1_policy_bev_source=v1_policy_bev_source,
@@ -78,6 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint", default=None, help="Optional SpatialMemoryNet v0 checkpoint.")
     parser.add_argument("--features", default=None, help="Optional DINO feature artifact directory.")
     parser.add_argument("--trajectory-scorer-checkpoint", default=None, help="Optional TrajectoryScorerNet v0 checkpoint.")
+    parser.add_argument("--future-rollout-checkpoint", default=None, help="Optional Future BEV Rollout v1 checkpoint.")
     parser.add_argument(
         "--v1-pose-warp-source",
         choices=("route_pose", "predicted_pose", "none"),
@@ -98,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint=args.checkpoint,
         feature_dir=args.features,
         trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
+        future_rollout_checkpoint=args.future_rollout_checkpoint,
         device_name=args.device,
         v1_pose_warp_source=args.v1_pose_warp_source,
         v1_policy_bev_source=args.v1_policy_bev_source,
