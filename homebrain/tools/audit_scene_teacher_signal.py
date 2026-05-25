@@ -79,7 +79,7 @@ def audit_scene_teacher_signal(
         and not mock
         and not synthetic
         and scale_status in GEOMETRY_PRETRAIN_SCALE_STATUSES
-        and route_truth["owned_or_license_approved"] is True
+        and route_truth["poc_or_owned_data_allowed"] is True
         and not action_supervision_ok
     )
     temporal_memory_evidence = _temporal_memory_evidence(
@@ -111,7 +111,7 @@ def audit_scene_teacher_signal(
 
     report: JsonDict = {
         "schema_version": SCENE_TEACHER_SIGNAL_AUDIT_SCHEMA_VERSION,
-        "goal": "15B real owned-route scene-teacher signal gate",
+        "goal": "scene-teacher POC signal gate",
         "inputs": {
             "log_dir": log_root.as_posix(),
             "scene_teacher_dir": scene_root.as_posix(),
@@ -213,12 +213,15 @@ def _route_metadata_sensor_truth(*, metadata: JsonDict | None, events: list[Even
             "source_type": None,
             "owned_or_license_approved_explicit": False,
             "owned_or_license_approved": False,
+            "poc_training_eval_allowed_explicit": False,
+            "poc_training_eval_allowed": False,
+            "poc_or_owned_data_allowed": False,
             "event_counts": event_counts,
             "metadata_sensor_claims": {},
             "robot_frame_truth_allowed": False,
             "robot_frame_truth_claimed_by_route": False,
             "truth_pass": False,
-            "violations": ["missing_route_metadata", "owned_or_license_approved_not_explicit"],
+            "violations": ["missing_route_metadata", "poc_or_owned_data_use_not_explicit"],
         }
     if isinstance(metadata.get("_metadata_load_error"), str):
         return {
@@ -227,20 +230,25 @@ def _route_metadata_sensor_truth(*, metadata: JsonDict | None, events: list[Even
             "source_type": None,
             "owned_or_license_approved_explicit": False,
             "owned_or_license_approved": False,
+            "poc_training_eval_allowed_explicit": False,
+            "poc_training_eval_allowed": False,
+            "poc_or_owned_data_allowed": False,
             "event_counts": event_counts,
             "metadata_sensor_claims": {},
             "robot_frame_truth_allowed": False,
             "robot_frame_truth_claimed_by_route": False,
             "truth_pass": False,
-            "violations": ["route_metadata_load_failed", "owned_or_license_approved_not_explicit"],
+            "violations": ["route_metadata_load_failed", "poc_or_owned_data_use_not_explicit"],
         }
 
     owned_explicit = isinstance(metadata.get("owned_or_license_approved"), bool)
     owned_approved = metadata.get("owned_or_license_approved") is True
-    if not owned_explicit:
-        violations.append("owned_or_license_approved_not_explicit")
-    if not owned_approved:
-        violations.append("owned_or_license_not_approved")
+    poc_explicit, poc_allowed = _poc_training_eval_allowed(metadata)
+    poc_or_owned_allowed = bool(owned_approved or poc_allowed)
+    if not owned_explicit and not poc_explicit:
+        violations.append("poc_or_owned_data_use_not_explicit")
+    if not poc_or_owned_allowed:
+        violations.append("poc_or_owned_data_use_not_allowed")
 
     claims = {
         "has_imu": _bool_or_none(metadata.get("has_imu")),
@@ -300,6 +308,9 @@ def _route_metadata_sensor_truth(*, metadata: JsonDict | None, events: list[Even
         "source_type": metadata.get("source_type"),
         "owned_or_license_approved_explicit": owned_explicit,
         "owned_or_license_approved": owned_approved,
+        "poc_training_eval_allowed_explicit": poc_explicit,
+        "poc_training_eval_allowed": poc_allowed,
+        "poc_or_owned_data_allowed": poc_or_owned_allowed,
         "event_counts": event_counts,
         "metadata_sensor_claims": claims,
         "missing_sensor_notices": metadata.get("missing_sensor_notices", []),
@@ -317,6 +328,16 @@ def _check_sensor_claim(violations: list[str], *, sensor: str, event_count: int,
         violations.append(f"{sensor}_events_present_but_metadata_does_not_claim_sensor")
     if event_count == 0 and claim is True:
         violations.append(f"metadata_claims_{sensor}_but_no_events_present")
+
+
+def _poc_training_eval_allowed(metadata: JsonDict) -> tuple[bool, bool]:
+    direct = metadata.get("poc_training_eval_allowed")
+    if isinstance(direct, bool):
+        return True, direct
+    policy = metadata.get("usage_policy")
+    if isinstance(policy, dict) and isinstance(policy.get("poc_training_eval_allowed"), bool):
+        return True, policy["poc_training_eval_allowed"]
+    return False, False
 
 
 def _robot_frame_truth(*, manifest: JsonDict, route_truth: JsonDict) -> bool:
@@ -486,7 +507,7 @@ def _recommendations(
     if mock or synthetic or not real_perception:
         return [
             "Use this artifact for structural review only; fake or synthetic scene-teacher output is never promotable.",
-            "Run the real backend only after local MoGe assets and an explicitly approved owned route are present.",
+            "Run the real backend only after local MoGe assets and an owned or POC-allowed route are present.",
         ]
     if scale_status not in GEOMETRY_PRETRAIN_SCALE_STATUSES:
         return [
@@ -553,6 +574,8 @@ def _write_markdown(path: Path, report: JsonDict) -> None:
         "## Route Truth",
         f"- source_type: `{route.get('source_type')}`",
         f"- owned_or_license_approved: `{str(route.get('owned_or_license_approved')).lower()}`",
+        f"- poc_training_eval_allowed: `{str(route.get('poc_training_eval_allowed')).lower()}`",
+        f"- poc_or_owned_data_allowed: `{str(route.get('poc_or_owned_data_allowed')).lower()}`",
         f"- truth_pass: `{str(route.get('truth_pass')).lower()}`",
         f"- robot_frame_truth_allowed: `{str(route.get('robot_frame_truth_allowed')).lower()}`",
         f"- robot_frame_truth: `{str(report['robot_frame_truth']).lower()}`",

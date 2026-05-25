@@ -89,5 +89,5 @@ Must not:
 - Tests must run locally.
 - Generated artifacts live under `runs/`.
 - Dependency additions must be justified.
-- Every goal updates `CURRENT_STATUS.md`.
+- Implementation work updates `CURRENT_STATUS.md` briefly with proof and risks.
 - Every important output must be inspectable from replay.

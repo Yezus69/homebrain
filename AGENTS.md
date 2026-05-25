@@ -1,117 +1,61 @@
-# AGENTS.md — Instructions for Codex
+# AGENTS.md - HomeBrain Repo Instructions
 
-This file is the repo-level memory. Read it before doing any work.
+This file is repo memory for future Codex work. Keep it short.
 
 ## Mission
 
-Build HomeBrain: a production-directed indoor robot brain for a future camera/IR/IMU/wheel-encoder floor-cleaning robot.
+Build HomeBrain: a proof-of-concept indoor robot brain for a future
+camera/IR/IMU/wheel-encoder floor-cleaning robot. The near-term proof is
+software-only: replay real indoor data, use open-weight teachers offline, train
+a smaller spatial-memory student, and score cleaning trajectories well enough
+to justify hardware work.
 
-The brain must eventually maintain spatial memory, predict traversability/risk, choose useful cleaning trajectories, and support deterministic replay/evaluation. It must not become a toy demo.
-
-## Always read first
+## Read First
 
 Before coding, read:
+
 1. `PROJECT_BRIEF.md`
-2. `CURRENT_STATUS.md`
-3. `EVALS.md`
-4. `DECISIONS.md`
-5. The specific goal prompt or issue
+2. `ARCHITECTURE.md`
+3. `CURRENT_STATUS.md`
+4. The user's current request or issue
 
-Do not treat archive paths as part of the required read-list unless a goal
-explicitly asks for historical details:
-- `docs/status_archive/`
-- `docs/blockers_archive/`
+Read `EVALS.md`, `DECISIONS.md`, `LICENSE_AUDIT.md`, or deeper docs only when
+the task touches those areas.
 
-If context was compacted, recover from those files instead of guessing.
+## Working Rules
 
-## Non-negotiable principles
+- No fake success. Mock, synthetic, weak, replay-only, and POC artifacts must say so.
+- Logs, replay, evals, and deterministic artifacts come before bigger models.
+- Open-weight models and public datasets are allowed for local POC training and
+  eval when provenance is recorded. They are not automatically control-safe,
+  redistributable, or product-approved.
+- Use foundation models as offline teachers first. Runtime should trend toward a
+  smaller student model.
+- Use candidate trajectories or `cmd_vel`; never arbitrary raw PWM.
+- Prefer explicit spatial memory, BEV, coverage, uncertainty, and route
+  provenance over hidden-only state.
+- Keep modules small and directly tied to logging, replay, teachers, geometry,
+  spatial memory, trajectory scoring, eval, or later hardware integration.
+- Delete stale context instead of adding more instructions.
 
-1. **Logs/replay/evals before models.** No serious ML code until deterministic log/replay/eval works.
-2. **No fake success.** If a model is mocked, label it as a mock. Do not report mock metrics as real model performance.
-3. **Every goal must leave proof.** Tests, commands, generated artifacts, and `CURRENT_STATUS.md` updates are mandatory.
-4. **Keep the stack lean.** Avoid ROS, Nav2, Isaac, Habitat, web-scale training frameworks, and giant dependencies unless a goal explicitly asks for them.
-5. **Open models are teachers first.** Big foundation models should produce features/pseudo-labels offline. The runtime brain should be a smaller distilled student.
-6. **Candidate trajectories, not raw PWM.** The learned brain may score/select trajectories or emit `cmd_vel`; it must not jump straight to arbitrary motor PWM.
-7. **Structured memory beats hidden-only memory.** Use explicit local/global spatial memory representations, not only transformer context.
-8. **Production path matters.** Prefer deterministic data formats, typed schemas, repeatable commands, and clear dependency boundaries.
-9. **Delete complexity.** Do not add a module unless it directly supports logging, replay, teacher labeling, spatial memory, trajectory scoring, evaluation, or later hardware integration.
-10. **When stuck, reduce scope, do not thrash.** Implement the smallest useful subset that keeps the project moving and document the blocker.
+## Completion
 
-## Required completion behavior for every goal
+For implementation tasks, leave proof:
 
-At the end of every Codex goal:
-- Run the verification commands requested by the goal.
-- Update `CURRENT_STATUS.md` with:
-  - objective attempted
-  - files changed
-  - commands run
-  - pass/fail results
-  - artifacts created
-  - metrics observed
-  - blockers/risks
-  - recommended next goal
-- If a goal fails, create or update `BLOCKERS.md` with:
-  - exact failure
-  - likely cause
-  - minimal next repair action
-  - command output summary
-- Do not claim completion unless verification passes.
+- run focused tests, and full `python -m pytest -q` when feasible;
+- update `CURRENT_STATUS.md` briefly with objective, files changed, commands,
+  pass/fail result, artifacts, risks, and next recommended step;
+- update `BLOCKERS.md` only for active blockers that still need action.
 
-## Dependency policy
+## Dependency Policy
 
-Initial allowed dependencies:
-- Python standard library
-- numpy
-- pydantic or dataclasses-based validation
-- pytest
-- rich or tqdm only if helpful
-- opencv-python only when image/video I/O is actually needed
-- torch only when the specific goal introduces ML
+Allowed by default: Python stdlib, numpy, pytest, dataclasses or pydantic-style
+validation, opencv-python when image/video IO is needed, and torch when ML work
+requires it. Avoid ROS/Nav2/Isaac/Habitat/web-scale frameworks unless the user
+explicitly asks.
 
-Do not add large dependencies casually.
+## Product Reality
 
-## Repo shape to prefer
-
-Use the package name `homebrain`.
-
-Prefer:
-```text
-homebrain/
-  messages/
-  replay/
-  eval/
-  teachers/
-  brain/
-  policies/
-  data/
-  scripts/
-tests/
-runs/
-```
-
-Generated data goes under `runs/` and should be gitignored.
-
-## Engineering style
-
-- Type hints for public interfaces.
-- Small modules.
-- Deterministic tests.
-- CLI entry points for every important workflow.
-- Clear errors over silent fallbacks.
-- If external model weights are missing, the wrapper may fall back to a mock only when explicitly configured, and artifacts must say `mock: true`.
-
-## Product reality
-
-The target homes are messy and dynamic:
-- humans
-- pets
-- cords
-- boxes
-- rugs
-- chair legs
-- dark rooms
-- reflective floors
-- moved furniture
-- temporarily blocked paths
-
-Do not build only for clean static maps.
+Target homes are messy: humans, pets, cords, boxes, rugs, chair legs, dark
+rooms, reflections, moved furniture, and temporary blocked paths. Do not build
+only for clean static maps.

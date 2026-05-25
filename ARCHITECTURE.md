@@ -2,7 +2,9 @@
 
 ## Design summary
 
-HomeBrain is a small production-directed robot-brain stack. It uses large open foundation models as teachers and trains a smaller runtime student to maintain spatial memory and choose useful cleaning trajectories.
+HomeBrain is a small robot-brain POC stack. It uses open-weight foundation
+models as offline teachers and trains a smaller runtime student to maintain
+spatial memory and choose useful cleaning trajectories.
 
 The architecture is intentionally not a giant monolith. It is a lean dataflow with one primary learned brain and explicit logging/evaluation.
 
@@ -25,7 +27,8 @@ controld  sends cmd_vel or wheel targets to motor controller
 debugd    visualization only
 ```
 
-Do not build hardware daemons before replay/model/eval are useful.
+Do not build hardware daemons before replay/model/eval and policy POC evidence
+are useful.
 
 ## Primary dataflow
 
@@ -78,7 +81,10 @@ Candidate teachers:
 - segmentation/video mask model, e.g. SAM-family
 - navigation-prior model, e.g. GNM / ViNT / NoMaD
 
-Teacher outputs become pseudo-labels or features. They are not automatically product runtime dependencies.
+Teacher outputs become pseudo-labels or features. Public datasets and open
+weights are allowed for local POC work when provenance is recorded. They are not
+automatically product runtime dependencies, redistributable artifacts, or
+control-safety evidence.
 
 ## Offline geometry labels
 
@@ -116,9 +122,8 @@ Current action-labeling status: ActionLabelPack v5 can derive replay-only
 behavior-cloning candidate labels from robot-frame dataset future motion. The
 older synthetic coverage/risk label path remains available for ablation, but it
 is no longer treated as the action oracle after Goal 13B showed it collapsed.
-The learned v5 scorer is still replay/eval only and not control-safe; Goal 14
-showed that v5 labels are non-collapsed, while current model-BEV memory still
-does not improve learned-scorer decisions.
+The learned v5 scorer is still replay/eval only and not control-safe. The latest
+accepted repair avoids total collapse but remains too narrow for real robot use.
 
 ## Memory philosophy
 

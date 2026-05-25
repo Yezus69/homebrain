@@ -32,7 +32,9 @@ Purpose:
 - pose delta supervision
 - place recognition/keyframes later
 
-License must be audited before commercial use.
+Public datasets such as OpenLORIS and TUM RGB-D are allowed for local POC
+training/eval when provenance is recorded. Commercial/product approval and
+derived-data redistribution are separate later questions.
 
 ### Dynamic indoor datasets
 
@@ -89,7 +91,7 @@ Codex may choose a simpler compressed JSON/NPZ format initially, but the format 
 
 ## Current image-sequence ingestion
 
-Goal 2 adds a lean image-folder importer that writes normal HomeBrain route logs:
+The lean image-folder importer writes normal HomeBrain route logs:
 
 ```bash
 python -m homebrain.ingest.image_sequence --frames data/inbox/room_walk/frames --out runs/room_walk_route --camera front_rgb --fps 10
@@ -107,6 +109,7 @@ width/height when consistent and available
 has_imu=false
 has_wheel_odometry=false
 has_commands=false
+owned_or_license_approved=false unless the operator explicitly marks it
 user_owned_or_license_unknown=true
 ```
 
@@ -128,13 +131,17 @@ ffmpeg -i phone_room_walk.mp4 -vf fps=10 data/inbox/room_walk/frames/%06d.jpg
 
 ## Current depth-to-BEV weak labels
 
-Depth Pro artifacts can now be converted into local egocentric BEV arrays under a route-owned geometry directory:
+Depth/point-map teacher artifacts can be converted into local egocentric BEV
+arrays under a route-owned geometry directory:
 
 ```bash
 python -m homebrain.geometry.run_depth_to_bev --log runs/room_walk_001_route_short60 --depth-artifacts runs/room_walk_001_route_short60/teacher_artifacts/depth_pro --camera-config configs/camera/phone_robot_height_guess.json --out runs/room_walk_001_route_short60/geometry/depth_pro_bev
 ```
 
-The camera config is an explicit assumption file, not measured calibration. If principal point or extrinsics are missing, BEV metadata records the assumption. The generated labels are intended for future student training/evaluation only and are always marked `weak_label=true` and `control_safe=false`.
+The camera config is an explicit assumption file, not measured calibration. If
+principal point or extrinsics are missing, BEV metadata records the assumption.
+Generated labels are intended for student training/evaluation and are marked
+`weak_label=true` and `control_safe=false`.
 
 Visualization and validation:
 

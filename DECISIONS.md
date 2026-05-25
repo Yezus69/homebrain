@@ -50,10 +50,14 @@ Reason: Prevent toy demos and context drift.
 
 Status: active.
 
-## D007 — License audit before product dependency
+## D007 - POC use is allowed, product claims wait
 
-Decision: No open model, dataset, or library may be considered production-safe until `LICENSE_AUDIT.md` marks it verified.
+Decision: Public datasets and open-weight/open-source models may be used for
+local proof-of-concept training/eval when provenance and limits are recorded.
+They must not be called product-approved, redistributable, runtime-required, or
+control-safe until later review says so.
 
-Reason: Research licenses often block commercial use.
+Reason: HomeBrain needs to prove the approach before hardware or owned robot
+data exists. Over-blocking local POC work slows the core learning loop.
 
 Status: active.

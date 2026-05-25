@@ -30,7 +30,7 @@ class DatasetUsagePolicy:
 OPENLORIS_USAGE_POLICY = DatasetUsagePolicy(
     dataset_name="OpenLORIS-Scene",
     license_name=OPENLORIS_LICENSE_NAME,
-    license_review_status="poc_allowed_product_pending_human_review",
+    license_review_status="poc_allowed_product_review_later",
     poc_training_eval_allowed=True,
     product_training_approved=False,
     runtime_dependency=False,
@@ -38,9 +38,9 @@ OPENLORIS_USAGE_POLICY = DatasetUsagePolicy(
     attribution_required=True,
     generated_artifacts_gitignored=True,
     notes=(
-        "Allowed for local HomeBrain proof-of-concept training and evaluation only. "
-        "Do not treat OpenLORIS-derived data, checkpoints, reports, or labels as product-approved, "
-        "runtime-required, control-safe, or redistributable derived datasets."
+        "Allowed for local HomeBrain proof-of-concept training and evaluation. "
+        "Do not treat OpenLORIS-derived data, checkpoints, reports, or labels as "
+        "product-approved, runtime-required, control-safe, or redistributable by default."
     ),
 )
 

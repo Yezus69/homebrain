@@ -1,24 +1,33 @@
 # HomeBrain
 
-HomeBrain is a production-directed software stack for an indoor floor-cleaning robot brain.
+HomeBrain is a software-first proof of concept for an indoor floor-cleaning
+robot brain.
 
-The target robot has:
-- RGB camera(s)
-- IR camera later
-- IMU
-- wheel encoders
-- differential-drive motors
-- no lidar
-- no GPS
-- no ultrasonic dependency
+The target robot eventually has RGB camera(s), IR camera, IMU, wheel encoders,
+differential drive, and no lidar/GPS dependency. Hardware integration is later;
+the current value is a replayable system that can ingest indoor data, run
+open-weight teacher models offline, train spatial memory, and score candidate
+cleaning trajectories.
 
-The current phase is software-only. Hardware integration comes later.
+## Current Spine
 
-The first useful system is not a perfect robot. The first useful system is a deterministic log/replay/eval spine that can ingest indoor visual data, run teacher models, train a small spatial-memory student, and produce measurable outputs.
+- `homebrain/messages`: typed event schemas.
+- `homebrain/replay`: deterministic segment logs and replay.
+- `homebrain/eval`: scorecards and closed-loop replay reports.
+- `homebrain/teachers`: offline feature/depth/scene teacher artifacts.
+- `homebrain/geometry`: RGB-D, depth, point-map, and BEV conversion.
+- `homebrain/data` and `homebrain/train`: SpatialTrainPack and student training.
+- `homebrain/brain`: SpatialMemoryNet v0/v1 and replay model outputs.
+- `homebrain/policies`: candidate trajectories, scorers, labels, and audits.
+- `homebrain/tools`: narrow operational probes and validation commands.
 
-Start here:
-1. Read `PROJECT_BRIEF.md`.
-2. Read `AGENTS.md`.
-3. Read `CODEX_GOALS.md`.
-4. Run one Codex goal at a time.
-5. After every goal, inspect or share `CURRENT_STATUS.md`, not the whole codebase.
+## Read This First
+
+1. `PROJECT_BRIEF.md`
+2. `ARCHITECTURE.md`
+3. `CURRENT_STATUS.md`
+4. The relevant module or test for your change
+
+Use `EVALS.md` for current gates and `LICENSE_AUDIT.md` for the local POC data
+policy. Old Codex goal prompts and historical command transcripts were removed;
+they were clutter, not architecture.

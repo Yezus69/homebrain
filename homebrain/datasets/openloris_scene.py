@@ -26,7 +26,7 @@ OPENLORIS_HF_PACKAGE_URL = "https://huggingface.co/datasets/shixuesong/openloris
 OPENLORIS_TOOLS_URL = "https://github.com/lifelong-robotic-vision/openloris-scene-tools"
 OPENLORIS_TOOLS_COMMIT_INSPECTED = "ce6a4839f618bf036d3f3dbae14561bfc7413641"
 OPENLORIS_LICENSE_NAME = "CC BY-ND 4.0"
-OPENLORIS_LICENSE_REVIEW_STATUS = "pending_human_review"
+OPENLORIS_LICENSE_REVIEW_STATUS = "poc_allowed_product_review_later"
 OPENLORIS_DEPTH_SCALE = 1000.0
 
 DEFAULT_MAX_DOWNLOAD_GB = 2.0

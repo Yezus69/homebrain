@@ -10,7 +10,9 @@ Official sources:
 - Code: <https://github.com/ByteDance-Seed/depth-anything-3>
 - Model: <https://huggingface.co/depth-anything/DA3-SMALL>
 
-License status in HomeBrain: `pending_human_review`. Do not treat DA3 code, weights, or outputs as product-runtime approved until `LICENSE_AUDIT.md` is updated by a human reviewer.
+POC status in HomeBrain: offline teacher use is allowed when provenance is
+recorded. Do not treat DA3 code, weights, or outputs as product-runtime or
+control-safety approved.
 
 ### Setup
 
@@ -52,7 +54,7 @@ Real DA3 per-frame artifacts:
 - `extrinsics.npy`: teacher-estimated camera pose/extrinsics.
 - `metadata.json`: provenance, dependency status, calibration metadata, and safety notes.
 
-Route manifest fields include `license_review_status=pending_human_review`, `calibration_class=teacher_estimated`, `scale_source=teacher_relative_not_metric`, `not_robot_frame_truth=true`, and `control_safety=not_control_safe_training_teacher_only`.
+Route manifest fields include provenance/license status, `calibration_class=teacher_estimated`, `scale_source=teacher_relative_not_metric`, `not_robot_frame_truth=true`, and `control_safety=not_control_safe_training_teacher_only`.
 
 ### Self-Calibration QA and Weak BEV
 
@@ -79,7 +81,9 @@ Official sources:
 - License: <https://github.com/apple/ml-depth-pro/blob/main/LICENSE>
 - Paper page: <https://machinelearning.apple.com/research/depth-pro>
 
-License status in HomeBrain: `pending_human_review`. Do not treat Depth Pro code, weights, or outputs as product-runtime approved until `LICENSE_AUDIT.md` is updated by a human reviewer.
+POC status in HomeBrain: offline teacher use is allowed when provenance is
+recorded. Do not treat Depth Pro code, weights, or outputs as product-runtime or
+control-safety approved.
 
 ### Install
 
