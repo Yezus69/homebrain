@@ -1292,3 +1292,71 @@ Goal 16C signal-audit metrics: `next_allowed_use=single_frame_geometry_pretrain_
 plausible single-frame geometry for the visible floor/chair/cord scene, but the
 confidence panel is uniform and there is still no temporal pose or odometry
 evidence.
+
+## Gate 1.13: MoGe vs OpenLORIS robot-frame geometry quality
+
+This gate validates real MoGe against existing OpenLORIS public robot-frame
+RGB-D BEV/SpatialTrainPack labels before any training. It does not train
+SpatialMemoryNet, TrajectoryScorerNet, or any policy/scorer loop.
+
+Comparison command shape:
+```bash
+python -m homebrain.tools.compare_moge_scene_to_spatial_pack --route runs/goal11b_nightly/routes/openloris_cafe1_1_2_route --scene-teacher runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/teacher_artifacts/moge_scene_v0_real --spatial-pack runs/goal11b_nightly/spatial_packs/openloris_cafe1_1_2_spatial_pack --out-json runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/comparison.json --out-md runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/comparison.md --out-viz runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/comparison_review.ppm
+```
+
+Comparison metrics:
+```text
+matched_frame_count
+moge_depth_valid_ratio
+moge_confidence_valid_ratio
+spatial_pack_example_count
+spatial_pack_label_ratios.free_ratio_mean
+spatial_pack_label_ratios.obstacle_ratio_mean
+spatial_pack_label_ratios.unknown_ratio_mean
+moge_projected_proxy_statistics.point_map_valid_ratio
+image_plane_agreement_proxy.median_scaled_abs_rel_median
+image_plane_agreement_proxy.pearson_corr
+projection_blocked_reason
+route_has_robot_frame_truth
+moge_robot_frame_truth=false
+action_supervision_ok=false
+next_allowed_use
+```
+
+Acceptance interpretation:
+- Real non-mock MoGe may become only a local/replay
+  `single_frame_geometry_pretrain_candidate` after matching robot-frame
+  SpatialTrainPack frames and passing structural/proxy checks.
+- MoGe output must stay `moge_robot_frame_truth=false` and
+  `action_supervision_ok=false`; direct BEV conversion is blocked until
+  projection conventions and transforms are validated.
+- Fake or synthetic teacher artifacts may only be `review_only` or `blocked`.
+- OpenLORIS remains local research/replay only, product-training approval
+  pending, and derived data redistribution not approved.
+- This gate is not temporal memory training evidence because single-frame MoGe
+  has no teacher temporal extrinsics, odometry, or point tracks.
+
+Current Goal 17A outcome: real MoGe ran on capped 100-frame subsets of
+OpenLORIS `cafe1-1_2`, `office1-1_7`, and `corridor1-1`. SceneTeacherPack QA
+passed structurally on all three with `frame_count=100`,
+`missing_artifact_count=0`, `artifact_shape_error_count=0`,
+`depth_valid_ratio=1.0`, and `confidence_valid_ratio=1.0`; `pose_valid_ratio`
+and `track_valid_ratio` remained `0.0`. The existing owned-route signal audit
+reported `next_allowed_use=blocked` for each public route due
+`owned_or_license_approved_not_explicit` and `owned_or_license_not_approved`.
+The new comparison gate matched `100` frames per route and reported
+`next_allowed_use=single_frame_geometry_pretrain_candidate` for local/replay
+single-frame geometry review only. Aggregate report:
+`runs/goal17a_moge_openloris_teacher_quality/report.json` and `.md`.
+
+Goal 17A observed comparison metrics:
+```text
+cafe1-1_2: matched=100, free=0.0283203125, obstacle=0.13451171875, unknown=0.83716796875, scaled_abs_rel_median=0.10977157950401306, pearson=0.9340668642288968
+office1-1_7: matched=100, free=0.0283203125, obstacle=0.026240234375, unknown=0.945439453125, scaled_abs_rel_median=0.04044376686215401, pearson=0.8265880400453449
+corridor1-1: matched=100, free=0.0283203125, obstacle=0.040302734375, unknown=0.931376953125, scaled_abs_rel_median=0.06339512765407562, pearson=0.855737141608563
+```
+
+Gate interpretation: proceed only to a local/replay MoGe SpatialTrainPack
+candidate generator for single-frame geometry review. Do not train temporal
+memory, do not use MoGe as robot-frame truth or action supervision, and do not
+make any control-safety or product-training claim.

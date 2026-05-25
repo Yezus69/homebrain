@@ -6,16 +6,20 @@ default read-list.
 
 ## Current objective
 
-Goal 16C completed with the first real MoGe SceneTeacherPack on owned frames.
-The official MoGe checkout is installed from `external/moge`, the probe used the
-operator-allowed default model download path for `Ruicheng/moge-2-vits-normal`,
-and the result is `SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`.
+Goal 17A completed a real MoGe teacher-quality comparison on existing
+OpenLORIS robot-frame routes before training anything. Real MoGe ran on capped
+100-frame subsets of `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; structural
+QA passed, comparison against existing SpatialTrainPack labels matched 100
+frames per route, and the aggregate recommendation is a local/replay-only
+single-frame geometry candidate gate. MoGe is still not robot-frame truth,
+action supervision, temporal-memory evidence, control safe, or product-training
+approved.
 
 ## Last completed goal
 
-Goal 16C: install/expose official MoGe outside HomeBrain source, configure one
-explicit model source, run the existing owned geometry probe, inspect the real
-visual review, and update status/audit docs without HomeBrain source churn.
+Goal 17A: validate real MoGe against existing OpenLORIS robot-frame RGB-D
+SpatialTrainPack labels before training anything, with comparison reports,
+visual review sheets, and aggregate local/replay-only recommendation.
 
 ## Current implementation status
 
@@ -81,10 +85,22 @@ visual review, and update status/audit docs without HomeBrain source churn.
   at `external/moge` and ran `Ruicheng/moge-2-vits-normal` through the existing
   production probe on 20 owned frames. The generated SceneTeacherPack is real,
   non-mock, metric-scale single-frame geometry with no temporal pose evidence.
-- Policy, scorer, and memory-action work was not touched in Goal 16C. The new
-  real MoGe artifact removes the missing-teacher setup blocker, but it does not
-  provide control safety, product-training approval, robot-frame truth, or
-  temporal-memory evidence.
+- Goal 17A added `homebrain.tools.compare_moge_scene_to_spatial_pack`, a narrow
+  MoGe-vs-SpatialTrainPack comparison gate. It computes matched-frame counts,
+  MoGe depth/confidence validity, SpatialTrainPack free/obstacle/unknown
+  ratios, camera-frame point-map proxy statistics, optional RGB-D image-plane
+  depth agreement, and conservative recommendations while preserving
+  `moge_robot_frame_truth=false` and `action_supervision_ok=false`.
+- Goal 17A ran real MoGe on existing OpenLORIS public robot-frame routes and
+  compared the outputs with existing robot-frame SpatialTrainPack labels. The
+  comparison recommends only a local/replay single-frame geometry candidate gate,
+  not direct BEV conversion, temporal memory training, action supervision,
+  control safety, or product training.
+- Policy, scorer, and memory-action work was not touched in Goals 16C or 17A.
+  The real MoGe artifacts remove the missing-teacher setup blocker and now pass
+  a public robot-frame comparison gate for local/replay single-frame review, but
+  they do not provide control safety, product-training approval, robot-frame
+  truth, or temporal-memory evidence.
 - Owned image/video route metadata can now explicitly record
   `owned_or_license_approved`; the audit blocks missing approval, invented
   IMU/odom/command streams, and robot-frame truth claims without measured
@@ -93,6 +109,80 @@ visual review, and update status/audit docs without HomeBrain source churn.
   are separated below them for history.
 
 ## Goal completion log
+
+### 031 - Goal 17A real MoGe on OpenLORIS robot-frame geometry
+
+Objective attempted: validate real MoGe against existing OpenLORIS robot-frame
+routes and existing robot-frame RGB-D SpatialTrainPack labels before training
+anything, without policy/scorer loops, memory-action work, control claims, or
+product-training claims.
+
+Files changed: added `homebrain/tools/compare_moge_scene_to_spatial_pack.py`;
+updated `tests/test_goal15b_scene_teacher_signal.py`, `CURRENT_STATUS.md`,
+`EVALS.md`, `BLOCKERS.md`, and `LICENSE_AUDIT.md`. Generated artifacts were
+written under `runs/goal17a_moge_openloris_teacher_quality/`.
+
+Commands run: required context reads; prerequisite checks for the three
+OpenLORIS route and SpatialTrainPack paths; `python -m py_compile
+homebrain\tools\compare_moge_scene_to_spatial_pack.py`; targeted tests
+`python -m pytest tests\test_goal15b_scene_teacher_signal.py -q`; real MoGe
+runs with `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1` and `--max-frames 100 --device cuda`
+for `openloris_cafe1_1_2_route`, `openloris_office1_1_7_route`, and
+`openloris_corridor1_1_route`; per-route `python -m
+homebrain.teachers.qa_scene_teacher`; per-route `python -m
+homebrain.tools.audit_scene_teacher_signal`; per-route `python -m
+homebrain.tools.compare_moge_scene_to_spatial_pack`; visual-review contact sheet
+generation via `write_visual_review_artifact`; aggregate `python -m
+homebrain.tools.compare_moge_scene_to_spatial_pack --aggregate-from ...`;
+required full verification `python -m pytest -q`.
+
+Pass/fail results: prerequisites existed, so the goal took the success path. Real
+MoGe wrote 100-frame SceneTeacherPacks for all three routes. SceneTeacherPack QA
+passed structurally on all three with `missing_artifact_count=0` and
+`artifact_shape_error_count=0`. The existing owned-route signal audit returned
+`next_allowed_use=blocked` on all three public OpenLORIS routes because
+`owned_or_license_approved` is not explicit in those route metadata files; this
+is a license/provenance gate, not a geometry-shape failure. The new comparison
+tool returned `single_frame_geometry_pretrain_candidate` for all three routes
+while keeping MoGe robot-frame/action flags false. Targeted tests passed with
+`13 passed`; full pytest passed with `103 passed`.
+
+Artifacts created: per-route real MoGe SceneTeacherPacks, QA JSON,
+signal-audit JSON/Markdown, comparison JSON/Markdown, comparison PPM review, and
+scene-teacher visual review under
+`runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/`,
+`runs/goal17a_moge_openloris_teacher_quality/openloris_office1_1_7/`, and
+`runs/goal17a_moge_openloris_teacher_quality/openloris_corridor1_1/`; aggregate
+`runs/goal17a_moge_openloris_teacher_quality/report.json` and `report.md`.
+
+Metrics observed: each route matched `100` MoGe frames to SpatialTrainPack
+examples with `moge_depth_valid_ratio=1.0` and
+`moge_confidence_valid_ratio=1.0`. Matched SpatialTrainPack label means were
+cafe free/obstacle/unknown `0.0283203125 / 0.13451171875 / 0.83716796875`,
+office `0.0283203125 / 0.026240234375 / 0.945439453125`, and corridor
+`0.0283203125 / 0.040302734375 / 0.931376953125`. RGB-D image-plane depth
+proxies were available: median-scaled abs-rel was `0.10977157950401306` for
+cafe, `0.04044376686215401` for office, and `0.06339512765407562` for corridor;
+Pearson correlations were `0.9340668642288968`, `0.8265880400453449`, and
+`0.855737141608563`. QA pose and track validity stayed `0.0`, so this is not
+temporal-memory evidence.
+
+Blockers/risks: no active setup blocker remains. The owned-route signal audit is
+not the public OpenLORIS comparison gate and blocks these routes on missing
+explicit `owned_or_license_approved`; OpenLORIS remains local research/replay
+only with product-training approval pending. Direct robot-frame BEV conversion
+from MoGe remains blocked because MoGe is single-frame camera-frame geometry,
+not robot-frame truth. No SpatialMemoryNet or TrajectoryScorerNet training,
+policy/scorer/memory-action work, ROS/Nav2/Isaac/Habitat/sim, `cmd_vel`, raw
+PWM, control-safety claim, or product-training approval was added.
+
+Recommended next goal: build a narrow local/replay-only MoGe SpatialTrainPack
+candidate generator for single-frame geometry review, using the Goal 17A
+comparison metrics as an input gate and preserving `robot_frame_truth=false`,
+`action_supervision_ok=false`, `control_safe=false`, and
+`product_training_approved=false`; do not begin temporal memory training until
+real teacher temporal extrinsics, point tracks, or route-pose/odom evidence are
+validated for the candidate.
 
 ### 030 - Goal 16C real MoGe SceneTeacherPack on owned frames
 

@@ -2,22 +2,55 @@
 
 ## Active Blockers
 
-None as of Goal 16C. The external MoGe import/model setup blocker was repaired
-in this workspace, and the real owned-frame probe produced
-`SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`.
+None as of Goal 17A. The required OpenLORIS route and SpatialTrainPack
+prerequisites existed, real MoGe ran on all three capped public robot-frame
+routes, structural QA passed, and the comparison gate produced aggregate
+artifacts under `runs/goal17a_moge_openloris_teacher_quality/`.
 
 Residual risks remain, but they are not active setup blockers: MoGe license and
-model provenance still require human review, the artifact has no measured
-camera-to-base transform, no IMU/odom/command streams, no temporal teacher
-extrinsics, no point tracks, uniform confidence, placeholder floor/obstacle
-masks, and no control-safety or product-training approval.
+model provenance still require human review; OpenLORIS remains local
+research/replay only with product-training approval pending; the existing
+owned-route signal audit blocks public OpenLORIS routes on missing explicit
+`owned_or_license_approved`; MoGe is still single-frame camera-frame geometry,
+not robot-frame truth, action supervision, temporal pose/odom evidence, control
+safety, or product-training approval. Direct MoGe-to-robot-frame BEV conversion
+remains blocked until projection conventions and transforms are validated.
 
 ## Historical / Non-active Blockers
 
 The entries below are retained for audit context. They are not the active
 production path. Goal 16C resolved the missing real scene-teacher setup blocker,
-but policy/scorer/memory-action work still requires a separate goal and must not
-claim control safety from this single-frame geometry artifact.
+and Goal 17A validated real MoGe against existing OpenLORIS robot-frame geometry
+for local/replay single-frame review. Policy/scorer/memory-action work still
+requires a separate goal and must not claim control safety from this
+single-frame geometry artifact.
+
+## 2026-05-24 - Goal 17A owned-route signal audit blocked public OpenLORIS routes by design
+
+Exact failure: `python -m homebrain.tools.audit_scene_teacher_signal` returned
+`next_allowed_use=blocked` for the Goal 17A real MoGe SceneTeacherPacks on
+OpenLORIS `cafe1-1_2`, `office1-1_7`, and `corridor1-1`. The hard blockers were
+`owned_or_license_approved_not_explicit` and `owned_or_license_not_approved`.
+
+Likely cause: `audit_scene_teacher_signal` is the owned/approved-route gate from
+Goals 15B/16C. The existing OpenLORIS route metadata records public dataset
+license fields and robot-frame truth semantics, but it does not mark the route
+as owned or product-training approved. Goal 17A intentionally kept OpenLORIS
+local research/replay only and license-pending.
+
+Minimal next repair action: do not rewrite OpenLORIS route metadata to pretend
+ownership. Use the Goal 17A comparison reports for local/replay teacher-quality
+review, and keep any future MoGe SpatialTrainPack candidate marked
+`robot_frame_truth=false`, `action_supervision_ok=false`, `control_safe=false`,
+and `product_training_approved=false`. Product training still needs human/legal
+approval.
+
+Command output summary: real MoGe ran on all three routes with 100 frames each;
+SceneTeacherPack QA passed structurally with zero missing/shape errors; the
+comparison gate matched 100 frames per route and wrote
+`runs/goal17a_moge_openloris_teacher_quality/report.json` with
+`candidate_route_count=3`, `blocked_route_count=0`, and aggregate
+recommendation `proceed_to_local_replay_single_frame_geometry_candidate_gate`.
 
 ## 2026-05-24 - Goal 16B real MoGe probe blocked by missing MoGe import/model setup
 

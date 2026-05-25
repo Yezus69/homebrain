@@ -361,3 +361,29 @@ or add product-runtime requirements.
   placeholder floor/obstacle masks. It is usable only as review-gated
   single-frame geometry pretraining evidence until deeper audit and human/legal
   approval.
+
+## Goal 17A dependency update
+
+Goal 17A did not add external dependencies, install new packages, download new
+datasets, train models, run policies, or add product-runtime requirements.
+
+- MoGe code/checkpoint provenance reused the Goal 16C setup:
+  `external/moge` at commit `07444410f1e33f402353b99d6ccd26bd31e469e8` and
+  Hugging Face model `Ruicheng/moge-2-vits-normal` revision
+  `679230677b4d282c6f304189a93e98e14f085902`.
+- Model-source configuration reused the explicitly allowed Goal 16C setting
+  `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`. No new model id or checkpoint source was
+  introduced.
+- Public data reused existing local OpenLORIS-Scene routes and
+  SpatialTrainPacks under `runs/goal11b_nightly/`; no redownload was performed.
+- OpenLORIS license/status remains `CC BY-ND 4.0` observed, local
+  research/replay only, product-training approval pending, runtime dependency
+  false, and derived dataset redistribution not approved.
+- Goal 17A generated real MoGe SceneTeacherPacks, QA reports, comparison reports,
+  and contact sheets under `runs/goal17a_moge_openloris_teacher_quality/`.
+- Safety/license status remains `control_safe=false`,
+  `product_training_approved=false`, `moge_robot_frame_truth=false`,
+  `action_supervision_ok=false`, and `license_review_status=pending_human_review`.
+- Risk: the comparison supports only a local/replay single-frame geometry
+  candidate gate. MoGe is not robot-frame truth, action supervision, temporal
+  memory evidence, control-safety evidence, or product-training-approved data.

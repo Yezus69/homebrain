@@ -23,6 +23,10 @@ from homebrain.teachers.scene_teacher import (
     write_scene_teacher_json,
 )
 from homebrain.tools.audit_scene_teacher_signal import audit_scene_teacher_signal
+from homebrain.tools.compare_moge_scene_to_spatial_pack import (
+    compare_moge_scene_to_spatial_pack,
+    write_aggregate_report,
+)
 from homebrain.tools.run_owned_geometry_probe import (
     STATUS_BLOCKED_MISSING_TEACHER_SETUP,
     STATUS_REVIEW_ONLY_NOT_TRAINABLE,
@@ -87,6 +91,42 @@ def _owned_frame_route(root: Path, *, frame_count: int = 4) -> Path:
     return route
 
 
+def _robot_frame_route(root: Path, *, frame_count: int = 4) -> Path:
+    route = _owned_frame_route(root, frame_count=frame_count)
+    write_route_metadata(
+        route,
+        {
+            "schema_version": ROUTE_SOURCE_SCHEMA_VERSION,
+            "source_type": "openloris_scene",
+            "source_path": route.as_posix(),
+            "frame_count": frame_count,
+            "imported_frame_count": frame_count,
+            "has_rgb": True,
+            "has_intrinsics": True,
+            "has_depth": True,
+            "has_imu": True,
+            "has_wheel_odometry": False,
+            "has_odometry": True,
+            "has_groundtruth_pose": True,
+            "has_commands": False,
+            "has_camera_to_base_transform": True,
+            "has_robot_base_pose": False,
+            "extrinsics_source": "openloris_static_tf",
+            "owned_or_license_approved": True,
+            "user_owned_or_license_unknown": False,
+            "robot_frame_truth": True,
+            "robot_frame_truth_candidate": True,
+            "control_safe": False,
+            "license_name": "CC BY-ND 4.0",
+            "license_review_status": "pending_human_review",
+            "sequence": "unit_openloris",
+            "scene": "unit",
+            "missing_sensor_notices": [],
+        },
+    )
+    return route
+
+
 def _owned_probe_frames(root: Path, *, frame_count: int = 4) -> Path:
     frames = root / "probe_frames"
     frames.mkdir(parents=True)
@@ -100,6 +140,77 @@ def _owned_probe_frames(root: Path, *, frame_count: int = 4) -> Path:
             handle.write(b"P6\n4 3\n255\n")
             handle.write(pixels.tobytes(order="C"))
     return frames
+
+
+def _spatial_pack_fixture(root: Path, *, frame_count: int = 4, robot_frame_truth: bool = True) -> Path:
+    pack = root / "spatial_pack"
+    examples_dir = pack / "examples"
+    examples_dir.mkdir(parents=True)
+    examples = []
+    for frame_id in range(frame_count):
+        free = np.zeros((4, 4), dtype=np.float32)
+        obstacle = np.zeros((4, 4), dtype=np.float32)
+        unknown = np.ones((4, 4), dtype=np.float32)
+        free[:2, :] = 1.0
+        obstacle[3, :2] = 1.0
+        unknown[free > 0.5] = 0.0
+        unknown[obstacle > 0.5] = 0.0
+        example_path = f"examples/d400_color_{frame_id:06d}.npz"
+        np.savez(
+            pack / example_path,
+            frame_id=np.asarray(frame_id),
+            bev_free=free,
+            bev_obstacle=obstacle,
+            bev_unknown=unknown,
+            bev_confidence=np.ones((4, 4), dtype=np.float32),
+            robot_frame_truth=np.asarray(robot_frame_truth),
+            control_safe=np.asarray(False),
+        )
+        examples.append(
+            {
+                "frame_id": frame_id,
+                "example_path": example_path,
+                "robot_frame_truth": robot_frame_truth,
+                "robot_frame_truth_candidate": robot_frame_truth,
+                "control_safe": False,
+                "weak_label": True,
+                "source_bev_stats": {
+                    "free_ratio": float(free.mean()),
+                    "obstacle_ratio": float(obstacle.mean()),
+                    "unknown_ratio": float(unknown.mean()),
+                    "confidence_mean": 1.0,
+                },
+            }
+        )
+    write_scene_teacher_json(
+        pack / "manifest.json",
+        {
+            "schema_version": "homebrain.spatial_dataset.v0",
+            "example_count": frame_count,
+            "dataset_frame_type": "public_robot_mounted",
+            "control_safe": False,
+            "examples": examples,
+        },
+    )
+    return pack
+
+
+def _mark_scene_teacher_real_like(scene: Path) -> None:
+    manifest = load_scene_teacher_manifest(scene)
+    manifest.update(
+        {
+            "backend": "real",
+            "mock": False,
+            "synthetic": False,
+            "real_perception": True,
+            "scale_status": "metric",
+            "robot_frame_truth": False,
+            "action_supervision_ok": False,
+        }
+    )
+    for frame in manifest["frames"]:
+        frame["scale_status"] = "metric"
+    write_scene_teacher_json(scene / "scene_teacher_manifest.json", manifest)
 
 
 def _assert_no_motion_or_training_claims(root: Path) -> None:
@@ -529,6 +640,118 @@ def test_signal_audit_promotes_temporal_memory_only_with_pose_evidence(tmp_path:
     assert report["single_frame_geometry_pretrain_candidate"] is True
     assert report["temporal_memory_pretrain_candidate"] is True
     assert report["temporal_memory_evidence"]["teacher_temporal_extrinsics"] is True
+
+
+def test_goal17a_compare_missing_route_or_spatial_pack_writes_clear_blocker(tmp_path: Path) -> None:
+    route = _robot_frame_route(tmp_path)
+    scene = tmp_path / "scene_moge_fake"
+    run_moge_scene_teacher(route, scene, backend_name="fake")
+
+    report = compare_moge_scene_to_spatial_pack(
+        route_dir=tmp_path / "missing_route",
+        scene_teacher_dir=scene,
+        spatial_pack_dir=tmp_path / "missing_spatial_pack",
+        out_json=tmp_path / "compare_missing.json",
+        out_md=tmp_path / "compare_missing.md",
+        out_viz=tmp_path / "compare_missing.ppm",
+    )
+
+    assert report["next_allowed_use"] == "blocked"
+    assert "missing_route:" in " ".join(report["hard_blockers"])
+    assert "missing_spatial_pack:" in " ".join(report["hard_blockers"])
+    assert report["moge_robot_frame_truth"] is False
+    assert report["action_supervision_ok"] is False
+
+
+def test_goal17a_compare_fake_scene_teacher_is_never_promoted(tmp_path: Path) -> None:
+    route = _robot_frame_route(tmp_path)
+    scene = tmp_path / "scene_moge_fake"
+    spatial_pack = _spatial_pack_fixture(tmp_path)
+    run_moge_scene_teacher(route, scene, backend_name="fake")
+
+    report = compare_moge_scene_to_spatial_pack(
+        route_dir=route,
+        scene_teacher_dir=scene,
+        spatial_pack_dir=spatial_pack,
+        out_json=tmp_path / "compare_fake.json",
+        out_md=tmp_path / "compare_fake.md",
+        out_viz=tmp_path / "compare_fake.ppm",
+    )
+
+    assert report["matched_frame_count"] == 4
+    assert report["route_has_robot_frame_truth"] is True
+    assert report["scene_teacher"]["mock_or_synthetic"] is True
+    assert report["next_allowed_use"] == "review_only"
+    assert report["moge_robot_frame_truth"] is False
+    assert report["action_supervision_ok"] is False
+    assert (tmp_path / "compare_fake.ppm").exists()
+
+
+def test_goal17a_compare_preserves_moge_not_robot_frame_truth(tmp_path: Path) -> None:
+    route = _robot_frame_route(tmp_path)
+    scene = tmp_path / "scene_moge_real_like"
+    spatial_pack = _spatial_pack_fixture(tmp_path)
+    run_moge_scene_teacher(route, scene, backend_name="fake")
+    _mark_scene_teacher_real_like(scene)
+
+    report = compare_moge_scene_to_spatial_pack(
+        route_dir=route,
+        scene_teacher_dir=scene,
+        spatial_pack_dir=spatial_pack,
+        out_json=tmp_path / "compare_real_like.json",
+        out_md=tmp_path / "compare_real_like.md",
+        out_viz=tmp_path / "compare_real_like.ppm",
+    )
+
+    assert report["next_allowed_use"] == "single_frame_geometry_pretrain_candidate"
+    assert report["scene_teacher"]["moge_robot_frame_truth"] is False
+    assert report["moge_robot_frame_truth"] is False
+    assert report["action_supervision_ok"] is False
+    assert report["scene_teacher"]["direct_bev_conversion_attempted"] is False
+    assert "single-frame MoGe" in report["scene_teacher"]["projection_blocked_reason"]
+    _assert_no_motion_or_training_claims(tmp_path)
+
+
+def test_goal17a_aggregate_report_handles_partial_route_success_failure(tmp_path: Path) -> None:
+    candidate = {
+        "inputs": {"route": "route_a"},
+        "route": {"sequence": "route_a", "scene": "unit"},
+        "scene_teacher": {"backend": "real", "real_perception": True},
+        "qa_summary": {"structural_pass": True},
+        "matched_frame_count": 4,
+        "moge_depth_valid_ratio": 1.0,
+        "moge_confidence_valid_ratio": 1.0,
+        "route_has_robot_frame_truth": True,
+        "next_allowed_use": "single_frame_geometry_pretrain_candidate",
+        "hard_blockers": [],
+    }
+    blocked = {
+        "inputs": {"route": "route_b"},
+        "route": {"sequence": "route_b", "scene": "unit"},
+        "scene_teacher": {"backend": "real", "real_perception": True},
+        "qa_summary": {"structural_pass": False},
+        "matched_frame_count": 0,
+        "moge_depth_valid_ratio": 0.0,
+        "moge_confidence_valid_ratio": 0.0,
+        "route_has_robot_frame_truth": False,
+        "next_allowed_use": "blocked",
+        "hard_blockers": ["missing_spatial_pack"],
+    }
+
+    aggregate = write_aggregate_report(
+        comparison_reports=[candidate, blocked],
+        out_json=tmp_path / "report.json",
+        out_md=tmp_path / "report.md",
+    )
+
+    assert aggregate["route_count"] == 2
+    assert aggregate["candidate_route_count"] == 1
+    assert aggregate["blocked_route_count"] == 1
+    assert aggregate["partial_route_success_or_failure"] is True
+    assert aggregate["did_real_moge_run_on_public_robot_frame_routes"] is True
+    assert aggregate["did_qa_pass_structurally"] is False
+    assert aggregate["aggregate_recommendation"] == "partial_success_review_blocked_routes_before_candidate"
+    _assert_no_motion_or_training_claims(tmp_path)
 
 
 def test_real_moge_backend_fails_clearly_without_local_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
