@@ -6,19 +6,20 @@ default read-list.
 
 ## Current objective
 
-Goal 19A completed an architecture contraction pass around the HomeBrain core
-spine. Reused artifact IO, spatial example loading, and deterministic
-visualization helpers now live in small shared modules, while the Goal 16A/17A/18A
-probe and MoGe audit CLIs keep their existing behavior with less local helper
-duplication. No training, MoGe SpatialTrainPack generator, simulator, ROS/Nav2
-integration, new dependency, `cmd_vel`, raw PWM, or product/control-safety claim
-was added.
+Goal 20A completed the first closed-loop replay brain path. SpatialMemoryNet v1
+modeld/replay now emits replay-only candidate trajectory decisions from v1 memory
+or current BEV, optional learned trajectory scorer checkpoints are supported, and
+closed-loop replay reports summarize coverage/risk/unknown/uncertainty metrics.
+The first real OpenLORIS cafe route run produced non-empty decisions, but selected
+actions collapsed to one candidate and memory-BEV selections did not differ from
+current-BEV selections. No hardware execution, `cmd_vel`, raw PWM, new training,
+MoGe SpatialTrainPack generation, or product/control-safety claim was added.
 
 ## Last completed goal
 
-Goal 19A: architecture cleanup and core-boundary documentation, with shared
-artifact IO, SpatialTrainPack loading, and visualization helpers extracted from
-large goal/audit tools while preserving MoGe review-only behavior.
+Goal 20A: first closed-loop HomeBrain replay path, wiring SpatialMemoryNet v1
+memory/current BEV through candidate trajectory scoring inside BrainOutputEvents
+and route-level closed-loop replay reporting.
 
 ## Current implementation status
 
@@ -29,6 +30,18 @@ large goal/audit tools while preserving MoGe review-only behavior.
   added, no raw PWM is emitted, and current policy artifacts keep
   `replay_only=true`, `not_executed=true`, `control_safe=false`, and
   `product_training_approved=false`.
+- Goal 20A added `homebrain.policies.runtime_decision` as the reusable replay
+  trajectory decision helper. SpatialMemoryNet v1 modeld/replay now defaults to
+  `--v1-policy-bev-source memory`, allows `current`, emits
+  `candidate_trajectories`, `selected_trajectory_id`, coverage memory debug,
+  policy BEV source, and trajectory scoring debug, and still keeps
+  `cmd_vel=None`, `replay_only=true`, `not_executed=true`, and
+  `control_safe=false`.
+- Goal 20A added `homebrain.eval.closed_loop_replay_report`. The first real
+  OpenLORIS cafe replay under `runs/goal20a_closed_loop_replay/` produced
+  `1200` memory-BEV decisions with `9` candidates per frame and zero `cmd_vel`,
+  but all selected `arc_right_medium`; memory/current selections matched on all
+  `1200` compared frames.
 - SpatialMemoryNet v1 has explicit persistent BEV memory, route-pose/odom warp
   defaults, conservative update masks, hard validation, and true route-out folds.
   Goal 12C showed useful memory in spatial eval, but not control-safe behavior.
@@ -130,6 +143,94 @@ large goal/audit tools while preserving MoGe review-only behavior.
   are separated below them for history.
 
 ## Goal completion log
+
+### 034 - Goal 20A first closed-loop replay brain path
+
+Objective attempted: wire SpatialMemoryNet v1 replay/modeld output into
+deterministic replay-only candidate trajectory decisions, local BEV artifacts,
+coverage/risk/unknown/uncertainty debug, selected trajectory IDs, and route-level
+closed-loop eval reports. No hardware execution, `cmd_vel`, raw PWM, new open
+model wrapper, SpatialMemoryNet training, trajectory scorer training, MoGe
+SpatialTrainPack generation, MoGe robot-frame truth, or product/control-safety
+claim was added.
+
+Files changed: added `homebrain/policies/runtime_decision.py`,
+`homebrain/eval/closed_loop_replay_report.py`, and
+`tests/test_goal20a_closed_loop_replay.py`; updated `homebrain/brain/modeld.py`,
+`homebrain/replay/replayd.py`, and `homebrain/teachers/__init__.py`. The
+teachers package change lazy-loads scene-teacher exports to avoid an import cycle
+that appeared when the new Goal 20A test was run in isolation.
+
+Commands run: required first reads; focused search with `rg`; compile
+`python -m py_compile homebrain\policies\runtime_decision.py
+homebrain\brain\modeld.py homebrain\replay\replayd.py
+homebrain\eval\closed_loop_replay_report.py tests\test_goal20a_closed_loop_replay.py`;
+focused tests `python -m pytest tests\test_goal20a_closed_loop_replay.py -q`;
+affected tests `python -m pytest tests\test_goal11a_trajectory_scorer_v0.py
+tests\test_goal12a_spatial_memory_v1.py tests\test_eval.py -q`; real replay
+`python -m homebrain.replay.replayd --log
+runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --checkpoint
+runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start\checkpoint.pt
+--features
+runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino
+--trajectory-scorer-checkpoint runs\goal14_trajectory_scorer_v1\checkpoint.pt
+--out runs\goal20a_closed_loop_replay\memory_replay --device cuda
+--v1-policy-bev-source memory`; current-BEV comparison modeld command with the
+same artifacts and `--v1-policy-bev-source current`; closed-loop report
+`python -m homebrain.eval.closed_loop_replay_report --log
+runs\goal20a_closed_loop_replay\memory_replay --compare-log
+runs\goal20a_closed_loop_replay\current_modeld --out-json
+runs\goal20a_closed_loop_replay\report.json --out-md
+runs\goal20a_closed_loop_replay\report.md`; legacy replay eval
+`python -m homebrain.eval.run_eval --log
+runs\goal20a_closed_loop_replay\memory_replay --out
+runs\goal20a_closed_loop_replay\replay_eval.json`; full verification
+`python -m pytest`; hygiene `git diff --check`.
+
+Pass/fail results: py_compile passed. Focused Goal 20A tests passed with
+`3 passed`. Affected legacy trajectory/v1/eval tests passed with `15 passed`.
+The real OpenLORIS replay, current-BEV comparison run, closed-loop report, and
+legacy replay eval all completed. Full pytest passed with `112 passed`.
+`git diff --check` passed; Git reported CRLF working-tree warnings only.
+
+Artifacts created: `runs/goal20a_closed_loop_replay/memory_replay/` with the
+route-level replay and SpatialMemoryNet v1 BrainOutputEvents;
+`runs/goal20a_closed_loop_replay/current_modeld/` for current-BEV comparison;
+`runs/goal20a_closed_loop_replay/report.json`;
+`runs/goal20a_closed_loop_replay/report.md`; and
+`runs/goal20a_closed_loop_replay/replay_eval.json`.
+
+Metrics observed: closed-loop report on OpenLORIS `openloris_cafe1_1_2_route`
+reported `frame_count=1200`, `brain_output_count=1200`,
+`decision_count=1200`, `candidate_count=9`,
+`selected_candidate_distribution={"arc_right_medium": 1200}`,
+`selected_candidate_entropy=0.0`, `stop_selected_fraction=0.0`,
+`risky_candidate_fraction_mean=0.00712962962962963`,
+`selected_risk_score_mean=0.021100471666666665`,
+`selected_unknown_penalty_mean=0.5797190008333333`,
+`selected_uncertainty_penalty_mean=0.00022952083333333337`,
+`selected_coverage_gain_mean=15.310833333333333`,
+`coverage_memory_cells_seen=620`, `coverage_memory_cells_covered=40`,
+`pose_warp_valid_fraction=0.9991666666666666`, `policy_bev_source=memory`,
+`cmd_vel_non_null_count=0`, `control_safe=false`, and `replay_only=true`.
+Current-vs-memory comparison matched `1200` decisions and found `0` selected
+candidate differences. Legacy replay eval reported `frame_count=1200`,
+`event_ordering_error_count=0`, `replay_determinism_pass=true`, and
+`image_load_error_count=0`; its `brain_output_count=2400` reflects the old dummy
+eval replaying an already modeld-populated log, so the Goal 20A report is the
+authoritative closed-loop decision count.
+
+Blockers/risks: no active setup blocker was added. The product/control blocker
+is now policy quality: selected actions collapsed completely to
+`arc_right_medium`, and memory-BEV decisions did not differ from current-BEV
+decisions on the tested route. The Goal 14 scorer is still replay/eval only and
+not control-safe. All artifacts remain `control_safe=false`,
+`not_executed=true`, `replay_only=true`, and `cmd_vel=None`.
+
+Recommended next goal: diagnose the closed-loop action collapse in the runtime
+decision path by comparing learned scorer logits, transparent risk/coverage
+scores, candidate feature scaling, and v1 current/memory BEV deltas across
+multiple routes; keep it replay-only and do not add control execution.
 
 ### 033 - Goal 19A architecture cleanup and core-boundary contraction
 

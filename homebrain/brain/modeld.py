@@ -19,18 +19,18 @@ from homebrain.data.spatial_dataset import write_deterministic_npz
 from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, OdomEvent, PoseEvent, event_identity
 from homebrain.policies.candidate_trajectories import generate_default_candidates
 from homebrain.policies.trajectory_scorer import CoverageMemory, LocalBev
-from homebrain.policies.trajectory_scorer_net_v0 import (
-    TRAJECTORY_SCORER_V0_SOURCE,
-    candidate_score_records,
-    load_trajectory_scorer_checkpoint,
-    score_local_bev_with_model,
-    scorer_checkpoint_hash,
+from homebrain.policies.runtime_decision import (
+    RuntimeTrajectoryScorer,
+    decide_trajectory,
+    load_runtime_trajectory_scorer,
+    metadata_float,
 )
 from homebrain.replay.segment_log import load_manifest, read_events, write_segment
 from homebrain.train.spatial_dataset import BEV_OUTPUT_CHANNELS, DINOFeatureStore
 
 DUMMY_MODELD_SOURCE = "modeld_dummy_v0"
 V1_POSE_WARP_SOURCES = ("route_pose", "predicted_pose", "none")
+V1_POLICY_BEV_SOURCES = ("current", "memory")
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,7 @@ def replay_events_with_spatial_model(
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
+    v1_policy_bev_source: str = "memory",
 ) -> tuple[list[Event], list[str]]:
     ordered_events = list(events)
     outputs, artifacts = spatial_model_outputs(
@@ -112,6 +113,7 @@ def replay_events_with_spatial_model(
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
+        v1_policy_bev_source=v1_policy_bev_source,
     )
     by_identity = {event.input_event_ids[0]: event for event in outputs}
     replayed: list[Event] = []
@@ -145,6 +147,7 @@ def write_spatial_model_outputs(
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
+    v1_policy_bev_source: str = "memory",
 ) -> None:
     manifest = load_manifest(log_dir)
     events = read_events(log_dir)
@@ -157,6 +160,7 @@ def write_spatial_model_outputs(
         trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
+        v1_policy_bev_source=v1_policy_bev_source,
     )
     suffix = "spatial-v1-model" if outputs and outputs[0].source == SPATIAL_MEMORY_V1_SOURCE else "spatial-v0-model"
     write_segment(
@@ -177,17 +181,18 @@ def spatial_model_outputs(
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
+    v1_policy_bev_source: str = "memory",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
-        if trajectory_scorer_checkpoint is not None:
-            raise ValueError("trajectory scorer integration is currently only supported for SpatialMemoryNet v0")
         return _spatial_v1_model_outputs(
             events,
             out_dir=out_dir,
             checkpoint=checkpoint,
             feature_dir=feature_dir,
+            trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
             device_name=device_name,
             pose_warp_source=v1_pose_warp_source,
+            policy_bev_source=v1_policy_bev_source,
         )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -198,21 +203,13 @@ def spatial_model_outputs(
     if not isinstance(resolved_feature_dir, (str, Path)):
         raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
     feature_store = DINOFeatureStore(resolved_feature_dir)
-    trajectory_scorer: torch.nn.Module | None = None
-    trajectory_scorer_metadata: dict[str, object] = {}
+    trajectory_scorer: RuntimeTrajectoryScorer | None = None
     trajectory_candidates = None
     trajectory_coverage: CoverageMemory | None = None
     if trajectory_scorer_checkpoint is not None:
-        trajectory_scorer, trajectory_payload = load_trajectory_scorer_checkpoint(
-            trajectory_scorer_checkpoint,
-            map_location=device,
-        )
-        trajectory_scorer.to(device)
-        trajectory_scorer_metadata = (
-            trajectory_payload.get("metadata") if isinstance(trajectory_payload.get("metadata"), dict) else {}
-        )
-        meters_per_cell = _metadata_float(trajectory_scorer_metadata, "meters_per_cell", 0.05)
-        robot_radius_m = _metadata_float(trajectory_scorer_metadata, "robot_radius_m", 0.18)
+        trajectory_scorer = load_runtime_trajectory_scorer(trajectory_scorer_checkpoint, device=device)
+        meters_per_cell = metadata_float(trajectory_scorer.metadata, "meters_per_cell", 0.05)
+        robot_radius_m = metadata_float(trajectory_scorer.metadata, "robot_radius_m", 0.18)
         trajectory_candidates = generate_default_candidates(
             grid_shape=model.config.bev_shape,
             meters_per_cell=meters_per_cell,
@@ -233,10 +230,6 @@ def spatial_model_outputs(
             checkpoint=Path(checkpoint),
             feature_dir=Path(resolved_feature_dir),
             trajectory_scorer=trajectory_scorer,
-            trajectory_scorer_checkpoint=Path(trajectory_scorer_checkpoint)
-            if trajectory_scorer_checkpoint is not None
-            else None,
-            trajectory_scorer_metadata=trajectory_scorer_metadata,
             trajectory_candidates=trajectory_candidates,
             trajectory_coverage=trajectory_coverage,
             start_timestamp_ns=start_timestamp_ns,
@@ -253,11 +246,15 @@ def _spatial_v1_model_outputs(
     out_dir: str | Path,
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
+    trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     pose_warp_source: str = "route_pose",
+    policy_bev_source: str = "memory",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if pose_warp_source not in V1_POSE_WARP_SOURCES:
         raise ValueError(f"v1_pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
+    if policy_bev_source not in V1_POLICY_BEV_SOURCES:
+        raise ValueError(f"v1_policy_bev_source must be one of {V1_POLICY_BEV_SOURCES}")
     ordered_events = list(events)
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_v1_checkpoint(checkpoint, map_location=device)
@@ -272,6 +269,20 @@ def _spatial_v1_model_outputs(
     start_timestamp_ns = min((frame.timestamp_ns for frame in frames), default=0)
     brain_outputs: list[BrainOutputEvent] = []
     artifact_files: list[str] = []
+    trajectory_scorer = (
+        load_runtime_trajectory_scorer(trajectory_scorer_checkpoint, device=device)
+        if trajectory_scorer_checkpoint is not None
+        else None
+    )
+    trajectory_metadata = trajectory_scorer.metadata if trajectory_scorer is not None else metadata
+    meters_per_cell = metadata_float(trajectory_metadata, "meters_per_cell", metadata_float(metadata, "meters_per_cell", 0.05))
+    robot_radius_m = metadata_float(trajectory_metadata, "robot_radius_m", metadata_float(metadata, "robot_radius_m", 0.18))
+    trajectory_candidates = generate_default_candidates(
+        grid_shape=model.config.bev_shape,
+        meters_per_cell=meters_per_cell,
+        robot_radius_m=robot_radius_m,
+    )
+    trajectory_coverage = CoverageMemory(model.config.bev_shape, meters_per_cell=meters_per_cell)
     state: SpatialMemoryState | None = None
     previous_predicted_pose_delta: torch.Tensor | None = None
     previous_sequence_camera: tuple[str, str] | None = None
@@ -279,6 +290,8 @@ def _spatial_v1_model_outputs(
     for frame in frames:
         current_key = (frame.sequence_id, frame.camera_id)
         reset = previous_sequence_camera is None or current_key != previous_sequence_camera
+        if reset:
+            trajectory_coverage = CoverageMemory(model.config.bev_shape, meters_per_cell=meters_per_cell)
         selected_pose_delta: torch.Tensor | None = None
         selected_pose_source = pose_warp_source
         route_pose_available = False
@@ -313,6 +326,10 @@ def _spatial_v1_model_outputs(
             predicted_pose_warp_ablation=pose_warp_source == "predicted_pose",
             reset_memory=reset,
             state=None if reset else state,
+            trajectory_scorer=trajectory_scorer,
+            trajectory_candidates=trajectory_candidates,
+            trajectory_coverage=trajectory_coverage,
+            policy_bev_source=policy_bev_source,
             device=device,
         )
         previous_predicted_pose_delta = previous_pose_delta
@@ -330,9 +347,7 @@ def _spatial_output_for_frame(
     output_root: Path,
     checkpoint: Path,
     feature_dir: Path,
-    trajectory_scorer: torch.nn.Module | None,
-    trajectory_scorer_checkpoint: Path | None,
-    trajectory_scorer_metadata: dict[str, object],
+    trajectory_scorer: RuntimeTrajectoryScorer | None,
     trajectory_candidates: list | None,
     trajectory_coverage: CoverageMemory | None,
     start_timestamp_ns: int,
@@ -383,41 +398,20 @@ def _spatial_output_for_frame(
         "trajectory_scoring": False,
     }
     if trajectory_scorer is not None:
-        if trajectory_candidates is None or trajectory_coverage is None or trajectory_scorer_checkpoint is None:
+        if trajectory_candidates is None or trajectory_coverage is None:
             raise ValueError("trajectory scorer runtime is incomplete")
-        trajectory_coverage.align_with_pose_delta(pose_delta)
-        trajectory_logits, selected_trajectory_id, trajectory_features = score_local_bev_with_model(
-            model=trajectory_scorer,  # type: ignore[arg-type]
+        decision = decide_trajectory(
             bev=local_bev,
             candidates=trajectory_candidates,
             coverage_memory=trajectory_coverage,
-            device=device,
+            pose_delta=pose_delta,  # type: ignore[arg-type]
+            learned_scorer=trajectory_scorer,
+            policy_bev_source="model",
         )
-        trajectory_coverage.update_current_frame(local_bev)
-        arrays["trajectory_logits"] = trajectory_logits.astype(np.float32)
-        arrays["trajectory_selected_index"] = np.asarray(
-            [next(index for index, candidate in enumerate(trajectory_candidates) if candidate.id == selected_trajectory_id)],
-            dtype=np.int64,
-        )
-        candidate_trajectories = candidate_score_records(
-            candidates=trajectory_candidates,
-            logits=trajectory_logits,
-            candidate_features=trajectory_features,
-            selected_candidate_id=selected_trajectory_id,
-        )
-        trajectory_debug = {
-            "trajectory_scoring": True,
-            "trajectory_scorer": TRAJECTORY_SCORER_V0_SOURCE,
-            "trajectory_scorer_checkpoint": trajectory_scorer_checkpoint.as_posix(),
-            "trajectory_scorer_checkpoint_sha256": scorer_checkpoint_hash(trajectory_scorer_checkpoint),
-            "trajectory_scorer_metadata": trajectory_scorer_metadata,
-            "selected_candidate_id": selected_trajectory_id,
-            "coverage_memory": trajectory_coverage.to_dict(),
-            "replay_only": True,
-            "not_executed": True,
-            "control_safe": False,
-            "product_training_approved": False,
-        }
+        arrays.update(decision.artifact_arrays)
+        candidate_trajectories = decision.candidate_trajectories
+        selected_trajectory_id = decision.selected_candidate_id
+        trajectory_debug = decision.debug
     write_deterministic_npz(artifact_path, arrays)
     input_id = event_identity(frame)
     return (
@@ -473,6 +467,10 @@ def _spatial_v1_output_for_frame(
     predicted_pose_warp_ablation: bool,
     reset_memory: bool,
     state: SpatialMemoryState | None,
+    trajectory_scorer: RuntimeTrajectoryScorer | None,
+    trajectory_candidates: list,
+    trajectory_coverage: CoverageMemory,
+    policy_bev_source: str,
     device: torch.device,
 ) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor]:
     patch_features, _cls_feature = feature_store.load_for_frame(frame)
@@ -540,6 +538,32 @@ def _spatial_v1_output_for_frame(
         "update_mask_coverage": np.asarray([update_mask_coverage], dtype=np.float32),
         "memory_overwrite_fraction": np.asarray([memory_overwrite_fraction], dtype=np.float32),
     }
+    policy_probabilities = memory_probabilities if policy_bev_source == "memory" else current_probabilities
+    local_bev = LocalBev(
+        free=policy_probabilities[0].astype(np.float32),
+        occupied=policy_probabilities[1].astype(np.float32),
+        unknown=policy_probabilities[2].astype(np.float32),
+        traversable=policy_probabilities[3].astype(np.float32),
+        risky=policy_probabilities[4].astype(np.float32),
+        confidence=(np.float32(1.0) - uncertainty_grid).astype(np.float32),
+        uncertainty=uncertainty_grid,
+        source=f"v1_{policy_bev_source}_bev",
+    )
+    coverage_pose_delta = (
+        tuple(float(value) for value in pose_delta_to_current.detach().cpu().numpy())
+        if pose_delta_to_current is not None
+        else None
+    )
+    decision = decide_trajectory(
+        bev=local_bev,
+        candidates=trajectory_candidates,
+        coverage_memory=trajectory_coverage,
+        pose_delta=coverage_pose_delta,  # type: ignore[arg-type]
+        learned_scorer=trajectory_scorer,
+        policy_bev_source=policy_bev_source,
+        coverage_memory_reset=reset_memory,
+    )
+    arrays.update(decision.artifact_arrays)
     write_deterministic_npz(artifact_path, arrays)
     input_id = event_identity(frame)
     return (
@@ -551,11 +575,11 @@ def _spatial_v1_output_for_frame(
             pose_delta=pose_delta,  # type: ignore[arg-type]
             pose_confidence=max(0.0, min(1.0, 1.0 - uncertainty_scalar)),
             local_bev_ref=relative_artifact,
-            candidate_trajectories=None,
-            selected_trajectory_id=None,
+            candidate_trajectories=decision.candidate_trajectories,
+            selected_trajectory_id=decision.selected_candidate_id,
             cmd_vel=None,
             uncertainty=uncertainty_scalar,
-            stop_reason="spatial_memory_v1_representation_pretraining_only_no_control",
+            stop_reason="spatial_memory_v1_replay_only_trajectory_decision_not_executed",
             debug={
                 "mock": False,
                 "model": SPATIAL_MEMORY_V1_SOURCE,
@@ -584,6 +608,7 @@ def _spatial_v1_output_for_frame(
                 "product_training_approved": False,
                 "cmd_vel_emitted": False,
                 "input_frame_id": frame.frame_id,
+                **decision.debug,
             },
         ),
         relative_artifact,
@@ -684,15 +709,6 @@ def _checkpoint_model_name(checkpoint: str | Path) -> str:
     return str(value) if isinstance(value, str) else ""
 
 
-def _metadata_float(metadata: dict[str, object], key: str, default: float) -> float:
-    value = metadata.get(key)
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        number = float(value)
-        if np.isfinite(number) and number > 0.0:
-            return number
-    return default
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the deterministic dummy modeld.")
     parser.add_argument("--log", required=True, help="Input segment log directory.")
@@ -706,6 +722,12 @@ def main(argv: list[str] | None = None) -> int:
         default="route_pose",
         help="Pose source for SpatialMemoryNet v1 memory warp; predicted_pose is an explicit ablation.",
     )
+    parser.add_argument(
+        "--v1-policy-bev-source",
+        choices=V1_POLICY_BEV_SOURCES,
+        default="memory",
+        help="BEV source used for SpatialMemoryNet v1 replay-only trajectory decisions.",
+    )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
     if args.checkpoint:
@@ -717,6 +739,7 @@ def main(argv: list[str] | None = None) -> int:
             trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
             device_name=args.device,
             v1_pose_warp_source=args.v1_pose_warp_source,
+            v1_policy_bev_source=args.v1_policy_bev_source,
         )
     else:
         write_dummy_model_outputs(args.log, args.out)

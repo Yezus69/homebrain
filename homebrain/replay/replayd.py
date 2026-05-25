@@ -38,6 +38,7 @@ def replay_log(
     trajectory_scorer_checkpoint: str | Path | None = None,
     device_name: str | None = None,
     v1_pose_warp_source: str = "route_pose",
+    v1_policy_bev_source: str = "memory",
 ) -> None:
     source_path = Path(log_dir)
     output_path = Path(out_dir)
@@ -57,6 +58,7 @@ def replay_log(
             trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
             device_name=device_name,
             v1_pose_warp_source=v1_pose_warp_source,
+            v1_policy_bev_source=v1_policy_bev_source,
         )
     else:
         replayed_events = replay_events_with_dummy_model(ordered_events)
@@ -82,6 +84,12 @@ def main(argv: list[str] | None = None) -> int:
         default="route_pose",
         help="Pose source for SpatialMemoryNet v1 memory warp; predicted_pose is an explicit ablation.",
     )
+    parser.add_argument(
+        "--v1-policy-bev-source",
+        choices=("current", "memory"),
+        default="memory",
+        help="BEV source used for SpatialMemoryNet v1 replay-only trajectory decisions.",
+    )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
     replay_log(
@@ -92,6 +100,7 @@ def main(argv: list[str] | None = None) -> int:
         trajectory_scorer_checkpoint=args.trajectory_scorer_checkpoint,
         device_name=args.device,
         v1_pose_warp_source=args.v1_pose_warp_source,
+        v1_policy_bev_source=args.v1_policy_bev_source,
     )
     return 0
 

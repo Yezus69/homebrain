@@ -12,15 +12,20 @@ from homebrain.teachers.artifacts import (
     write_teacher_manifest,
 )
 from homebrain.teachers.base import Teacher, TeacherRunConfig, TeacherRunSummary
-from homebrain.teachers.scene_teacher import (
-    SCENE_TEACHER_FRAME_ARTIFACT_KINDS,
-    SCENE_TEACHER_MANIFEST_FILE,
-    SCENE_TEACHER_PACK_SCHEMA_VERSION,
-    SCENE_TEACHER_WINDOW_ARTIFACT_KINDS,
-    load_scene_teacher_manifest,
-)
-
 _LAZY_EXPORTS = {
+    "SCENE_TEACHER_FRAME_ARTIFACT_KINDS": (
+        "homebrain.teachers.scene_teacher",
+        "SCENE_TEACHER_FRAME_ARTIFACT_KINDS",
+    ),
+    "SCENE_TEACHER_MANIFEST_FILE": ("homebrain.teachers.scene_teacher", "SCENE_TEACHER_MANIFEST_FILE"),
+    "SCENE_TEACHER_PACK_SCHEMA_VERSION": (
+        "homebrain.teachers.scene_teacher",
+        "SCENE_TEACHER_PACK_SCHEMA_VERSION",
+    ),
+    "SCENE_TEACHER_WINDOW_ARTIFACT_KINDS": (
+        "homebrain.teachers.scene_teacher",
+        "SCENE_TEACHER_WINDOW_ARTIFACT_KINDS",
+    ),
     "DA3Teacher": ("homebrain.teachers.da3_teacher", "DA3Teacher"),
     "DepthProTeacher": ("homebrain.teachers.depth_pro_teacher", "DepthProTeacher"),
     "DINOTeacher": ("homebrain.teachers.dino_teacher", "DINOTeacher"),
@@ -41,6 +46,7 @@ _LAZY_EXPORTS = {
     "create_teacher": ("homebrain.teachers.registry", "create_teacher"),
     "create_vggt_scene_teacher": ("homebrain.teachers.vggt_scene_teacher", "create_vggt_scene_teacher"),
     "create_moge_scene_teacher": ("homebrain.teachers.moge_scene_teacher", "create_moge_scene_teacher"),
+    "load_scene_teacher_manifest": ("homebrain.teachers.scene_teacher", "load_scene_teacher_manifest"),
 }
 
 
