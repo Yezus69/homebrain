@@ -138,3 +138,46 @@ raw_pwm_emitted=false
 
 `product_training_approved=false` is still expected for public/teacher-derived
 artifacts, but it must not block local POC experiments.
+
+## Gate 5: Real Route-Heldout Replay
+
+Minimum proof:
+
+- use public or owned real robot data only for milestone metrics;
+- split by route, not frame;
+- build robot-frame RGB-D BEV labels and QA them;
+- extract real teacher features only for training;
+- reject degenerate FutureBEV action labels or groups explicitly;
+- replay as online runtime: no future frames, no future labels, no raw PWM, and
+  no route-pose leakage unless the report is marked as an ablation.
+
+Core metrics:
+
+```text
+route_count
+heldout_sequence
+robot_frame_bev_qa_pass
+current_bev_iou_or_proxy
+fused_memory_bev_iou_or_proxy
+future_unknown_iou_or_proxy
+candidate_new_area_gain_ranking_quality
+selected_candidate_entropy
+dominant_action_fraction
+unsafe_selected_rate
+latency_end_to_end_p50_ms
+latency_end_to_end_p95_ms
+pose_warp_valid_fraction
+route_pose_leakage_ablation_fraction
+cmd_vel_proposal_count
+raw_pwm_emitted
+```
+
+Current accepted route-heldout report:
+
+```text
+runs/goal25_openloris_route_heldout_milestone/milestone_report.json
+```
+
+The current report passes artifact creation and no-leakage gates, but fails
+policy quality because FutureBEV/runtime action selection collapsed to one
+candidate.

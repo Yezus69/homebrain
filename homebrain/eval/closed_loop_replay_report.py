@@ -78,7 +78,9 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         if isinstance(event.debug, dict) and isinstance(event.debug.get("latency"), dict)
     ]
     pose_warp_values = [_pose_warp_value(event) for event in outputs]
+    route_pose_leakage_values = [_route_pose_leakage_value(event) for event in outputs]
     risky_fractions = [_risky_candidate_fraction(event) for event in decisions]
+    unsafe_selected_values = [_unsafe_selected_value(event) for event in decisions]
     cmd_vel_non_null_count = sum(1 for event in outputs if event.cmd_vel is not None)
     cmd_vel_proposals = [_cmd_vel_proposal(event) for event in outputs]
     control_safe = any(_event_or_candidate_flag(event, "control_safe") for event in outputs)
@@ -99,6 +101,7 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         "selected_candidate_dominant_fraction": _dominant_fraction(selected_distribution),
         "selected_actions_collapsed": len(selected_distribution) <= 1 and bool(selected_distribution),
         "stop_selected_fraction": _fraction(selected_ids, "stop"),
+        "unsafe_selected_rate": _mean([value for value in unsafe_selected_values if value is not None]),
         "risky_candidate_fraction_mean": _mean([value for value in risky_fractions if value is not None]),
         "selected_risk_score_mean": _mean_score(selected_scores, "risk_score"),
         "selected_unknown_penalty_mean": _mean_score(selected_scores, "unknown_penalty"),
@@ -111,6 +114,7 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         "coverage_memory_cells_seen": _max_coverage_value(coverage_records, "coverage_memory_cells_seen"),
         "coverage_memory_cells_covered": _max_coverage_value(coverage_records, "coverage_memory_cells_covered"),
         "pose_warp_valid_fraction": _mean([value for value in pose_warp_values if value is not None]),
+        "route_pose_leakage_ablation_fraction": _mean([value for value in route_pose_leakage_values if value is not None]),
         "policy_bev_source": _single_or_mixed(policy_sources),
         "policy_bev_source_distribution": dict(sorted(Counter(policy_sources).items())),
         "cmd_vel_non_null_count": int(cmd_vel_non_null_count),
@@ -173,6 +177,8 @@ def _compare_decisions(primary_events: list[Event], compare_events: list[Event],
         "compare_selected_coverage_gain_mean": compare_metrics.get("selected_coverage_gain_mean"),
         "primary_selected_collision_probability_mean": primary_metrics.get("selected_collision_probability_mean"),
         "compare_selected_collision_probability_mean": compare_metrics.get("selected_collision_probability_mean"),
+        "primary_unsafe_selected_rate": primary_metrics.get("unsafe_selected_rate"),
+        "compare_unsafe_selected_rate": compare_metrics.get("unsafe_selected_rate"),
         "primary_selected_unknown_exposure_mean": primary_metrics.get("selected_unknown_exposure_mean"),
         "compare_selected_unknown_exposure_mean": compare_metrics.get("selected_unknown_exposure_mean"),
         "primary_selected_new_area_gain_mean": primary_metrics.get("selected_new_area_gain_mean"),
@@ -194,6 +200,10 @@ def _compare_decisions(primary_events: list[Event], compare_events: list[Event],
         "selected_collision_probability_delta_primary_minus_compare": _numeric_delta(
             primary_metrics.get("selected_collision_probability_mean"),
             compare_metrics.get("selected_collision_probability_mean"),
+        ),
+        "unsafe_selected_rate_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("unsafe_selected_rate"),
+            compare_metrics.get("unsafe_selected_rate"),
         ),
         "selected_unknown_exposure_delta_primary_minus_compare": _numeric_delta(
             primary_metrics.get("selected_unknown_exposure_mean"),
@@ -267,6 +277,35 @@ def _pose_warp_value(event: BrainOutputEvent) -> float | None:
     return None
 
 
+def _route_pose_leakage_value(event: BrainOutputEvent) -> float | None:
+    if not isinstance(event.debug, dict):
+        return None
+    value = event.debug.get("route_pose_leakage_ablation")
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    source = event.debug.get("pose_warp_source")
+    if isinstance(source, str):
+        return 1.0 if source == "route_pose" else 0.0
+    return None
+
+
+def _unsafe_selected_value(event: BrainOutputEvent) -> float | None:
+    score = _selected_score(event)
+    if not score:
+        return None
+    risky = score.get("risky")
+    if isinstance(risky, bool):
+        return 1.0 if risky else 0.0
+    for key in ("unsafe_now_probability", "future_collision_probability", "collision_probability"):
+        value = score.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return 1.0 if float(value) >= 0.5 else 0.0
+    risk_score = score.get("risk_score")
+    if isinstance(risk_score, (int, float)) and not isinstance(risk_score, bool):
+        return 1.0 if float(risk_score) > 0.0 else 0.0
+    return None
+
+
 def _event_or_candidate_flag(event: BrainOutputEvent, key: str) -> bool:
     if _debug_flag(event, key):
         return True
@@ -308,6 +347,8 @@ def _next_blocker(metrics: JsonDict) -> str:
         return "v1_replay_did_not_emit_trajectory_decisions"
     if int(metrics.get("cmd_vel_non_null_count", 0)) != 0 or bool(metrics.get("control_safe", False)):
         return "replay_safety_flags_regressed"
+    if float(metrics.get("route_pose_leakage_ablation_fraction", 0.0)) > 0.0:
+        return "runtime_used_route_pose_leakage_ablation"
     if bool(metrics.get("selected_actions_collapsed", False)):
         return "selected_actions_collapsed_to_single_candidate"
     comparison = metrics.get("comparison")
@@ -335,9 +376,11 @@ def _markdown_report(report: JsonDict) -> str:
         f"- Selected distribution: `{report.get('selected_candidate_distribution')}`",
         f"- Selected entropy: `{report.get('selected_candidate_entropy')}`",
         f"- Stop selected fraction: `{report.get('stop_selected_fraction')}`",
+        f"- Unsafe selected rate: `{report.get('unsafe_selected_rate')}`",
         f"- Mean selected risk/unknown/uncertainty/coverage: `{report.get('selected_risk_score_mean')}` / `{report.get('selected_unknown_penalty_mean')}` / `{report.get('selected_uncertainty_penalty_mean')}` / `{report.get('selected_coverage_gain_mean')}`",
         f"- Coverage cells seen/covered: `{report.get('coverage_memory_cells_seen')}` / `{report.get('coverage_memory_cells_covered')}`",
         f"- Pose warp valid fraction: `{report.get('pose_warp_valid_fraction')}`",
+        f"- Route-pose leakage ablation fraction: `{report.get('route_pose_leakage_ablation_fraction')}`",
         "",
         "## Required Answers",
         "",

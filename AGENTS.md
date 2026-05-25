@@ -38,6 +38,21 @@ the task touches those areas.
   spatial memory, trajectory scoring, eval, or later hardware integration.
 - Delete stale context instead of adding more instructions.
 
+## Latest Real-Data Milestone
+
+Current route-heldout proof:
+`runs/goal25_openloris_route_heldout_milestone/milestone_report.json`.
+
+Reproduce with:
+
+```text
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal25_openloris_route_heldout_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 48 --max-spatial-folds 2
+```
+
+Do not present it as control-safe. It uses real public OpenLORIS robot data,
+rejects degenerate FutureBEV action-label groups, emits bounded `cmd_vel`
+proposals only, and still has a policy-collapse blocker.
+
 ## Completion
 
 For implementation tasks, leave proof:

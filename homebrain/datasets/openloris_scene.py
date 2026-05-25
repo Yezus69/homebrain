@@ -319,9 +319,18 @@ def merge_imu_samples(
     return pairs
 
 
-def load_associations(sequence_dir: str | Path, *, max_difference: float = 0.03) -> list[OpenLorisAssociation]:
+def load_associations(
+    sequence_dir: str | Path,
+    *,
+    max_difference: float = 0.03,
+    max_frames: int | None = None,
+) -> list[OpenLorisAssociation]:
     root = Path(sequence_dir)
     rgb_entries = parse_image_list(root / "color.txt")
+    if max_frames is not None:
+        if max_frames < 1:
+            raise ValueError("max_frames must be positive when supplied")
+        rgb_entries = rgb_entries[:max_frames]
     depth_entries = parse_image_list(_depth_list_path(root)) if _depth_list_path(root) else []
     pose_entries = parse_pose_file(root / "groundtruth.txt")
     odom_entries = parse_odom_file(root / "odom.txt")

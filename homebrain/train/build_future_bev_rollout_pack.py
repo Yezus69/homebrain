@@ -52,6 +52,7 @@ def build_future_bev_rollout_pack(
     max_examples: int | None = None,
     sampling_strategy: str = "source_order",
     fail_on_degenerate_labels: bool = False,
+    reject_degenerate_groups: bool = False,
 ) -> Path:
     if not sources:
         raise ValueError("at least one SpatialTrainPack source is required")
@@ -156,28 +157,38 @@ def build_future_bev_rollout_pack(
 
     if not all_examples:
         raise ValueError("no rollout examples were written")
-    source_records = [
-        {
-            "source": context.root.as_posix(),
-            "source_manifest_sha256": file_sha256(context.root / "manifest.json"),
-            "features": context.feature_root.as_posix() if context.feature_root is not None else None,
-            "feature_manifest_sha256": file_sha256(context.feature_root / "teacher_manifest.json")
-            if context.feature_root is not None
-            else None,
-            "source_example_count": len(context.frames),
-            "included_example_count": included_by_context[index],
-            "valid_horizon_count": valid_horizons_by_context[index],
-            "source_name": str(context.manifest.get("source_name", context.root.name)),
-            "robot_supervision_grade": str(context.manifest.get("robot_supervision_grade", "unknown")),
-            "dataset_frame_type": str(context.manifest.get("dataset_frame_type", "unknown")),
-            "robot_frame_truth": bool(context.manifest.get("robot_frame_truth", False)),
-            "control_safe": False,
-        }
-        for index, context in enumerate(contexts)
-    ]
     label_qa = _finalize_label_qa(label_qa_acc)
+    pre_rejection_label_qa: JsonDict | None = None
+    rejected_degenerate_label_groups: list[JsonDict] = []
+    rejected_degenerate_example_count = 0
+    if reject_degenerate_groups and label_qa["warnings"]:
+        pre_rejection_label_qa = label_qa
+        rejected_group_keys = _warning_group_keys(label_qa["warnings"])
+        rejected_degenerate_label_groups = _rejection_group_records(label_qa, rejected_group_keys)
+        kept_examples: list[JsonDict] = []
+        rejected_examples: list[JsonDict] = []
+        for example in all_examples:
+            group_key = f"{example.get('source_name')}::{example.get('split')}"
+            if group_key in rejected_group_keys:
+                rejected_examples.append(example)
+            else:
+                kept_examples.append(example)
+        if not kept_examples:
+            raise ValueError(
+                "rollout label QA rejected every example as degenerate; "
+                f"groups={sorted(rejected_group_keys)}"
+            )
+        _remove_rejected_example_files(output, rejected_examples)
+        all_examples = kept_examples
+        rejected_degenerate_example_count = len(rejected_examples)
+        label_qa, horizon_valid_values, candidate_valid_values, invalid_reasons = _pack_stats_for_examples(
+            output=output,
+            examples=all_examples,
+            candidate_ids=candidate_ids,
+        )
     if fail_on_degenerate_labels and label_qa["warnings"]:
         raise ValueError(f"rollout label QA found degenerate labels: {label_qa['warnings'][:5]}")
+    source_records = _source_records(contexts=contexts, examples=all_examples)
     valid_fraction = float(sum(1 for value in horizon_valid_values if value > 0.0) / max(len(horizon_valid_values), 1))
     candidate_valid_fraction = float(
         sum(1 for value in candidate_valid_values if value > 0.0) / max(len(candidate_valid_values), 1)
@@ -221,10 +232,16 @@ def build_future_bev_rollout_pack(
         "label_qa_path": "label_qa.json",
         "label_qa_status": "warn" if label_qa["warnings"] else "pass",
         "label_qa_warning_count": len(label_qa["warnings"]),
+        "reject_degenerate_groups": bool(reject_degenerate_groups),
+        "rejected_degenerate_example_count": int(rejected_degenerate_example_count),
+        "rejected_degenerate_label_groups": rejected_degenerate_label_groups,
+        "pre_rejection_label_qa_path": "label_qa_pre_rejection.json" if pre_rejection_label_qa is not None else None,
         "route_held_out_split_basis": "split_unit_id",
         "examples": all_examples,
         **ROLLOUT_PROVENANCE_FLAGS,
     }
+    if pre_rejection_label_qa is not None:
+        write_json(output / "label_qa_pre_rejection.json", pre_rejection_label_qa, pretty=True)
     write_json(output / "label_qa.json", label_qa, pretty=True)
     write_json(output / "manifest.json", manifest, pretty=True)
     return output / "manifest.json"
@@ -505,6 +522,98 @@ def _mean(values: list[float]) -> float:
     return float(np.mean(np.asarray(values, dtype=np.float64)))
 
 
+def _warning_group_keys(warnings: list[str]) -> set[str]:
+    groups: set[str] = set()
+    for warning in warnings:
+        if "::" not in warning or ":" not in warning:
+            continue
+        groups.add(warning.rsplit(":", 1)[0])
+    return groups
+
+
+def _rejection_group_records(label_qa: JsonDict, group_keys: set[str]) -> list[JsonDict]:
+    by_group = label_qa.get("by_route_split", {})
+    warnings = [str(value) for value in label_qa.get("warnings", [])]
+    records: list[JsonDict] = []
+    for key in sorted(group_keys):
+        group_record = by_group.get(key, {}) if isinstance(by_group, dict) else {}
+        records.append(
+            {
+                "group": key,
+                "warnings": [warning for warning in warnings if warning.startswith(f"{key}:")],
+                "examples": int(group_record.get("examples", 0)) if isinstance(group_record, dict) else 0,
+                "rejection_reason": "degenerate_future_rollout_labels",
+            }
+        )
+    return records
+
+
+def _remove_rejected_example_files(output: Path, rejected_examples: list[JsonDict]) -> None:
+    for example in rejected_examples:
+        relative = example.get("example_path")
+        if not isinstance(relative, str):
+            continue
+        path = output / relative
+        if path.exists():
+            path.unlink()
+
+
+def _pack_stats_for_examples(
+    *,
+    output: Path,
+    examples: list[JsonDict],
+    candidate_ids: list[str],
+) -> tuple[JsonDict, list[float], list[float], dict[str, int]]:
+    label_qa_acc = _new_label_qa_acc(candidate_ids)
+    horizon_valid_values: list[float] = []
+    candidate_valid_values: list[float] = []
+    invalid_reasons: dict[str, int] = {}
+    for example in examples:
+        relative = example.get("example_path")
+        if not isinstance(relative, str):
+            raise ValueError(f"rollout example is missing example_path: {example}")
+        with np.load(output / relative, allow_pickle=False) as loaded:
+            arrays = {key: np.asarray(loaded[key]) for key in loaded.files}
+        horizon_valid = [float(value) for value in arrays["horizon_valid"].tolist()]
+        candidate_valid = np.asarray(arrays["candidate_valid_mask"], dtype=np.float32)
+        horizon_valid_values.extend(horizon_valid)
+        candidate_valid_values.extend(candidate_valid.tolist())
+        for reason in example.get("invalid_reasons", []):
+            invalid_reasons[str(reason)] = invalid_reasons.get(str(reason), 0) + 1
+        _update_label_qa(label_qa_acc, metadata=example, arrays=arrays)
+    return _finalize_label_qa(label_qa_acc), horizon_valid_values, candidate_valid_values, invalid_reasons
+
+
+def _source_records(*, contexts: list[_SourceContext], examples: list[JsonDict]) -> list[JsonDict]:
+    included_counts: dict[str, int] = {}
+    valid_horizon_counts: dict[str, int] = {}
+    for example in examples:
+        source_name = str(example.get("source_name", ""))
+        included_counts[source_name] = included_counts.get(source_name, 0) + 1
+        valid_horizon_counts[source_name] = valid_horizon_counts.get(source_name, 0) + int(
+            example.get("valid_horizon_count", 0)
+        )
+    return [
+        {
+            "source": context.root.as_posix(),
+            "source_manifest_sha256": file_sha256(context.root / "manifest.json"),
+            "features": context.feature_root.as_posix() if context.feature_root is not None else None,
+            "feature_manifest_sha256": file_sha256(context.feature_root / "teacher_manifest.json")
+            if context.feature_root is not None
+            else None,
+            "source_example_count": len(context.frames),
+            "included_example_count": int(included_counts.get(str(context.manifest.get("source_name", "")), 0)),
+            "valid_horizon_count": int(valid_horizon_counts.get(str(context.manifest.get("source_name", "")), 0)),
+            "source_name": str(context.manifest.get("source_name", context.root.name)),
+            "robot_supervision_grade": str(context.manifest.get("robot_supervision_grade", "unknown")),
+            "dataset_frame_type": str(context.manifest.get("dataset_frame_type", "unknown")),
+            "robot_frame_truth": bool(context.manifest.get("robot_frame_truth", False)),
+            "control_safe": False,
+        }
+        for context in contexts
+    ]
+
+
 def _feature_roots(feature_dirs: list[str | Path] | None, source_count: int) -> list[Path | None]:
     if not feature_dirs:
         return [None for _ in range(source_count)]
@@ -526,7 +635,7 @@ def _grid_shape(manifest: JsonDict) -> tuple[int, int]:
 def _clear_generated_outputs(output: Path) -> None:
     if (output / "examples").exists():
         shutil.rmtree(output / "examples")
-    for filename in ("manifest.json", "label_qa.json"):
+    for filename in ("manifest.json", "label_qa.json", "label_qa_pre_rejection.json"):
         path = output / filename
         if path.exists():
             path.unlink()
@@ -551,6 +660,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sampling-strategy", choices=SAMPLING_STRATEGIES, default="source_order")
     parser.add_argument("--route-balanced", action="store_true", help="Shortcut for --sampling-strategy route_balanced.")
     parser.add_argument("--fail-on-degenerate-labels", action="store_true")
+    parser.add_argument(
+        "--reject-degenerate-groups",
+        action="store_true",
+        help="Drop route/split groups with degenerate rollout label QA, then fail if residual labels are still degenerate.",
+    )
     args = parser.parse_args(argv)
     sampling_strategy = "route_balanced" if args.route_balanced else args.sampling_strategy
     manifest = build_future_bev_rollout_pack(
@@ -561,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
         max_examples=args.max_examples,
         sampling_strategy=sampling_strategy,
         fail_on_degenerate_labels=args.fail_on_degenerate_labels,
+        reject_degenerate_groups=args.reject_degenerate_groups,
     )
     print(json.dumps({"manifest": manifest.as_posix()}, sort_keys=True))
     return 0

@@ -71,93 +71,67 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Goal24A: real OpenLORIS ingestion, robot-frame BEV QA, and replay-as-live
-runtime decisions with bounded `cmd_vel` proposals.
+Goal25: real public OpenLORIS route-heldout replay-as-live milestone.
 
-## Goal24A Result
+## Goal25 Result
 
-Objective attempted: move the existing OpenLORIS, robot RGB-D BEV, spatial
-memory, trajectory scoring, runtime decision, and closed-loop report paths
-toward a deployable replay-only robot-frame brain without using fake data as
-main evidence.
+Objective: build one reproducible command that stages three OpenLORIS routes
+from different scenes, imports robot-frame RGB-D, builds BEV labels, QA-checks
+packs, extracts real DINO features, trains SpatialMemoryNetV1 leave-one-route-out
+folds on the two RTX 4090s, rejects degenerate FutureBEV action-label groups,
+trains FutureBEVRolloutV1, and evaluates heldout corridor replay without future
+labels or route-pose leakage.
 
-Files changed: `homebrain/datasets/openloris_scene.py`,
-`homebrain/datasets/openloris_to_route.py`, `homebrain/geometry/qa_robot_frame_bev.py`,
-`homebrain/brain/modeld.py`, `homebrain/policies/runtime_decision.py`,
-`homebrain/eval/closed_loop_replay_report.py`, `homebrain/runtime/replay_openloris_brain.py`,
-`homebrain/runtime/__init__.py`, and focused tests.
-
-Commands run:
+Command:
 
 ```text
-nvidia-smi
-python -m homebrain.datasets.openloris_to_route --source data\public\openloris_scene\cafe1-1_2 --out runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short --max-frames 80
-python -m homebrain.geometry.robot_rgbd_to_bev --log runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short --out runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short\geometry\robot_rgbd_bev
-python -m homebrain.geometry.validate_bev --bev runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short\geometry\robot_rgbd_bev --out runs\goal24_openloris_realtime_stack\bev_validate_cafe1_1_2_short.json
-python -m homebrain.geometry.visualize_bev --bev runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short\geometry\robot_rgbd_bev --out runs\goal24_openloris_realtime_stack\bev_visuals_cafe1_1_2_short
-python -m homebrain.data.pack_spatial_dataset --log runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short --bev runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short\geometry\robot_rgbd_bev --out runs\goal24_openloris_realtime_stack\spatial_pack_cafe1_1_2_short
-python -m homebrain.data.qa_spatial_dataset --dataset runs\goal24_openloris_realtime_stack\spatial_pack_cafe1_1_2_short --out runs\goal24_openloris_realtime_stack\spatial_qa_cafe1_1_2_short.json
-python -m homebrain.geometry.qa_robot_frame_bev --bev runs\goal24_openloris_realtime_stack\route_cafe1_1_2_short\geometry\robot_rgbd_bev --spatial-pack runs\goal24_openloris_realtime_stack\spatial_pack_cafe1_1_2_short --out runs\goal24_openloris_realtime_stack\robot_frame_bev_qa_cafe1_1_2_short.json
-python -m homebrain.runtime.replay_openloris_brain --log runs\goal11b_nightly\routes\openloris_cafe1_1_2_route --out runs\goal24_openloris_realtime_stack\runtime_cafe1_1_2_with_baseline --checkpoint runs\goal12b_spatial_memory_v1\v1_window4_route_pose_warm_start\checkpoint.pt --features runs\goal11b_nightly\routes\openloris_cafe1_1_2_route\teacher_artifacts\dino --trajectory-scorer-checkpoint runs\goal22a_overnight_runtime_scorer_repair\train\model_current_all_features_seed21_pair_constrained_search2\checkpoint.pt --device cuda:0
-python -m py_compile homebrain\datasets\openloris_scene.py homebrain\datasets\openloris_to_route.py homebrain\geometry\qa_robot_frame_bev.py homebrain\policies\runtime_decision.py homebrain\brain\modeld.py homebrain\eval\closed_loop_replay_report.py homebrain\runtime\__init__.py homebrain\runtime\replay_openloris_brain.py
-python -m pytest tests\test_goal10a_robot_frame_bridge.py tests\test_goal20a_closed_loop_replay.py -q
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal25_openloris_route_heldout_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 48 --max-spatial-folds 2
+```
+
+Artifacts:
+
+```text
+runs/goal25_openloris_route_heldout_milestone/milestone_report.json
+runs/goal25_openloris_route_heldout_milestone/train/spatial_v1_except_corridor1_1/checkpoint.pt
+runs/goal25_openloris_route_heldout_milestone/train/spatial_v1_except_cafe1_1_2/checkpoint.pt
+runs/goal25_openloris_route_heldout_milestone/train/future_bev_rollout_except_corridor1_1/checkpoint.pt
+runs/goal25_openloris_route_heldout_milestone/runtime/heldout_corridor1_1_dino/runtime_report.json
+runs/goal25_openloris_route_heldout_milestone/runtime/heldout_corridor1_1_direct_rgbd_slice/runtime_report.json
+runs/goal25_openloris_route_heldout_milestone/contact_sheets/heldout_corridor1_1_dino_failure_contact_sheet.ppm
+```
+
+Key metrics: heldout corridor SpatialMemoryNetV1 eval current/fused IoU proxy
+`0.18941278009276305 / 0.7033660123745601`, memory warp valid fraction `0.75`.
+FutureBEV heldout corridor eval future unknown IoU proxy `0.9318639982272857`,
+new-area ranking quality `0.6628571428571429`, but action entropy `0.0` and
+dominant action fraction `1.0`. Runtime replay produced 96 decisions, p50/p95
+latency `28.2573 / 31.700175 ms`, unsafe selected rate `0.0`, pose warp valid
+fraction `0.9895833333333334`, and route-pose leakage fraction `0.0`. The
+direct RGB-D runtime slice produced 48 decisions without precomputed DINO at
+runtime and p95 latency `56.00589 ms`.
+
+Failures and risks: all three route packs remain low-quality/quarantined.
+Corridor and office robot-frame BEV QA fail low observed-cell density
+(`observed_cell_ratio_mean_below_0.05`). FutureBEV labels passed only after
+explicitly rejecting 108 train-pack examples and 12 heldout examples from
+degenerate route/split groups. Future rollout and runtime selected-candidate
+audits show collapse (`entropy=0.0`, dominant fraction `1.0`). This is not
+control-safe and not product-approved.
+
+Verification:
+
+```text
+python -m py_compile homebrain\brain\modeld.py homebrain\datasets\openloris_scene.py homebrain\datasets\openloris_to_route.py homebrain\eval\closed_loop_replay_report.py homebrain\runtime\replay_openloris_brain.py homebrain\train\build_future_bev_rollout_pack.py homebrain\tools\run_openloris_route_heldout_milestone.py
+python -m pytest tests\test_goal12a_spatial_memory_v1.py tests\test_future_bev_rollout_v1.py tests\test_goal20a_closed_loop_replay.py -q
 git diff --check
 python -m pytest -q
 ```
 
-Pass/fail results: real OpenLORIS import, BEV generation, visualization, spatial
-pack, robot-frame BEV QA, and replay-as-live runtime all completed. Focused
-tests passed with `9 passed`; full pytest passed with `128 passed in 190.89s`.
-PowerShell tool output still appends a non-project `-Command` warning after
-commands.
+Pass/fail: focused tests passed with `22 passed`; full pytest passed with
+`128 passed in 188.08s`. `git diff --check` passed, with only line-ending
+warnings from Git on Windows. The shell tool still appends a non-project
+PowerShell `-Command` warning after commands.
 
-Artifacts created:
-
-```text
-runs/goal24_openloris_realtime_stack/route_cafe1_1_2_short
-runs/goal24_openloris_realtime_stack/route_cafe1_1_2_short/geometry/robot_rgbd_bev
-runs/goal24_openloris_realtime_stack/bev_validate_cafe1_1_2_short.json
-runs/goal24_openloris_realtime_stack/bev_visuals_cafe1_1_2_short/visualization_manifest.json
-runs/goal24_openloris_realtime_stack/spatial_pack_cafe1_1_2_short
-runs/goal24_openloris_realtime_stack/spatial_qa_cafe1_1_2_short.json
-runs/goal24_openloris_realtime_stack/robot_frame_bev_qa_cafe1_1_2_short.json
-runs/goal24_openloris_realtime_stack/runtime_cafe1_1_2_with_baseline/runtime_report.json
-runs/goal24_openloris_realtime_stack/runtime_cafe1_1_2_with_baseline/runtime_report.md
-```
-
-Key real-data results: the new importer accepts measured OpenLORIS
-`trans_matrix.yaml` camera-to-base extrinsics, writes per-artifact SHA-256
-checksums, and rejects missing depth/calibration by default. The 80-frame real
-cafe slice imported with `robot_frame_truth=true` and `extrinsics_source=openloris_trans_matrix_yaml`.
-Robot-frame BEV QA passed with 80/80 calibrated frames, no pose jumps, mean
-depth valid ratio `0.9491927083333334`, mean observed cell ratio
-`0.0855224609375`, and zero route split leakage. Spatial dataset QA was
-structurally trainable but quarantined for low confidence, so it is not counted
-as a clean training-quality result.
-
-Runtime result: the OpenLORIS cafe route replay produced 1200 online spatial
-memory decisions and 1200 bounded `cmd_vel` proposals, with `cmd_vel` still not
-executed. On `cuda:0` RTX 4090, p50/p95 end-to-end latency was
-`41.557 / 54.96671499999998 ms`; p95 model and decision latency were
-`8.9844 / 11.482949999999999 ms`; 10 Hz pass fraction was
-`0.9808333333333333`. No raw PWM was emitted.
-
-Transparent-baseline comparison: primary learned-scorer decisions matched 1200
-baseline frames and differed on 1197 (`0.9975`). The learned scorer did not
-collapse (`selected_candidate_unique_count=2`, entropy `0.9934800107379318`,
-dominant fraction `0.5475`, stop fraction `0.0`). It improved route-progress
-proxy by `0.08370833333333333` and coverage-gain proxy by
-`0.10916666666666686`, but selected higher transparent risk and unknown
-penalties than the heuristic baseline (`+0.011150962500000002` risk,
-`+0.35400405250000005` unknown). This is replay evidence only, not a safety
+Recommended next step: collect or select routes with higher observed BEV
+density and train a non-collapsed FutureBEV/action selector before any hardware
 claim.
-
-Remaining risks: the strongest runtime policy is still narrow and not product
-safe; the new short-route spatial pack is low-confidence; route replay predates
-hardware and dynamic-obstacle safety; public data artifacts remain
-replay-only/not-executed/control-safe-false unless proven otherwise.
-
-Recommended next goal: expand the same real OpenLORIS measured-calibration
-pipeline across office/corridor routes, rebuild route-level train/val/test
-packs, and retrain the trajectory scorer with explicit gates for risk/unknown
-penalty so the progress gain does not come by accepting worse transparent risk.

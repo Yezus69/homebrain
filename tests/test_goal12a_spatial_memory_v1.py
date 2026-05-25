@@ -266,7 +266,8 @@ def test_spatial_v1_tiny_temporal_overfit_and_modeld_replay(tmp_path: Path) -> N
     assert outputs[0].cmd_vel is None
     assert outputs[0].debug["memory_reset"] is True
     assert outputs[1].debug["memory_used"] is True
-    assert outputs[1].debug["pose_warp_source"] == "route_pose_missing"
+    assert outputs[1].debug["pose_warp_source_requested"] == "odom"
+    assert outputs[1].debug["pose_warp_source"] == "odom_missing"
     assert outputs[1].debug["observation_mask_source"] == "predicted_current_bev_confidence"
     assert "update_mask_coverage" in outputs[1].debug
     assert outputs[3].debug["memory_reset"] is True
@@ -306,6 +307,7 @@ def test_route_pose_warp_source_selection_and_safety_flags(tmp_path: Path) -> No
         checkpoint=checkpoint,
         feature_dir=features,
         device_name="cpu",
+        v1_pose_warp_source="route_pose",
     )
     outputs = [event for event in read_events(out) if isinstance(event, BrainOutputEvent)]
     assert outputs[0].cmd_vel is None
@@ -315,6 +317,7 @@ def test_route_pose_warp_source_selection_and_safety_flags(tmp_path: Path) -> No
     assert outputs[1].debug["pose_warp_source"] == "route_pose"
     assert outputs[1].debug["pose_warp_valid"] is True
     assert outputs[1].debug["predicted_pose_warp_ablation"] is False
+    assert outputs[1].debug["route_pose_leakage_ablation"] is True
     assert outputs[1].debug["control_safe"] is False
 
 

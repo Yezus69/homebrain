@@ -39,6 +39,7 @@ def openloris_to_route(
     camera_id: str = "d400_color",
     require_depth: bool = True,
     require_robot_frame_calibration: bool = True,
+    include_imu: bool = True,
 ) -> Path:
     source = discover_sequence_root(source_dir)
     output = Path(out_dir)
@@ -56,9 +57,7 @@ def openloris_to_route(
             source=source,
         )
 
-    associations = load_associations(source)
-    if max_frames is not None:
-        associations = associations[:max_frames]
+    associations = load_associations(source, max_frames=max_frames)
     if not associations:
         raise ValueError(f"no OpenLORIS RGB associations found in {source}")
 
@@ -132,9 +131,13 @@ def openloris_to_route(
             f"{len(frame_records)} depth frames"
         )
 
-    imu_pairs = merge_imu_samples(
-        parse_imu_samples(source / "d400_accelerometer.txt"),
-        parse_imu_samples(source / "d400_gyroscope.txt"),
+    imu_pairs = (
+        merge_imu_samples(
+            parse_imu_samples(source / "d400_accelerometer.txt"),
+            parse_imu_samples(source / "d400_gyroscope.txt"),
+        )
+        if include_imu
+        else []
     )
     if imu_pairs:
         min_ts = min(record["timestamp_ns"] for record in frame_records)
@@ -185,7 +188,15 @@ def openloris_to_route(
     _write_json(output / OPENLORIS_ROUTE_ASSOCIATIONS_FILE, associations_manifest)
 
     missing_sensor_notices = []
-    if not imu_pairs:
+    if not include_imu:
+        missing_sensor_notices.append(
+            {
+                "sensor": "imu",
+                "status": "not_imported",
+                "reason": "IMU parsing was explicitly skipped; odom/pose events remain available when associated",
+            }
+        )
+    elif not imu_pairs:
         missing_sensor_notices.append(
             {"sensor": "imu", "status": "unavailable", "reason": "no paired d400 accelerometer/gyroscope samples"}
         )
@@ -422,6 +433,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Import for review only when robot-frame RGB-D calibration is incomplete.",
     )
     parser.add_argument("--allow-missing-depth", action="store_true", help="Import RGB-only review routes.")
+    parser.add_argument(
+        "--skip-imu",
+        action="store_true",
+        help="Do not parse full IMU files; frame-paired odom/pose are still imported when available.",
+    )
     args = parser.parse_args(argv)
     out = openloris_to_route(
         source_dir=args.source,
@@ -430,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
         camera_id=args.camera_id,
         require_depth=not args.allow_missing_depth,
         require_robot_frame_calibration=not args.allow_incomplete_calibration,
+        include_imu=not args.skip_imu,
     )
     print(f"imported OpenLORIS route to {out.as_posix()}")
     return 0

@@ -23,8 +23,9 @@ def run_openloris_runtime_replay(
     trajectory_scorer_checkpoint: str | Path | None = None,
     future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
-    v1_pose_warp_source: str = "route_pose",
+    v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
+    runtime_feature_source: str = "dino",
     run_transparent_baseline: bool = True,
     allow_non_openloris: bool = False,
     command: str | None = None,
@@ -50,6 +51,7 @@ def run_openloris_runtime_replay(
         device_name=device,
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
+        runtime_feature_source=runtime_feature_source,
     )
     baseline_out: Path | None = None
     baseline_reason = "disabled"
@@ -67,6 +69,7 @@ def run_openloris_runtime_replay(
             device_name=device,
             v1_pose_warp_source=v1_pose_warp_source,
             v1_policy_bev_source=v1_policy_bev_source,
+            runtime_feature_source=runtime_feature_source,
         )
     elif run_transparent_baseline:
         baseline_reason = "primary_already_uses_transparent_scorer"
@@ -94,6 +97,9 @@ def run_openloris_runtime_replay(
             "future_rollout_checkpoint": Path(future_rollout_checkpoint).as_posix()
             if future_rollout_checkpoint is not None
             else None,
+            "runtime_feature_source": runtime_feature_source,
+            "requires_precomputed_dino_runtime": runtime_feature_source == "dino",
+            "direct_rgbd_runtime_path": runtime_feature_source == "direct_rgbd",
             "device": device,
             "gpu_inventory": _gpu_inventory(),
             "online_replay_as_live": True,
@@ -187,8 +193,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trajectory-scorer-checkpoint", default=None)
     parser.add_argument("--future-rollout-checkpoint", default=None)
     parser.add_argument("--device", default=None, help="Torch device. Defaults to the first RTX 4090 when available.")
-    parser.add_argument("--v1-pose-warp-source", choices=("route_pose", "predicted_pose", "none"), default="route_pose")
+    parser.add_argument(
+        "--v1-pose-warp-source",
+        choices=("odom", "odom_or_route_pose", "route_pose", "route_pose_ablation", "predicted_pose", "none"),
+        default="odom",
+    )
     parser.add_argument("--v1-policy-bev-source", choices=("current", "memory"), default="memory")
+    parser.add_argument(
+        "--runtime-feature-source",
+        choices=("dino", "direct_rgbd"),
+        default="dino",
+        help="Use precomputed DINO features or direct current RGB-D runtime features.",
+    )
     parser.add_argument(
         "--skip-transparent-baseline",
         action="store_true",
@@ -207,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         device_name=args.device,
         v1_pose_warp_source=args.v1_pose_warp_source,
         v1_policy_bev_source=args.v1_policy_bev_source,
+        runtime_feature_source=args.runtime_feature_source,
         run_transparent_baseline=not args.skip_transparent_baseline,
         allow_non_openloris=args.allow_non_openloris,
         command=command,

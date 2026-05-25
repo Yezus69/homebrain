@@ -10,6 +10,9 @@ from typing import Iterable
 import numpy as np
 import torch
 
+from homebrain.datasets.openloris_scene import OPENLORIS_DEPTH_SCALE, OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+from homebrain.datasets.tum_rgbd import read_depth_png_m
+from homebrain.data.spatial_dataset import read_json
 from homebrain.brain.spatial_memory_v0 import SPATIAL_MEMORY_V0_SOURCE, load_checkpoint
 from homebrain.brain.spatial_memory_v1 import (
     SPATIAL_MEMORY_V1_SOURCE,
@@ -32,14 +35,78 @@ from homebrain.replay.segment_log import load_manifest, read_events, write_segme
 from homebrain.train.spatial_dataset import BEV_OUTPUT_CHANNELS, DINOFeatureStore
 
 DUMMY_MODELD_SOURCE = "modeld_dummy_v0"
-V1_POSE_WARP_SOURCES = ("route_pose", "predicted_pose", "none")
+V1_POSE_WARP_SOURCES = ("odom", "odom_or_route_pose", "route_pose", "route_pose_ablation", "predicted_pose", "none")
 V1_POLICY_BEV_SOURCES = ("current", "memory")
+RUNTIME_FEATURE_SOURCES = ("dino", "direct_rgbd")
 
 
 @dataclass(frozen=True)
 class RoutePoseDelta:
     delta: tuple[float, float, float]
     source: str
+
+
+class DirectRGBDFeatureStore:
+    """Runtime-only first slice: derive model input tensors directly from current RGB-D.
+
+    This intentionally does not try to mimic DINO quality. It is a bounded,
+    transparent adapter from current real route sensors into the existing
+    SpatialMemoryNet feature interface so replay can exercise a no-precomputed-
+    DINO runtime path.
+    """
+
+    def __init__(self, log_dir: str | Path, *, feature_dim: int, patch_shape: tuple[int, int] = (16, 16)) -> None:
+        if feature_dim <= 0:
+            raise ValueError("direct RGB-D feature_dim must be positive")
+        self.log_dir = Path(log_dir)
+        self.feature_dim = int(feature_dim)
+        self.patch_shape = patch_shape
+        self.depth_by_key = self._load_depth_refs()
+
+    def load_for_frame(self, frame: FrameEvent) -> tuple[np.ndarray, np.ndarray]:
+        rgb = _load_runtime_rgb(self.log_dir / frame.data_ref)
+        depth = self._load_depth(frame)
+        patch_features = _rgbd_patch_features(
+            rgb=rgb,
+            depth_m=depth,
+            feature_dim=self.feature_dim,
+            patch_shape=self.patch_shape,
+        )
+        cls_feature = patch_features.mean(axis=(0, 1)).astype(np.float32)
+        return patch_features, cls_feature
+
+    def _load_depth_refs(self) -> dict[tuple[str, str, int], str]:
+        associations_path = self.log_dir / OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+        if not associations_path.exists():
+            return {}
+        associations = read_json(associations_path)
+        frames = associations.get("frames")
+        if not isinstance(frames, list):
+            return {}
+        refs: dict[tuple[str, str, int], str] = {}
+        for record in frames:
+            if not isinstance(record, dict):
+                continue
+            depth_ref = record.get("depth_ref")
+            if not isinstance(depth_ref, str):
+                continue
+            sequence_id = str(record.get("sequence_id", ""))
+            camera_id = str(record.get("camera_id", ""))
+            frame_id = int(record.get("frame_id", -1))
+            refs[(sequence_id, camera_id, frame_id)] = depth_ref
+        return refs
+
+    def _load_depth(self, frame: FrameEvent) -> np.ndarray | None:
+        depth_ref = self.depth_by_key.get((frame.sequence_id, frame.camera_id, int(frame.frame_id)))
+        if depth_ref is None:
+            return None
+        depth_path = self.log_dir / depth_ref
+        if not depth_path.exists():
+            return None
+        try:
+            return read_depth_png_m(depth_path, scale=OPENLORIS_DEPTH_SCALE)
+        except Exception:  # noqa: BLE001 - runtime should keep moving with RGB-only direct features.
+            return None
 
 
 def dummy_brain_output_for_frame(frame: FrameEvent) -> BrainOutputEvent:
@@ -104,8 +171,9 @@ def replay_events_with_spatial_model(
     trajectory_scorer_checkpoint: str | Path | None = None,
     future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
-    v1_pose_warp_source: str = "route_pose",
+    v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
+    runtime_feature_source: str = "dino",
 ) -> tuple[list[Event], list[str]]:
     ordered_events = list(events)
     outputs, artifacts = spatial_model_outputs(
@@ -119,6 +187,7 @@ def replay_events_with_spatial_model(
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
+        runtime_feature_source=runtime_feature_source,
     )
     by_identity = {event.input_event_ids[0]: event for event in outputs}
     replayed: list[Event] = []
@@ -152,8 +221,9 @@ def write_spatial_model_outputs(
     trajectory_scorer_checkpoint: str | Path | None = None,
     future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
-    v1_pose_warp_source: str = "route_pose",
+    v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
+    runtime_feature_source: str = "dino",
 ) -> None:
     manifest = load_manifest(log_dir)
     events = read_events(log_dir)
@@ -168,6 +238,7 @@ def write_spatial_model_outputs(
         device_name=device_name,
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
+        runtime_feature_source=runtime_feature_source,
     )
     suffix = "spatial-v1-model" if outputs and outputs[0].source == SPATIAL_MEMORY_V1_SOURCE else "spatial-v0-model"
     write_segment(
@@ -188,14 +259,18 @@ def spatial_model_outputs(
     trajectory_scorer_checkpoint: str | Path | None = None,
     future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
-    v1_pose_warp_source: str = "route_pose",
+    v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
+    runtime_feature_source: str = "dino",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
+    if runtime_feature_source not in RUNTIME_FEATURE_SOURCES:
+        raise ValueError(f"runtime_feature_source must be one of {RUNTIME_FEATURE_SOURCES}")
     if trajectory_scorer_checkpoint is not None and future_rollout_checkpoint is not None:
         raise ValueError("use either --trajectory-scorer-checkpoint or --future-rollout-checkpoint, not both")
     if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
         return _spatial_v1_model_outputs(
             events,
+            log_dir=log_dir,
             out_dir=out_dir,
             checkpoint=checkpoint,
             feature_dir=feature_dir,
@@ -204,6 +279,7 @@ def spatial_model_outputs(
             device_name=device_name,
             pose_warp_source=v1_pose_warp_source,
             policy_bev_source=v1_policy_bev_source,
+            runtime_feature_source=runtime_feature_source,
         )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -211,9 +287,13 @@ def spatial_model_outputs(
     model.to(device)
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     resolved_feature_dir = feature_dir or metadata.get("feature_artifacts")
-    if not isinstance(resolved_feature_dir, (str, Path)):
+    if runtime_feature_source == "dino" and not isinstance(resolved_feature_dir, (str, Path)):
         raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
-    feature_store = DINOFeatureStore(resolved_feature_dir)
+    feature_store = (
+        DINOFeatureStore(resolved_feature_dir)
+        if runtime_feature_source == "dino"
+        else DirectRGBDFeatureStore(log_dir, feature_dim=int(model.config.feature_dim))
+    )
     trajectory_scorer: RuntimeTrajectoryScorer | None = None
     future_rollout_scorer: RuntimeFutureRolloutScorer | None = None
     trajectory_candidates = None
@@ -245,7 +325,8 @@ def spatial_model_outputs(
             feature_store=feature_store,
             output_root=output_root,
             checkpoint=Path(checkpoint),
-            feature_dir=Path(resolved_feature_dir),
+            feature_dir=Path(resolved_feature_dir) if isinstance(resolved_feature_dir, (str, Path)) else None,
+            runtime_feature_source=runtime_feature_source,
             trajectory_scorer=trajectory_scorer,
             future_rollout_scorer=future_rollout_scorer,
             trajectory_candidates=trajectory_candidates,
@@ -261,14 +342,16 @@ def spatial_model_outputs(
 def _spatial_v1_model_outputs(
     events: Iterable[Event],
     *,
+    log_dir: str | Path,
     out_dir: str | Path,
     checkpoint: str | Path,
     feature_dir: str | Path | None = None,
     trajectory_scorer_checkpoint: str | Path | None = None,
     future_rollout_checkpoint: str | Path | None = None,
     device_name: str | None = None,
-    pose_warp_source: str = "route_pose",
+    pose_warp_source: str = "odom",
     policy_bev_source: str = "memory",
+    runtime_feature_source: str = "dino",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if pose_warp_source not in V1_POSE_WARP_SOURCES:
         raise ValueError(f"v1_pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
@@ -279,10 +362,16 @@ def _spatial_v1_model_outputs(
     model, payload = load_v1_checkpoint(checkpoint, map_location=device)
     model.to(device)
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    if runtime_feature_source not in RUNTIME_FEATURE_SOURCES:
+        raise ValueError(f"runtime_feature_source must be one of {RUNTIME_FEATURE_SOURCES}")
     resolved_feature_dir = feature_dir or metadata.get("feature_artifacts")
-    if not isinstance(resolved_feature_dir, (str, Path)):
+    if runtime_feature_source == "dino" and not isinstance(resolved_feature_dir, (str, Path)):
         raise ValueError("DINO feature artifacts must be supplied with --features or checkpoint metadata")
-    feature_store = DINOFeatureStore(resolved_feature_dir)
+    feature_store = (
+        DINOFeatureStore(resolved_feature_dir)
+        if runtime_feature_source == "dino"
+        else DirectRGBDFeatureStore(log_dir=log_dir, feature_dim=int(model.config.feature_dim))
+    )
     output_root = Path(out_dir)
     frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
     start_timestamp_ns = min((frame.timestamp_ns for frame in frames), default=0)
@@ -316,7 +405,7 @@ def _spatial_v1_model_outputs(
     state: SpatialMemoryState | None = None
     previous_predicted_pose_delta: torch.Tensor | None = None
     previous_sequence_camera: tuple[str, str] | None = None
-    route_pose_deltas = _route_pose_deltas(frames, ordered_events)
+    route_pose_deltas = _route_pose_deltas(frames, ordered_events, pose_warp_source=pose_warp_source)
     for frame in frames:
         current_key = (frame.sequence_id, frame.camera_id)
         reset = previous_sequence_camera is None or current_key != previous_sequence_camera
@@ -325,14 +414,15 @@ def _spatial_v1_model_outputs(
         selected_pose_delta: torch.Tensor | None = None
         selected_pose_source = pose_warp_source
         route_pose_available = False
-        if not reset and pose_warp_source == "route_pose":
+        measured_pose_sources = {"odom", "odom_or_route_pose", "route_pose", "route_pose_ablation"}
+        if not reset and pose_warp_source in measured_pose_sources:
             route_delta = route_pose_deltas.get(event_identity(frame))
             if route_delta is not None:
                 selected_pose_delta = torch.tensor(route_delta.delta, dtype=torch.float32)
                 selected_pose_source = route_delta.source
                 route_pose_available = True
             else:
-                selected_pose_source = "route_pose_missing"
+                selected_pose_source = f"{pose_warp_source}_missing"
         elif not reset and pose_warp_source == "predicted_pose":
             selected_pose_delta = previous_predicted_pose_delta
             route_pose_available = selected_pose_delta is not None
@@ -347,13 +437,16 @@ def _spatial_v1_model_outputs(
             feature_store=feature_store,
             output_root=output_root,
             checkpoint=Path(checkpoint),
-            feature_dir=Path(resolved_feature_dir),
+            feature_dir=Path(resolved_feature_dir) if isinstance(resolved_feature_dir, (str, Path)) else None,
+            runtime_feature_source=runtime_feature_source,
             start_timestamp_ns=start_timestamp_ns,
             pose_delta_to_current=selected_pose_delta,
             pose_warp_source=selected_pose_source,
             pose_warp_source_requested=pose_warp_source,
             route_pose_delta_available=route_pose_available,
             predicted_pose_warp_ablation=pose_warp_source == "predicted_pose",
+            route_pose_leakage_ablation=pose_warp_source in {"route_pose", "route_pose_ablation"}
+            or selected_pose_source == "route_pose",
             reset_memory=reset,
             state=None if reset else state,
             trajectory_scorer=trajectory_scorer,
@@ -377,7 +470,8 @@ def _spatial_output_for_frame(
     feature_store: DINOFeatureStore,
     output_root: Path,
     checkpoint: Path,
-    feature_dir: Path,
+    feature_dir: Path | None,
+    runtime_feature_source: str,
     trajectory_scorer: RuntimeTrajectoryScorer | None,
     future_rollout_scorer: RuntimeFutureRolloutScorer | None,
     trajectory_candidates: list | None,
@@ -469,7 +563,8 @@ def _spatial_output_for_frame(
                 "mock": False,
                 "model": SPATIAL_MEMORY_V0_SOURCE,
                 "checkpoint": checkpoint.as_posix(),
-                "feature_artifacts": feature_dir.as_posix(),
+                "feature_artifacts": feature_dir.as_posix() if feature_dir is not None else None,
+                "runtime_feature_source": runtime_feature_source,
                 "camera_id": frame.camera_id,
                 "output_channels": list(BEV_OUTPUT_CHANNELS),
                 "local_bev_shape": list(probabilities.shape[1:]),
@@ -493,13 +588,15 @@ def _spatial_v1_output_for_frame(
     feature_store: DINOFeatureStore,
     output_root: Path,
     checkpoint: Path,
-    feature_dir: Path,
+    feature_dir: Path | None,
+    runtime_feature_source: str,
     start_timestamp_ns: int,
     pose_delta_to_current: torch.Tensor | None,
     pose_warp_source: str,
     pose_warp_source_requested: str,
     route_pose_delta_available: bool,
     predicted_pose_warp_ablation: bool,
+    route_pose_leakage_ablation: bool,
     reset_memory: bool,
     state: SpatialMemoryState | None,
     trajectory_scorer: RuntimeTrajectoryScorer | None,
@@ -651,7 +748,8 @@ def _spatial_v1_output_for_frame(
                 "mock": False,
                 "model": SPATIAL_MEMORY_V1_SOURCE,
                 "checkpoint": checkpoint.as_posix(),
-                "feature_artifacts": feature_dir.as_posix(),
+                "feature_artifacts": feature_dir.as_posix() if feature_dir is not None else None,
+                "runtime_feature_source": runtime_feature_source,
                 "camera_id": frame.camera_id,
                 "output_channels": list(BEV_OUTPUT_CHANNELS),
                 "local_bev_shape": list(memory_probabilities.shape[1:]),
@@ -663,6 +761,7 @@ def _spatial_v1_output_for_frame(
                 "pose_warp_source": pose_warp_source,
                 "pose_warp_source_available": bool(route_pose_delta_available),
                 "predicted_pose_warp_ablation": bool(predicted_pose_warp_ablation),
+                "route_pose_leakage_ablation": bool(route_pose_leakage_ablation),
                 "memory_reset": memory_reset,
                 "update_mask_coverage": update_mask_coverage,
                 "memory_overwrite_fraction": memory_overwrite_fraction,
@@ -685,8 +784,13 @@ def _spatial_v1_output_for_frame(
     )
 
 
-def _route_pose_deltas(frames: list[FrameEvent], events: Iterable[Event]) -> dict[str, RoutePoseDelta]:
-    pose_samples = _route_pose_samples(events)
+def _route_pose_deltas(
+    frames: list[FrameEvent],
+    events: Iterable[Event],
+    *,
+    pose_warp_source: str,
+) -> dict[str, RoutePoseDelta]:
+    pose_samples = _route_pose_samples(events, pose_warp_source=pose_warp_source)
     deltas: dict[str, RoutePoseDelta] = {}
     previous_frame: FrameEvent | None = None
     for frame in frames:
@@ -710,18 +814,29 @@ def _route_pose_deltas(frames: list[FrameEvent], events: Iterable[Event]) -> dic
     return deltas
 
 
-def _route_pose_samples(events: Iterable[Event]) -> dict[tuple[str, int], dict[str, object]]:
+def _route_pose_samples(events: Iterable[Event], *, pose_warp_source: str) -> dict[tuple[str, int], dict[str, object]]:
+    if pose_warp_source == "none" or pose_warp_source == "predicted_pose":
+        return {}
+    use_odom = pose_warp_source in {"odom", "odom_or_route_pose"}
+    use_route_pose = pose_warp_source in {"odom_or_route_pose", "route_pose", "route_pose_ablation"}
     samples: dict[tuple[str, int], dict[str, object]] = {}
-    for event in events:
-        if isinstance(event, OdomEvent):
-            samples[(event.sequence_id, event.timestamp_ns)] = {
-                "x": float(event.position_m[0]),
-                "y": float(event.position_m[1]),
-                "yaw": _yaw_from_quaternion_xyzw(event.orientation_xyzw),
-                "source": "route_odom",
-            }
-    for event in events:
-        if isinstance(event, PoseEvent):
+    event_list = list(events)
+    if use_odom:
+        for event in event_list:
+            if isinstance(event, OdomEvent):
+                samples[(event.sequence_id, event.timestamp_ns)] = {
+                    "x": float(event.position_m[0]),
+                    "y": float(event.position_m[1]),
+                    "yaw": _yaw_from_quaternion_xyzw(event.orientation_xyzw),
+                    "source": "route_odom",
+                }
+    if use_route_pose:
+        for event in event_list:
+            if not isinstance(event, PoseEvent):
+                continue
+            key = (event.sequence_id, event.timestamp_ns)
+            if key in samples and pose_warp_source == "odom_or_route_pose":
+                continue
             samples[(event.sequence_id, event.timestamp_ns)] = {
                 "x": float(event.position_m[0]),
                 "y": float(event.position_m[1]),
@@ -756,6 +871,97 @@ def _relative_planar_delta(previous: dict[str, object], current: dict[str, objec
     dy = -sin(yaw_prev) * dx_world + cos(yaw_prev) * dy_world
     dyaw = _wrap_angle(float(current["yaw"]) - yaw_prev)
     return (float(dx), float(dy), float(dyaw))
+
+
+def _load_runtime_rgb(path: Path) -> np.ndarray:
+    if not path.exists():
+        raise FileNotFoundError(f"runtime RGB frame is missing: {path}")
+    try:
+        from PIL import Image  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("Pillow is required for direct RGB-D runtime features") from exc
+    with Image.open(path) as image:
+        return np.asarray(image.convert("RGB"), dtype=np.uint8)
+
+
+def _rgbd_patch_features(
+    *,
+    rgb: np.ndarray,
+    depth_m: np.ndarray | None,
+    feature_dim: int,
+    patch_shape: tuple[int, int],
+) -> np.ndarray:
+    if rgb.ndim != 3 or rgb.shape[-1] != 3:
+        raise ValueError("runtime RGB must be HxWx3")
+    patch_h, patch_w = patch_shape
+    if patch_h <= 0 or patch_w <= 0:
+        raise ValueError("patch_shape must be positive")
+    if depth_m is not None and depth_m.shape[:2] != rgb.shape[:2]:
+        depth = _resize_nearest_float(depth_m, rgb.shape[:2])
+    else:
+        depth = depth_m
+    rows = _bin_edges(rgb.shape[0], patch_h)
+    cols = _bin_edges(rgb.shape[1], patch_w)
+    base = np.zeros((patch_h, patch_w, 10), dtype=np.float32)
+    rgb_float = rgb.astype(np.float32) / np.float32(255.0)
+    for row_index in range(patch_h):
+        row_slice = slice(rows[row_index], rows[row_index + 1])
+        for col_index in range(patch_w):
+            col_slice = slice(cols[col_index], cols[col_index + 1])
+            rgb_patch = rgb_float[row_slice, col_slice]
+            rgb_mean = rgb_patch.reshape(-1, 3).mean(axis=0) if rgb_patch.size else np.zeros((3,), dtype=np.float32)
+            if depth is None:
+                depth_valid_ratio = np.float32(0.0)
+                depth_mean = np.float32(0.0)
+                depth_std = np.float32(0.0)
+                depth_near = np.float32(0.0)
+                depth_far = np.float32(0.0)
+            else:
+                depth_patch = np.asarray(depth[row_slice, col_slice], dtype=np.float32)
+                valid = np.isfinite(depth_patch) & (depth_patch > np.float32(0.0))
+                depth_valid_ratio = np.float32(np.count_nonzero(valid) / max(depth_patch.size, 1))
+                if np.any(valid):
+                    values = np.clip(depth_patch[valid], 0.0, 6.0).astype(np.float32)
+                    depth_mean = np.float32(np.mean(values) / 6.0)
+                    depth_std = np.float32(np.std(values) / 3.0)
+                    depth_near = np.float32(np.min(values) / 6.0)
+                    depth_far = np.float32(np.max(values) / 6.0)
+                else:
+                    depth_mean = depth_std = depth_near = depth_far = np.float32(0.0)
+            base[row_index, col_index] = np.asarray(
+                [
+                    float(rgb_mean[0]),
+                    float(rgb_mean[1]),
+                    float(rgb_mean[2]),
+                    float(depth_mean),
+                    float(depth_std),
+                    float(depth_near),
+                    float(depth_far),
+                    float(depth_valid_ratio),
+                    row_index / max(patch_h - 1, 1),
+                    col_index / max(patch_w - 1, 1),
+                ],
+                dtype=np.float32,
+            )
+    repeats = int(np.ceil(feature_dim / base.shape[-1]))
+    tiled = np.tile(base, (1, 1, repeats))[..., :feature_dim]
+    return tiled.astype(np.float32)
+
+
+def _bin_edges(size: int, bins: int) -> np.ndarray:
+    edges = np.linspace(0, size, bins + 1).round().astype(np.int64)
+    edges[0] = 0
+    edges[-1] = size
+    for index in range(1, len(edges)):
+        if edges[index] <= edges[index - 1]:
+            edges[index] = min(size, edges[index - 1] + 1)
+    return np.clip(edges, 0, size)
+
+
+def _resize_nearest_float(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    rows = np.linspace(0, array.shape[0] - 1, shape[0]).round().astype(np.int64)
+    cols = np.linspace(0, array.shape[1] - 1, shape[1]).round().astype(np.int64)
+    return np.asarray(array, dtype=np.float32)[rows[:, None], cols[None, :]]
 
 
 def _yaw_from_quaternion_xyzw(quaternion: tuple[float, float, float, float]) -> float:
@@ -797,14 +1003,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--v1-pose-warp-source",
         choices=V1_POSE_WARP_SOURCES,
-        default="route_pose",
-        help="Pose source for SpatialMemoryNet v1 memory warp; predicted_pose is an explicit ablation.",
+        default="odom",
+        help=(
+            "Pose source for SpatialMemoryNet v1 memory warp. route_pose and "
+            "route_pose_ablation are explicit ground-truth leakage ablations."
+        ),
     )
     parser.add_argument(
         "--v1-policy-bev-source",
         choices=V1_POLICY_BEV_SOURCES,
         default="memory",
         help="BEV source used for SpatialMemoryNet v1 replay-only trajectory decisions.",
+    )
+    parser.add_argument(
+        "--runtime-feature-source",
+        choices=RUNTIME_FEATURE_SOURCES,
+        default="dino",
+        help="Use precomputed DINO features or direct current RGB-D runtime features.",
     )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
@@ -819,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
             device_name=args.device,
             v1_pose_warp_source=args.v1_pose_warp_source,
             v1_policy_bev_source=args.v1_policy_bev_source,
+            runtime_feature_source=args.runtime_feature_source,
         )
     else:
         write_dummy_model_outputs(args.log, args.out)

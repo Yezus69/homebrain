@@ -21,6 +21,27 @@ cleaning trajectories.
 - `homebrain/policies`: candidate trajectories, scorers, labels, and audits.
 - `homebrain/tools`: narrow operational probes and validation commands.
 
+## Latest Real-Data Milestone
+
+Route-heldout OpenLORIS replay milestone command:
+
+```text
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal25_openloris_route_heldout_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 48 --max-spatial-folds 2
+```
+
+Main report:
+`runs/goal25_openloris_route_heldout_milestone/milestone_report.json`
+
+Artifacts include SpatialMemoryNetV1 checkpoints, a FutureBEVRolloutV1
+checkpoint, route-heldout runtime reports, and a visual failure contact sheet.
+The result is real public OpenLORIS replay evidence only:
+`replay_only=true`, `control_safe=false`, `raw_pwm_emitted=false`.
+
+Known result: heldout corridor replay produced 96 non-empty decisions with
+p50/p95 latency `28.2573/31.700175 ms`, zero unsafe selected rate, and zero
+route-pose leakage, but both future rollout and runtime action selection
+collapsed to one candidate (`action_entropy=0.0`, dominant fraction `1.0`).
+
 ## Read This First
 
 1. `PROJECT_BRIEF.md`
