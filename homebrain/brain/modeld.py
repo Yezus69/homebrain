@@ -4,6 +4,7 @@ import argparse
 from dataclasses import dataclass
 from math import atan2, cos, sin
 from pathlib import Path
+import time
 from typing import Iterable
 
 import numpy as np
@@ -508,7 +509,10 @@ def _spatial_v1_output_for_frame(
     policy_bev_source: str,
     device: torch.device,
 ) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor]:
+    total_started = time.perf_counter()
+    feature_started = time.perf_counter()
     patch_features, _cls_feature = feature_store.load_for_frame(frame)
+    feature_load_latency_ms = _elapsed_ms(feature_started)
     features = torch.from_numpy(np.transpose(patch_features, (2, 0, 1))[None, ...].astype(np.float32)).to(device)
     timestamp_s = torch.tensor(
         [[(frame.timestamp_ns - start_timestamp_ns) / 1_000_000_000.0]],
@@ -520,6 +524,8 @@ def _spatial_v1_output_for_frame(
     pose_to_current = pose_delta_to_current.view(1, 3).to(device) if pose_delta_to_current is not None else None
     pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if pose_delta_to_current is not None else None
     model.eval()
+    model_started = time.perf_counter()
+    _sync_device(device)
     with torch.no_grad():
         outputs = model.step(
             features,
@@ -530,6 +536,9 @@ def _spatial_v1_output_for_frame(
             pose_delta_to_current_mask=pose_mask,
             force_reset=torch.tensor([reset_memory], dtype=torch.bool, device=device),
         )
+    _sync_device(device)
+    model_latency_ms = _elapsed_ms(model_started)
+    postprocess_started = time.perf_counter()
     current_logits = outputs["current_bev_logits"][0].detach().cpu().numpy().astype(np.float32)
     memory_logits = outputs["fused_memory_bev_logits"][0].detach().cpu().numpy().astype(np.float32)
     current_probabilities = torch.sigmoid(outputs["current_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
@@ -589,6 +598,8 @@ def _spatial_v1_output_for_frame(
         if pose_delta_to_current is not None
         else None
     )
+    postprocess_latency_ms = _elapsed_ms(postprocess_started)
+    decision_started = time.perf_counter()
     decision = decide_trajectory(
         bev=local_bev,
         candidates=trajectory_candidates,
@@ -601,8 +612,26 @@ def _spatial_v1_output_for_frame(
         policy_bev_source=policy_bev_source,
         coverage_memory_reset=reset_memory,
     )
+    _sync_device(device)
+    decision_latency_ms = _elapsed_ms(decision_started)
     arrays.update(decision.artifact_arrays)
+    artifact_started = time.perf_counter()
     write_deterministic_npz(artifact_path, arrays)
+    artifact_write_latency_ms = _elapsed_ms(artifact_started)
+    total_latency_ms = _elapsed_ms(total_started)
+    latency_debug = {
+        "feature_load_latency_ms": round(feature_load_latency_ms, 6),
+        "model_latency_ms": round(model_latency_ms, 6),
+        "memory_update_latency_ms": round(model_latency_ms, 6),
+        "postprocess_latency_ms": round(postprocess_latency_ms, 6),
+        "decision_latency_ms": round(decision_latency_ms, 6),
+        "artifact_write_latency_ms": round(artifact_write_latency_ms, 6),
+        "end_to_end_latency_ms": round(total_latency_ms, 6),
+        "target_hz": 10.0,
+        "target_period_ms": 100.0,
+        "meets_10hz_budget": bool(total_latency_ms <= 100.0),
+        "device": str(device),
+    }
     input_id = event_identity(frame)
     return (
         BrainOutputEvent(
@@ -646,6 +675,7 @@ def _spatial_v1_output_for_frame(
                 "product_training_approved": False,
                 "cmd_vel_emitted": False,
                 "input_frame_id": frame.frame_id,
+                "latency": latency_debug,
                 **decision.debug,
             },
         ),
@@ -739,6 +769,15 @@ def _wrap_angle(value: float) -> float:
     while value < -np.pi:
         value += 2.0 * float(np.pi)
     return float(value)
+
+
+def _elapsed_ms(started: float) -> float:
+    return float((time.perf_counter() - started) * 1000.0)
+
+
+def _sync_device(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
 
 
 def _checkpoint_model_name(checkpoint: str | Path) -> str:

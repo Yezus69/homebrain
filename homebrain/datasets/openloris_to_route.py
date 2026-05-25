@@ -26,6 +26,7 @@ from homebrain.ingest.image_sequence import read_image_size
 from homebrain.ingest.metadata import ROUTE_SOURCE_METADATA_FILE, ROUTE_SOURCE_SCHEMA_VERSION, write_route_metadata
 from homebrain.messages.schema import Event, FrameEvent, ImuEvent, JsonDict, OdomEvent, PoseEvent, deterministic_json
 from homebrain.replay.segment_log import write_segment
+from homebrain.teachers.artifacts import file_sha256
 
 OPENLORIS_IMPORT_SOURCE = "openloris_scene_import"
 
@@ -36,16 +37,24 @@ def openloris_to_route(
     out_dir: str | Path,
     max_frames: int | None = None,
     camera_id: str = "d400_color",
+    require_depth: bool = True,
+    require_robot_frame_calibration: bool = True,
 ) -> Path:
     source = discover_sequence_root(source_dir)
     output = Path(out_dir)
     if max_frames is not None and max_frames < 1:
         raise ValueError("max-frames must be at least 1 when supplied")
-    validate_sequence_dir(source)
+    validate_sequence_dir(source, require_depth=require_depth)
     scene = sequence_scene(source)
     calibration = load_calibration(source, camera_id=camera_id)
     intrinsics = _frame_intrinsics(calibration)
     camera_to_base = calibration.get("camera_to_base")
+    if require_robot_frame_calibration:
+        _require_openloris_robot_frame_calibration(
+            intrinsics=intrinsics,
+            camera_to_base=camera_to_base,
+            source=source,
+        )
 
     associations = load_associations(source)
     if max_frames is not None:
@@ -59,6 +68,7 @@ def openloris_to_route(
 
     events: list[Event] = []
     artifact_files: list[str] = [ROUTE_SOURCE_METADATA_FILE, OPENLORIS_ROUTE_ASSOCIATIONS_FILE]
+    artifact_checksums: dict[str, str] = {}
     frame_records: list[JsonDict] = []
     copied_depth_count = 0
     for frame_id, association in enumerate(associations):
@@ -69,8 +79,10 @@ def openloris_to_route(
         rgb_ref = f"frames/frame_{frame_id:06d}{rgb_source.suffix.lower()}"
         shutil.copy2(rgb_source, output / rgb_ref)
         artifact_files.append(rgb_ref)
+        artifact_checksums[rgb_ref] = file_sha256(output / rgb_ref)
 
         depth_ref: str | None = None
+        depth_sha256: str | None = None
         if association.depth is not None:
             depth_source = source / association.depth.path
             if not depth_source.exists():
@@ -78,6 +90,8 @@ def openloris_to_route(
             depth_ref = f"depth/depth_{frame_id:06d}{depth_source.suffix.lower()}"
             shutil.copy2(depth_source, output / depth_ref)
             artifact_files.append(depth_ref)
+            depth_sha256 = file_sha256(output / depth_ref)
+            artifact_checksums[depth_ref] = depth_sha256
             copied_depth_count += 1
 
         ts_ns = timestamp_ns(association.rgb.timestamp)
@@ -99,7 +113,24 @@ def openloris_to_route(
             events.append(_odom_event(output.name, association.odom))
         if association.pose is not None:
             events.append(_pose_event(output.name, association.pose))
-        frame_records.append(_association_record(frame_id, rgb_ref, depth_ref, association, intrinsics, camera_to_base))
+        frame_records.append(
+            _association_record(
+                frame_id,
+                rgb_ref,
+                depth_ref,
+                association,
+                intrinsics,
+                camera_to_base,
+                rgb_sha256=artifact_checksums[rgb_ref],
+                depth_sha256=depth_sha256,
+            )
+        )
+
+    if require_depth and copied_depth_count != len(frame_records):
+        raise ValueError(
+            f"OpenLORIS import requires synchronized depth, but copied {copied_depth_count}/"
+            f"{len(frame_records)} depth frames"
+        )
 
     imu_pairs = merge_imu_samples(
         parse_imu_samples(source / "d400_accelerometer.txt"),
@@ -142,11 +173,13 @@ def openloris_to_route(
         "intrinsics": intrinsics,
         "camera_to_base": camera_to_base,
         "camera_to_base_source": calibration.get("camera_to_base_source"),
+        "calibration_sources": _calibration_sources(source, calibration),
         "dataset_frame_type": "public_robot_mounted",
         "robot_frame_truth_candidate": robot_frame_truth_candidate,
         "robot_frame_truth": bool(robot_frame_truth_candidate),
         "control_safe": False,
         "frame_count": len(frame_records),
+        "artifact_sha256": artifact_checksums,
         "frames": frame_records,
     }
     _write_json(output / OPENLORIS_ROUTE_ASSOCIATIONS_FILE, associations_manifest)
@@ -199,7 +232,7 @@ def openloris_to_route(
         "dataset_frame_type": "public_robot_mounted",
         "calibration_class": "dataset_robot_mounted_rgbd",
         "intrinsics_source": intrinsics.get("source", "missing"),
-        "extrinsics_source": "openloris_static_tf" if camera_to_base else "missing",
+        "extrinsics_source": _extrinsics_source_name(calibration),
         "pose_source": "openloris_groundtruth_or_odom",
         "scale_source": "openloris_metric_depth",
         "gravity_floor_source": "camera_to_base_robot_mount",
@@ -220,6 +253,8 @@ def openloris_to_route(
         "control_safe_claim": False,
         "user_owned_or_license_unknown": False,
         "missing_sensor_notices": missing_sensor_notices,
+        "artifact_sha256": artifact_checksums,
+        "calibration_sources": _calibration_sources(source, calibration),
     }
     write_route_metadata(output, metadata)
     write_segment(output, events, segment_id=output.name, artifact_files=artifact_files)
@@ -233,6 +268,9 @@ def _association_record(
     association: OpenLorisAssociation,
     intrinsics: JsonDict,
     camera_to_base: object,
+    *,
+    rgb_sha256: str,
+    depth_sha256: str | None,
 ) -> JsonDict:
     return {
         "frame_id": frame_id,
@@ -240,9 +278,11 @@ def _association_record(
         "rgb_timestamp": association.rgb.timestamp,
         "rgb_source_path": association.rgb.path,
         "rgb_ref": rgb_ref,
+        "rgb_sha256": rgb_sha256,
         "depth_timestamp": association.depth.timestamp if association.depth is not None else None,
         "depth_source_path": association.depth.path if association.depth is not None else None,
         "depth_ref": depth_ref,
+        "depth_sha256": depth_sha256,
         "intrinsics": intrinsics,
         "camera_to_base": camera_to_base,
         "base_pose": association.pose.to_dict() if association.pose is not None else None,
@@ -312,18 +352,84 @@ def _write_json(path: Path, data: JsonDict) -> None:
         handle.write("\n")
 
 
+def _require_openloris_robot_frame_calibration(
+    *,
+    intrinsics: JsonDict,
+    camera_to_base: object,
+    source: Path,
+) -> None:
+    missing: list[str] = []
+    if not intrinsics.get("available"):
+        missing.append("camera intrinsics")
+    if not _valid_matrix(camera_to_base):
+        missing.append("camera_to_base transform")
+    if missing:
+        raise ValueError(
+            "OpenLORIS robot-frame import requires measured calibration; missing "
+            + ", ".join(missing)
+            + f" in {source}. Expected sensors.yaml plus trans_matrix.yaml or reviewed calibration.json."
+        )
+
+
+def _valid_matrix(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(isinstance(row, list) and len(row) == 4 for row in value)
+    )
+
+
+def _extrinsics_source_name(calibration: JsonDict) -> str:
+    source = calibration.get("camera_to_base_source")
+    if not isinstance(source, dict):
+        return "missing"
+    if source.get("source") == "trans_matrix.yaml":
+        return "openloris_trans_matrix_yaml"
+    if source.get("enabled_by_env") == "HOMEBRAIN_OPENLORIS_ALLOW_OFFICIAL_STATIC_TF":
+        return "openloris_static_tf_env_reviewed"
+    if source.get("source"):
+        return str(source["source"])
+    if source.get("source_url"):
+        return "openloris_static_tf"
+    return "provided"
+
+
+def _calibration_sources(source: Path, calibration: JsonDict) -> JsonDict:
+    files: JsonDict = {}
+    for filename in ("sensors.yaml", "trans_matrix.yaml", "openloris_calibration.json", "calibration.json"):
+        path = source / filename
+        if path.exists():
+            files[filename] = {
+                "path": path.as_posix(),
+                "sha256": file_sha256(path),
+            }
+    return {
+        "intrinsics": calibration.get("intrinsics_source"),
+        "camera_to_base": calibration.get("camera_to_base_source"),
+        "files": files,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Import an extracted OpenLORIS-Scene package into a HomeBrain route log.")
     parser.add_argument("--source", required=True, help="Extracted OpenLORIS sequence directory.")
     parser.add_argument("--out", required=True, help="Output HomeBrain route directory.")
     parser.add_argument("--max-frames", type=int, default=None)
     parser.add_argument("--camera-id", default="d400_color")
+    parser.add_argument(
+        "--allow-incomplete-calibration",
+        action="store_true",
+        help="Import for review only when robot-frame RGB-D calibration is incomplete.",
+    )
+    parser.add_argument("--allow-missing-depth", action="store_true", help="Import RGB-only review routes.")
     args = parser.parse_args(argv)
     out = openloris_to_route(
         source_dir=args.source,
         out_dir=args.out,
         max_frames=args.max_frames,
         camera_id=args.camera_id,
+        require_depth=not args.allow_missing_depth,
+        require_robot_frame_calibration=not args.allow_incomplete_calibration,
     )
     print(f"imported OpenLORIS route to {out.as_posix()}")
     return 0

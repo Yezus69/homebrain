@@ -83,6 +83,11 @@ OPENLORIS_STATIC_TRANSFORM_SOURCE = {
     "tools_commit_inspected": OPENLORIS_TOOLS_COMMIT_INSPECTED,
     "transform_direction": "camera_points_to_base_link",
 }
+OPENLORIS_TRANS_MATRIX_SOURCE = {
+    "source": "trans_matrix.yaml",
+    "frame_source": "OpenLORIS extracted static transform file",
+    "transform_direction": "camera_points_to_base_link",
+}
 
 
 @dataclass(frozen=True)
@@ -346,15 +351,30 @@ def load_associations(sequence_dir: str | Path, *, max_difference: float = 0.03)
 
 def load_calibration(sequence_dir: str | Path, *, camera_id: str = "d400_color") -> JsonDict:
     root = Path(sequence_dir)
-    calibration = _read_json_calibration(root, camera_id)
-    if calibration:
-        return calibration
-    intrinsics = _parse_intrinsics_from_sensors_yaml(root / "sensors.yaml", camera_id)
+    json_calibration = _read_json_calibration(root, camera_id)
+    intrinsics = (
+        json_calibration.get("intrinsics")
+        if isinstance(json_calibration.get("intrinsics"), dict)
+        else _parse_intrinsics_from_sensors_yaml(root / "sensors.yaml", camera_id)
+    )
+    camera_to_base = json_calibration.get("camera_to_base")
+    camera_to_base_source = json_calibration.get("camera_to_base_source")
+    if not _valid_matrix(camera_to_base):
+        parsed = _parse_camera_to_base_from_trans_matrix_yaml(root / "trans_matrix.yaml", camera_id)
+        if parsed is not None:
+            camera_to_base, camera_to_base_source = parsed
+    if not _valid_matrix(camera_to_base) and environ_truthy("HOMEBRAIN_OPENLORIS_ALLOW_OFFICIAL_STATIC_TF"):
+        camera_to_base = _official_camera_to_base(sequence_scene(root), camera_id)
+        camera_to_base_source = {
+            **OPENLORIS_STATIC_TRANSFORM_SOURCE,
+            "operator_review_required": True,
+            "enabled_by_env": "HOMEBRAIN_OPENLORIS_ALLOW_OFFICIAL_STATIC_TF",
+        }
     return {
         "intrinsics": intrinsics,
-        "intrinsics_source": "sensors.yaml" if intrinsics.get("available") else "missing",
-        "camera_to_base": _official_camera_to_base(sequence_scene(root), camera_id),
-        "camera_to_base_source": OPENLORIS_STATIC_TRANSFORM_SOURCE,
+        "intrinsics_source": str(intrinsics.get("source", "missing")) if intrinsics.get("available") else "missing",
+        "camera_to_base": camera_to_base if _valid_matrix(camera_to_base) else None,
+        "camera_to_base_source": camera_to_base_source if _valid_matrix(camera_to_base) else None,
     }
 
 
@@ -522,6 +542,58 @@ def _matrix_from_json(data: JsonDict, key: str, camera_id: str) -> list[list[flo
     return None
 
 
+def _parse_camera_to_base_from_trans_matrix_yaml(
+    path: Path,
+    camera_id: str,
+) -> tuple[list[list[float]], JsonDict] | None:
+    if not path.exists():
+        return None
+    text = path.read_text(encoding="utf-8", errors="replace")
+    child_aliases = _camera_frame_aliases(camera_id)
+    entries = re.finditer(
+        r"parent_frame:\s*([^\n\r]+).*?child_frame:\s*([^\n\r]+).*?data:\s*\[([^\]]+)\]",
+        text,
+        flags=re.S,
+    )
+    for match in entries:
+        parent = match.group(1).strip().strip("'\"")
+        child = match.group(2).strip().strip("'\"")
+        if parent != "base_link" or child not in child_aliases:
+            continue
+        values = _float_list(match.group(3))
+        if len(values) != 16:
+            continue
+        matrix = [
+            [float(values[row * 4 + col]) for col in range(4)]
+            for row in range(4)
+        ]
+        if not _valid_matrix(matrix):
+            continue
+        return (
+            matrix,
+            {
+                **OPENLORIS_TRANS_MATRIX_SOURCE,
+                "path": path.as_posix(),
+                "parent_frame": parent,
+                "child_frame": child,
+            },
+        )
+    return None
+
+
+def _camera_frame_aliases(camera_id: str) -> set[str]:
+    aliases = {camera_id}
+    if camera_id.endswith("_optical_frame"):
+        aliases.add(camera_id.removesuffix("_optical_frame"))
+    else:
+        aliases.add(f"{camera_id}_optical_frame")
+    if camera_id == "d400_color":
+        aliases.add("d400_color_optical_frame")
+    if camera_id == "d400_depth":
+        aliases.add("d400_depth_optical_frame")
+    return aliases
+
+
 def _parse_intrinsics_from_sensors_yaml(path: Path, camera_id: str) -> JsonDict:
     if not path.exists():
         return {"available": False, "status": "missing", "depth_scale": OPENLORIS_DEPTH_SCALE}
@@ -581,6 +653,14 @@ def _official_camera_to_base(scene: str, camera_id: str) -> list[list[float]] | 
     if values is None:
         return None
     return transform_to_matrix(values)
+
+
+def _valid_matrix(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == 4
+        and all(isinstance(row, list) and len(row) == 4 for row in value)
+    )
 
 
 def _depth_list_path(root: Path) -> Path | None:

@@ -31,6 +31,10 @@ from homebrain.policies.trajectory_scorer_net_v0 import (
 
 RUNTIME_DECISION_SCHEMA_VERSION = "homebrain.runtime_decision.v0"
 TRANSPARENT_TRAJECTORY_SCORER_SOURCE = "transparent_coverage_risk_v0"
+DEFAULT_CMD_VEL_LIMITS = {
+    "max_linear_velocity_mps": 0.25,
+    "max_angular_velocity_radps": 1.0,
+}
 
 
 @dataclass(frozen=True)
@@ -187,6 +191,7 @@ def decide_trajectory(
         scorer_mode = "learned"
 
     selected_index = _selected_candidate_index(candidates, selected_candidate_id)
+    cmd_vel_proposal = _bounded_cmd_vel_proposal(candidates[selected_index])
     coverage_memory.update_current_frame(bev)
     coverage_after_update = coverage_memory.to_dict()
     selected_metrics = _score_dict_for_candidate(transparent_decision, selected_candidate_id)
@@ -235,6 +240,11 @@ def decide_trajectory(
         "coverage_memory_after_align": coverage_after_align,
         "coverage_memory_update": _coverage_update(coverage_before, coverage_after_update),
         "coverage_memory_reset": bool(coverage_memory_reset),
+        "cmd_vel_proposal": cmd_vel_proposal,
+        "cmd_vel_proposal_available": True,
+        "cmd_vel_proposal_is_bounded": True,
+        "cmd_vel_bounds": dict(DEFAULT_CMD_VEL_LIMITS),
+        "cmd_vel_proposal_note": "review_only_not_executed",
         "replay_only": True,
         "not_executed": True,
         "control_safe": False,
@@ -405,6 +415,39 @@ def _coverage_update(before: JsonDict, after: JsonDict) -> JsonDict:
         "pose_alignment_attempt_count": int(after.get("pose_alignment_attempt_count", 0)),
         "missing_pose_delta_count": int(after.get("missing_pose_delta_count", 0)),
     }
+
+
+def _bounded_cmd_vel_proposal(candidate: CandidateTrajectory) -> JsonDict:
+    proxy = candidate.cmd_vel_proxy
+    linear = _clip_float(
+        proxy.get("linear_velocity_mps", 0.0),
+        -float(DEFAULT_CMD_VEL_LIMITS["max_linear_velocity_mps"]),
+        float(DEFAULT_CMD_VEL_LIMITS["max_linear_velocity_mps"]),
+    )
+    angular = _clip_float(
+        proxy.get("angular_velocity_radps", 0.0),
+        -float(DEFAULT_CMD_VEL_LIMITS["max_angular_velocity_radps"]),
+        float(DEFAULT_CMD_VEL_LIMITS["max_angular_velocity_radps"]),
+    )
+    return {
+        "linear_velocity_mps": linear,
+        "angular_velocity_radps": angular,
+        "selected_candidate_id": candidate.id,
+        "source": "selected_candidate_cmd_vel_proxy",
+        "bounded": True,
+        "not_hardware_control": True,
+        "replay_only": True,
+        "not_executed": True,
+        "control_safe": False,
+        "raw_pwm_emitted": False,
+    }
+
+
+def _clip_float(value: object, lower: float, upper: float) -> float:
+    number = float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
+    if not np.isfinite(number):
+        number = 0.0
+    return float(np.clip(number, lower, upper))
 
 
 def metadata_float(metadata: dict[str, Any], key: str, default: float) -> float:

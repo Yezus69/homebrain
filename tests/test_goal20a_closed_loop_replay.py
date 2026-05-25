@@ -18,6 +18,7 @@ from homebrain.policies.trajectory_scorer_net_v0 import (
 )
 from homebrain.replay.replayd import replay_log
 from homebrain.replay.segment_log import read_events, write_segment
+from homebrain.runtime.replay_openloris_brain import run_openloris_runtime_replay
 from homebrain.teachers.dino_teacher import run_dino_teacher
 
 
@@ -53,6 +54,8 @@ def test_runtime_decision_emits_candidates_selection_and_coverage_debug() -> Non
     assert decision.debug["policy_bev_source"] == "memory"
     assert decision.debug["control_safe"] is False
     assert decision.debug["cmd_vel_emitted"] is False
+    assert decision.debug["cmd_vel_proposal_available"] is True
+    assert decision.debug["cmd_vel_proposal"]["bounded"] is True
     assert decision.debug["coverage_memory"]["coverage_memory_cells_seen"] > 0
     assert "trajectory_selected_index" in decision.artifact_arrays
 
@@ -85,6 +88,8 @@ def test_v1_replay_outputs_candidates_selected_id_and_report_no_cmd_vel(tmp_path
     assert outputs[0].debug["policy_bev_source"] == "memory"
     assert outputs[0].debug["control_safe"] is False
     assert outputs[0].debug["replay_only"] is True
+    assert outputs[0].debug["cmd_vel_proposal"]["bounded"] is True
+    assert outputs[0].debug["latency"]["end_to_end_latency_ms"] >= 0.0
     with np.load(replay_out / outputs[0].local_bev_ref, allow_pickle=False) as data:
         assert "memory_bev_free_prob" in data.files
         assert "trajectory_selected_index" in data.files
@@ -92,6 +97,8 @@ def test_v1_replay_outputs_candidates_selected_id_and_report_no_cmd_vel(tmp_path
     report = build_closed_loop_replay_report(log_dir=replay_out)
     assert report["decision_count"] == len(outputs)
     assert report["cmd_vel_non_null_count"] == 0
+    assert report["cmd_vel_proposal_count"] == len(outputs)
+    assert report["latency_end_to_end_p95_ms"] >= 0.0
     assert report["control_safe"] is False
     assert report["replay_only"] is True
     assert report["policy_bev_source"] == "memory"
@@ -143,6 +150,54 @@ def test_v1_replay_accepts_optional_learned_trajectory_scorer(tmp_path: Path) ->
     assert "transparent_trajectory_score" in outputs[0].candidate_trajectories[0]
 
 
+def test_openloris_runtime_wrapper_runs_transparent_baseline_and_preserves_route_frame_count(tmp_path: Path) -> None:
+    route = tmp_path / "route"
+    features = tmp_path / "dino_fake"
+    runtime_out = tmp_path / "runtime"
+    checkpoint = tmp_path / "v1.pt"
+    scorer_checkpoint = tmp_path / "scorer" / "checkpoint.pt"
+    _write_route_with_pose(route, count=3)
+    _write_openloris_route_metadata(route, frame_count=3)
+    run_dino_teacher(route, features, backend_name="fake")
+    model = SpatialMemoryNetV1(SpatialMemoryNetV1Config(feature_dim=32, bev_shape=(4, 4), hidden_channels=16, sensor_dim=5))
+    save_checkpoint(checkpoint, model, metadata={"control_safe": False, "replay_only": True}, metrics={})
+    scorer = TrajectoryScorerNetV0(TrajectoryScorerNetConfig())
+    save_trajectory_scorer_checkpoint(
+        scorer_checkpoint,
+        scorer,
+        metadata={
+            "meters_per_cell": 0.5,
+            "robot_radius_m": 0.18,
+            "replay_only": True,
+            "not_executed": True,
+            "control_safe": False,
+            "product_training_approved": False,
+        },
+        metrics={"control_safe": False, "replay_only": True},
+    )
+
+    report = run_openloris_runtime_replay(
+        log_dir=route,
+        out_dir=runtime_out,
+        checkpoint=checkpoint,
+        feature_dir=features,
+        trajectory_scorer_checkpoint=scorer_checkpoint,
+        device_name="cpu",
+    )
+
+    assert report["schema_version"] == "homebrain.runtime.openloris_replay.v0"
+    assert report["frame_count"] == 3
+    assert report["route_frame_count"] == 3
+    assert report["frame_event_count"] == 0
+    assert report["decision_count"] == 3
+    assert report["transparent_baseline_enabled"] is True
+    assert Path(report["transparent_baseline_modeld_log"]).exists()
+    assert report["comparison"]["matched_decision_count"] == 3
+    assert report["cmd_vel_proposal_count"] == 3
+    assert report["cmd_vel_executed"] is False
+    assert report["raw_pwm_emitted"] is False
+
+
 def _write_route_with_pose(route: Path, *, count: int) -> None:
     events = []
     artifacts = []
@@ -176,3 +231,28 @@ def _write_route_with_pose(route: Path, *, count: int) -> None:
         events.extend([frame, pose])
         artifacts.append(frame.data_ref)
     write_segment(route, events, segment_id=route.name, artifact_files=artifacts)
+
+
+def _write_openloris_route_metadata(route: Path, *, frame_count: int) -> None:
+    (route / "route_metadata.json").write_text(
+        """{
+  "schema_version": "homebrain.openloris_route.v0",
+  "source_type": "openloris_scene",
+  "sequence": "cafe1-1_2",
+  "scene": "cafe",
+  "frame_count": %d,
+  "imported_frame_count": %d,
+  "robot_frame_truth": true,
+  "has_depth": true,
+  "has_odometry": true,
+  "has_groundtruth_pose": true,
+  "has_camera_to_base_transform": true,
+  "control_safe": false,
+  "license_name": "OpenLORIS-Scene",
+  "license_review_status": "review_required"
+}
+"""
+        % (frame_count, frame_count),
+        encoding="utf-8",
+        newline="\n",
+    )

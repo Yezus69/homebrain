@@ -72,9 +72,15 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         for event in decisions
         if isinstance(event.debug, dict) and isinstance(event.debug.get("coverage_memory"), dict)
     ]
+    latency_records = [
+        event.debug.get("latency")
+        for event in outputs
+        if isinstance(event.debug, dict) and isinstance(event.debug.get("latency"), dict)
+    ]
     pose_warp_values = [_pose_warp_value(event) for event in outputs]
     risky_fractions = [_risky_candidate_fraction(event) for event in decisions]
     cmd_vel_non_null_count = sum(1 for event in outputs if event.cmd_vel is not None)
+    cmd_vel_proposals = [_cmd_vel_proposal(event) for event in outputs]
     control_safe = any(_event_or_candidate_flag(event, "control_safe") for event in outputs)
     replay_only = bool(outputs) and all(_debug_flag(event, "replay_only") for event in outputs)
     not_executed = bool(outputs) and all(_debug_flag(event, "not_executed") for event in outputs)
@@ -98,12 +104,40 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         "selected_unknown_penalty_mean": _mean_score(selected_scores, "unknown_penalty"),
         "selected_uncertainty_penalty_mean": _mean_score(selected_scores, "uncertainty_penalty"),
         "selected_coverage_gain_mean": _mean_score(selected_scores, "coverage_gain_proxy"),
+        "selected_collision_probability_mean": _mean_score(selected_scores, "future_collision_probability"),
+        "selected_unknown_exposure_mean": _mean_score(selected_scores, "future_unknown_exposure"),
+        "selected_new_area_gain_mean": _mean_score(selected_scores, "future_new_area_gain"),
+        "selected_progress_mean": _mean_score(selected_scores, "future_progress"),
         "coverage_memory_cells_seen": _max_coverage_value(coverage_records, "coverage_memory_cells_seen"),
         "coverage_memory_cells_covered": _max_coverage_value(coverage_records, "coverage_memory_cells_covered"),
         "pose_warp_valid_fraction": _mean([value for value in pose_warp_values if value is not None]),
         "policy_bev_source": _single_or_mixed(policy_sources),
         "policy_bev_source_distribution": dict(sorted(Counter(policy_sources).items())),
         "cmd_vel_non_null_count": int(cmd_vel_non_null_count),
+        "cmd_vel_proposal_count": len(cmd_vel_proposals),
+        "cmd_vel_proposal_nonzero_count": sum(1 for item in cmd_vel_proposals if _proposal_nonzero(item)),
+        "route_progress_proxy_mean": _mean(
+            [
+                item.get("linear_velocity_mps")
+                for item in cmd_vel_proposals
+                if isinstance(item, dict)
+            ]
+        ),
+        "latency_end_to_end_p50_ms": _latency_percentile(latency_records, "end_to_end_latency_ms", 50),
+        "latency_end_to_end_p95_ms": _latency_percentile(latency_records, "end_to_end_latency_ms", 95),
+        "latency_model_p50_ms": _latency_percentile(latency_records, "model_latency_ms", 50),
+        "latency_model_p95_ms": _latency_percentile(latency_records, "model_latency_ms", 95),
+        "latency_memory_update_p50_ms": _latency_percentile(latency_records, "memory_update_latency_ms", 50),
+        "latency_memory_update_p95_ms": _latency_percentile(latency_records, "memory_update_latency_ms", 95),
+        "latency_decision_p50_ms": _latency_percentile(latency_records, "decision_latency_ms", 50),
+        "latency_decision_p95_ms": _latency_percentile(latency_records, "decision_latency_ms", 95),
+        "realtime_10hz_pass_fraction": _mean(
+            [
+                1.0 if record.get("meets_10hz_budget") is True else 0.0
+                for record in latency_records
+                if isinstance(record, dict)
+            ]
+        ),
         "control_safe": bool(control_safe),
         "replay_only": bool(replay_only),
         "not_executed": bool(not_executed),
@@ -116,12 +150,63 @@ def _compare_decisions(primary_events: list[Event], compare_events: list[Event],
     compare = _decision_map(compare_events)
     matched = sorted(set(primary) & set(compare))
     differing = [key for key in matched if primary[key] != compare[key]]
+    primary_metrics = _summarize_events(primary_events)
+    compare_metrics = _summarize_events(compare_events)
     return {
         "compare_log": compare_path.as_posix(),
+        "comparison_kind": "primary_vs_transparent_or_alternate_replay_log",
         "matched_decision_count": len(matched),
         "differing_selected_count": len(differing),
         "differing_selected_fraction": float(len(differing) / max(len(matched), 1)),
         "decisions_differ": bool(differing),
+        "primary_decision_count": int(primary_metrics.get("decision_count", 0)),
+        "compare_decision_count": int(compare_metrics.get("decision_count", 0)),
+        "primary_selected_candidate_entropy": primary_metrics.get("selected_candidate_entropy"),
+        "compare_selected_candidate_entropy": compare_metrics.get("selected_candidate_entropy"),
+        "primary_stop_selected_fraction": primary_metrics.get("stop_selected_fraction"),
+        "compare_stop_selected_fraction": compare_metrics.get("stop_selected_fraction"),
+        "primary_selected_risk_score_mean": primary_metrics.get("selected_risk_score_mean"),
+        "compare_selected_risk_score_mean": compare_metrics.get("selected_risk_score_mean"),
+        "primary_selected_unknown_penalty_mean": primary_metrics.get("selected_unknown_penalty_mean"),
+        "compare_selected_unknown_penalty_mean": compare_metrics.get("selected_unknown_penalty_mean"),
+        "primary_selected_coverage_gain_mean": primary_metrics.get("selected_coverage_gain_mean"),
+        "compare_selected_coverage_gain_mean": compare_metrics.get("selected_coverage_gain_mean"),
+        "primary_selected_collision_probability_mean": primary_metrics.get("selected_collision_probability_mean"),
+        "compare_selected_collision_probability_mean": compare_metrics.get("selected_collision_probability_mean"),
+        "primary_selected_unknown_exposure_mean": primary_metrics.get("selected_unknown_exposure_mean"),
+        "compare_selected_unknown_exposure_mean": compare_metrics.get("selected_unknown_exposure_mean"),
+        "primary_selected_new_area_gain_mean": primary_metrics.get("selected_new_area_gain_mean"),
+        "compare_selected_new_area_gain_mean": compare_metrics.get("selected_new_area_gain_mean"),
+        "primary_route_progress_proxy_mean": primary_metrics.get("route_progress_proxy_mean"),
+        "compare_route_progress_proxy_mean": compare_metrics.get("route_progress_proxy_mean"),
+        "selected_risk_score_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_risk_score_mean"),
+            compare_metrics.get("selected_risk_score_mean"),
+        ),
+        "selected_unknown_penalty_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_unknown_penalty_mean"),
+            compare_metrics.get("selected_unknown_penalty_mean"),
+        ),
+        "selected_coverage_gain_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_coverage_gain_mean"),
+            compare_metrics.get("selected_coverage_gain_mean"),
+        ),
+        "selected_collision_probability_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_collision_probability_mean"),
+            compare_metrics.get("selected_collision_probability_mean"),
+        ),
+        "selected_unknown_exposure_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_unknown_exposure_mean"),
+            compare_metrics.get("selected_unknown_exposure_mean"),
+        ),
+        "selected_new_area_gain_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("selected_new_area_gain_mean"),
+            compare_metrics.get("selected_new_area_gain_mean"),
+        ),
+        "route_progress_proxy_delta_primary_minus_compare": _numeric_delta(
+            primary_metrics.get("route_progress_proxy_mean"),
+            compare_metrics.get("route_progress_proxy_mean"),
+        ),
     }
 
 
@@ -137,20 +222,23 @@ def _decision_map(events: list[Event]) -> dict[tuple[str, str, int, int], str]:
 
 
 def _selected_score(event: BrainOutputEvent) -> JsonDict:
+    result: JsonDict = {}
     if isinstance(event.debug, dict) and isinstance(event.debug.get("selected_candidate_metrics"), dict):
-        return dict(event.debug["selected_candidate_metrics"])
+        result.update(dict(event.debug["selected_candidate_metrics"]))
     selected = event.selected_trajectory_id
     for candidate in event.candidate_trajectories or []:
         candidate_id = str(candidate.get("id", candidate.get("trajectory_id", "")))
         if candidate_id != selected:
             continue
-        score = candidate.get("transparent_trajectory_score")
-        if isinstance(score, dict):
-            return dict(score)
+        transparent = candidate.get("transparent_trajectory_score")
+        if isinstance(transparent, dict):
+            for key, value in transparent.items():
+                result.setdefault(key, value)
         score = candidate.get("trajectory_score")
         if isinstance(score, dict):
-            return dict(score)
-    return {}
+            result.update(dict(score))
+        return result
+    return result
 
 
 def _risky_candidate_fraction(event: BrainOutputEvent) -> float | None:
@@ -205,7 +293,12 @@ def _answers(metrics: JsonDict) -> JsonDict:
         "memory_bev_decisions_differed_from_current_bev_decisions": comparison.get("decisions_differ")
         if comparison
         else None,
+        "primary_decisions_differed_from_compare_log": comparison.get("decisions_differ") if comparison else None,
         "cmd_vel_emitted_count": int(metrics.get("cmd_vel_non_null_count", 0)),
+        "cmd_vel_proposal_count": int(metrics.get("cmd_vel_proposal_count", 0)),
+        "latency_p95_under_100ms": float(metrics.get("latency_end_to_end_p95_ms", 0.0)) <= 100.0
+        if int(metrics.get("brain_output_count", 0)) > 0
+        else None,
         "product_control_safe": bool(metrics.get("control_safe", False)),
     }
 
@@ -219,11 +312,11 @@ def _next_blocker(metrics: JsonDict) -> str:
         return "selected_actions_collapsed_to_single_candidate"
     comparison = metrics.get("comparison")
     if not isinstance(comparison, dict):
-        return "run_current_vs_memory_policy_bev_comparison"
+        return "run_comparison_replay_log"
     if int(comparison.get("matched_decision_count", 0)) == 0:
-        return "current_vs_memory_comparison_had_no_matched_decisions"
+        return "comparison_replay_had_no_matched_decisions"
     if not bool(comparison.get("decisions_differ", False)):
-        return "memory_and_current_policy_decisions_were_identical"
+        return "primary_and_compare_policy_decisions_were_identical"
     return "needs_route_out_policy_quality_and_control_safety_gate"
 
 
@@ -251,8 +344,15 @@ def _markdown_report(report: JsonDict) -> str:
         f"- Did v1 memory replay produce non-empty trajectory decisions? `{answers.get('v1_memory_replay_produced_non_empty_trajectory_decisions')}`",
         f"- Did selected actions collapse to one candidate? `{answers.get('selected_actions_collapsed_to_one_candidate')}`",
         f"- Did memory-BEV decisions differ from current-BEV decisions? `{answers.get('memory_bev_decisions_differed_from_current_bev_decisions')}`",
+        f"- Did primary decisions differ from compare log? `{answers.get('primary_decisions_differed_from_compare_log')}`",
         f"- Comparison matched/different: `{comparison.get('matched_decision_count')}` / `{comparison.get('differing_selected_count')}`",
+        f"- Comparison primary/compare risk mean: `{comparison.get('primary_selected_risk_score_mean')}` / `{comparison.get('compare_selected_risk_score_mean')}`",
+        f"- Comparison primary/compare unknown mean: `{comparison.get('primary_selected_unknown_penalty_mean')}` / `{comparison.get('compare_selected_unknown_penalty_mean')}`",
+        f"- Comparison primary/compare coverage gain: `{comparison.get('primary_selected_coverage_gain_mean')}` / `{comparison.get('compare_selected_coverage_gain_mean')}`",
         f"- Was any cmd_vel emitted? `{answers.get('cmd_vel_emitted_count')}`",
+        f"- Bounded cmd_vel proposals: `{answers.get('cmd_vel_proposal_count')}`",
+        f"- Latency p50/p95 end-to-end ms: `{report.get('latency_end_to_end_p50_ms')}` / `{report.get('latency_end_to_end_p95_ms')}`",
+        f"- Latency p95 under 100ms? `{answers.get('latency_p95_under_100ms')}`",
         f"- Is this product/control safe? `{answers.get('product_control_safe')}`",
         f"- Next blocker: `{report.get('next_blocker')}`",
     ]
@@ -266,8 +366,55 @@ def _mean(values: list[Any]) -> float:
     return float(np.mean(numbers))
 
 
+def _numeric_delta(primary: Any, compare: Any) -> float | None:
+    if (
+        isinstance(primary, (int, float))
+        and not isinstance(primary, bool)
+        and isinstance(compare, (int, float))
+        and not isinstance(compare, bool)
+    ):
+        return float(primary) - float(compare)
+    return None
+
+
 def _mean_score(scores: list[JsonDict], key: str) -> float:
     return _mean([score.get(key) for score in scores if isinstance(score, dict)])
+
+
+def _latency_percentile(records: list[Any], key: str, percentile_value: float) -> float:
+    values = [
+        float(record[key])
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get(key), (int, float))
+        and not isinstance(record.get(key), bool)
+    ]
+    if not values:
+        return 0.0
+    return float(np.percentile(np.asarray(values, dtype=np.float64), percentile_value))
+
+
+def _cmd_vel_proposal(event: BrainOutputEvent) -> JsonDict | None:
+    if not isinstance(event.debug, dict):
+        return None
+    proposal = event.debug.get("cmd_vel_proposal")
+    return dict(proposal) if isinstance(proposal, dict) else None
+
+
+def _proposal_nonzero(proposal: JsonDict | None) -> bool:
+    if not isinstance(proposal, dict):
+        return False
+    linear = proposal.get("linear_velocity_mps")
+    angular = proposal.get("angular_velocity_radps")
+    return (
+        isinstance(linear, (int, float))
+        and not isinstance(linear, bool)
+        and abs(float(linear)) > 1.0e-6
+    ) or (
+        isinstance(angular, (int, float))
+        and not isinstance(angular, bool)
+        and abs(float(angular)) > 1.0e-6
+    )
 
 
 def _max_coverage_value(records: list[Any], key: str) -> int:

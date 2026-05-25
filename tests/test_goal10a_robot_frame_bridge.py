@@ -9,6 +9,7 @@ from homebrain.data.pack_spatial_dataset import pack_spatial_dataset
 from homebrain.datasets.openloris_to_route import openloris_to_route
 from homebrain.datasets.tum_rgbd_to_route import tum_rgbd_to_route
 from homebrain.geometry.rgbd_truth_to_bev import rgbd_truth_to_bev
+from homebrain.geometry.qa_robot_frame_bev import qa_robot_frame_bev
 from homebrain.geometry.robot_rgbd_to_bev import robot_rgbd_to_bev
 from homebrain.geometry.validate_bev import validate_bev_artifacts
 from homebrain.policies.audit_bev_action_sanity import audit_bev_action_sanity
@@ -37,6 +38,11 @@ def test_openloris_robot_frame_bridge_to_action_pack_v2(tmp_path: Path) -> None:
 
     _write_openloris_fixture(openloris_source, frame_count=5, include_extrinsics=True)
     openloris_to_route(source_dir=openloris_source, out_dir=openloris_route, max_frames=5)
+    route_metadata = json.loads((openloris_route / "route_metadata.json").read_text(encoding="utf-8"))
+    associations = json.loads((openloris_route / "openloris_scene_associations.json").read_text(encoding="utf-8"))
+    assert route_metadata["artifact_sha256"]["frames/frame_000000.ppm"]
+    assert associations["frames"][0]["rgb_sha256"]
+    assert associations["frames"][0]["depth_sha256"]
     events = read_events(openloris_route)
     assert any(isinstance(event, ImuEvent) for event in events)
     assert any(isinstance(event, OdomEvent) for event in events)
@@ -52,6 +58,9 @@ def test_openloris_robot_frame_bridge_to_action_pack_v2(tmp_path: Path) -> None:
     assert bev_manifest["robot_frame_truth"] is True
 
     pack_spatial_dataset(log_dir=openloris_route, bev_dir=openloris_bev, out_dir=openloris_pack)
+    bev_qa = qa_robot_frame_bev(bev_dir=openloris_bev, spatial_pack=openloris_pack)
+    assert bev_qa["control_safe"] is False
+    assert bev_qa["qa_pass"] is True
     audit = audit_bev_action_sanity(source=openloris_pack, out_dir=tmp_path / "runs" / "audit_openloris")
     assert audit["control_safe"] is False
     assert audit["action_supervision_ok_fraction"] > 0.0
@@ -98,7 +107,15 @@ def test_robot_rgbd_to_bev_refuses_missing_extrinsics_without_review(tmp_path: P
     route = tmp_path / "route"
     bev = tmp_path / "bev"
     _write_openloris_fixture(source, frame_count=2, include_extrinsics=False)
-    openloris_to_route(source_dir=source, out_dir=route, max_frames=2)
+    with pytest.raises(ValueError, match="requires measured calibration"):
+        openloris_to_route(source_dir=source, out_dir=route, max_frames=2)
+
+    openloris_to_route(
+        source_dir=source,
+        out_dir=route,
+        max_frames=2,
+        require_robot_frame_calibration=False,
+    )
 
     with pytest.raises(ValueError, match="camera_to_base transform is missing"):
         robot_rgbd_to_bev(log_dir=route, out_dir=bev)
@@ -209,7 +226,7 @@ def _write_openloris_fixture(root: Path, *, frame_count: int, include_extrinsics
             "d400_color": [
                 [0.0, 0.0, 1.0, 0.0],
                 [-1.0, 0.0, 0.0, 0.0],
-                [0.0, 0.0, 0.0, 0.0],
+                [0.0, -1.0, 0.0, 0.5],
                 [0.0, 0.0, 0.0, 1.0],
             ]
         }
