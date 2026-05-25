@@ -52,7 +52,7 @@ a real robot brain:
   spatial memory, trajectory scoring, eval, or later hardware integration.
 - Avoid scaffolding-only PRs. A broad change should improve a real-data gate,
   connect two runtime pieces, or remove an active blocker.
-- Treat the Goal25 OpenLORIS route-heldout milestone as the minimum real-data
+- Treat the Goal26 OpenLORIS route-heldout runtime milestone as the minimum real-data
   baseline unless a newer baseline is documented.
 - Runtime code must clearly separate online inputs from labels, future frames,
   route ground truth, teacher outputs, and other eval-only data.
@@ -63,17 +63,47 @@ a real robot brain:
 ## Latest Real-Data Milestone
 
 Current route-heldout proof:
-`runs/goal25_openloris_route_heldout_milestone/milestone_report.json`.
+`runs/goal26_scene_runtime_brain_milestone/milestone_report.json`.
 
 Reproduce with:
 
 ```text
-python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal25_openloris_route_heldout_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 48 --max-spatial-folds 2
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal26_scene_runtime_brain_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 96 --runtime-feature-source direct_rgbd --max-spatial-folds 2 --future-rollout-selection-mode guided_transparent
 ```
 
 Do not present it as control-safe. It uses real public OpenLORIS robot data,
-rejects degenerate FutureBEV action-label groups, emits bounded `cmd_vel`
-proposals only, and still has a policy-collapse blocker.
+connects `Brain.step(...)`, emits bounded `cmd_vel` proposals only, and writes
+scene-memory artifacts. It is not the requested robot brain yet: raw FutureBEV
+selection is still collapsed, accepted action diversity uses a hand-weighted
+guided selector with temporal diversity, future free/occupied prediction is
+zero, scene unknown reduction regressed, and pose metrics are odometry-proxy
+only.
+
+## Active Required Goal
+
+When asked to continue the robot-brain work, build Goal27: a real-data learned
+scene-level runtime brain that improves Goal26 instead of repeating it.
+
+Goal27 acceptance is hard:
+
+- no fake, mock, synthetic, generated, or random data for milestone metrics;
+- no classical SLAM/Nav2 stack as the core brain;
+- accepted runtime uses `Brain.step(...)` or equivalent online tick semantics;
+- accepted runtime does not use teacher outputs, future labels, route ground
+  truth, oracle BEV, or future frames during the control tick;
+- accepted direct RGB-D/RGB-IR path is trained/evaluated as a student, not only
+  a patch-stat adapter into a DINO-trained model;
+- accepted action diversity must come from learned scoring/FutureBEV/policy
+  outputs, not `guided_transparent`, temporal diversity priors, randomization,
+  or hand-authored alternation;
+- scene memory must improve measured physical geometry:
+  `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and nonzero
+  free/occupied future metrics when labels exist;
+- pose/localization metrics must identify whether they are learned, odometry
+  proxy, independent ground truth eval, or leakage ablation.
+
+If these gates fail, keep iterating or mark the run blocked with exact artifact
+paths. Do not call the milestone accepted.
 
 ## Completion
 

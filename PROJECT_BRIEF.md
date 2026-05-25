@@ -56,11 +56,14 @@ ingest real replayable indoor robot routes and run them through the same shape
 of loop a robot would use live: sensor event, memory update, BEV/risk/coverage
 prediction, bounded candidate scoring, `cmd_vel` proposal, eval report.
 
-Goal25 is the current real-data baseline: OpenLORIS route-heldout replay,
-offline DINO/geometry supervision, SpatialMemoryNetV1, FutureBEV rollout, and
-runtime reports. It proves the stack can create real artifacts and avoid
-route-pose leakage, but it is not control-safe because the runtime policy
-collapsed to one candidate.
+Goal26 is the current real-data connector baseline: OpenLORIS route-heldout
+replay, offline DINO/geometry supervision, SpatialMemoryNetV1, direct RGB-D
+runtime features, FutureBEV rollout, `Brain.step(...)`, bounded `cmd_vel`
+proposals, latency/leakage reports, and scene-memory artifacts. It proves the
+pieces can run together, but it is not the requested robot brain yet because
+the accepted action diversity used a hand-weighted guided selector, raw
+FutureBEV selection still collapsed, scene memory did not reduce unknown area,
+future free/occupied prediction was zero, and pose was odometry-proxy only.
 
 ## What Codex Should Optimize For
 
@@ -85,8 +88,8 @@ collapsed to one candidate.
 
 ## Next Real Milestone
 
-A non-collapsed real-data runtime brain on multiple route-heldout public robot
-routes.
+A learned scene-level robot-brain milestone on multiple route-heldout public
+robot routes.
 
 The milestone is complete only when:
 
@@ -97,7 +100,18 @@ The milestone is complete only when:
   available to the control tick;
 - SpatialMemoryNet/current BEV/fused memory/FutureBEV or successor heads feed a
   bounded candidate trajectory selector;
-- action entropy and dominant-action gates show the policy is not collapsed;
+- accepted action diversity comes from learned scoring or learned FutureBEV
+  outputs, not hand-weighted diversity priors, `guided_transparent`,
+  randomization, or alternation;
+- action entropy and dominant-action gates show the learned policy is not
+  collapsed;
+- scene memory improves measured physical geometry:
+  `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and
+  nonzero free/occupied future metrics when labels exist;
+- direct RGB-D/RGB-IR runtime is a trained student path, not only a patch-stat
+  adapter into a DINO-trained model;
+- pose/localization metrics identify whether they are learned, odometry proxy,
+  independent ground-truth eval, or leakage ablation;
 - p50/p95 latency, unsafe selections, stop/recovery reasons, and leakage flags
   are written to JSON;
 - tests pass and `CURRENT_STATUS.md` records the exact artifact path.

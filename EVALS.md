@@ -177,12 +177,14 @@ raw_pwm_emitted
 Current accepted route-heldout report:
 
 ```text
-runs/goal25_openloris_route_heldout_milestone/milestone_report.json
+runs/goal26_scene_runtime_brain_milestone/milestone_report.json
 ```
 
-The current report passes artifact creation and no-leakage gates, but fails
-policy quality because FutureBEV/runtime action selection collapsed to one
-candidate.
+The current report is a connector baseline, not the target robot brain. It
+passes artifact creation, replay-only, no-raw-PWM, and no-leakage checks, but
+it must not be treated as learned policy success because accepted action
+diversity used `guided_transparent` and raw FutureBEV action selection still
+collapsed.
 
 ## Gate 6: Deployable Runtime Integration
 
@@ -199,6 +201,10 @@ Minimum proof:
   selection metrics;
 - failure cases are inspectable through JSON and small visual/contact-sheet
   artifacts.
+- accepted action diversity is produced by learned scoring or learned FutureBEV
+  outputs, not `guided_transparent`, temporal diversity priors, randomization,
+  or hand-authored alternation;
+- scene memory improves measured physical geometry, not only artifact presence.
 
 Core metrics:
 
@@ -217,7 +223,36 @@ recovery_selected_fraction
 route_pose_leakage_ablation_fraction
 cmd_vel_proposal_count
 raw_pwm_emitted
+accepted_policy_uses_guided_transparent
+accepted_policy_uses_handcrafted_diversity_prior
+unknown_reduction_vs_current
+coverage_memory_cells_seen
+future_free_iou_or_proxy
+future_occupied_iou_or_proxy
+pose_metric_source
+pose_metric_independent_groundtruth
 ```
+
+Hard fail conditions for an accepted Goal27-style runtime:
+
+```text
+teacher_runtime_dependency=true
+future_or_groundtruth_runtime_dependency=true
+route_pose_leakage_ablation_fraction>0.0
+raw_pwm_emitted=true
+accepted_policy_uses_guided_transparent=true
+accepted_policy_uses_handcrafted_diversity_prior=true
+action_entropy<=0.0
+dominant_action_fraction>=1.0
+unknown_reduction_vs_current<=0.0
+coverage_memory_cells_seen<=0
+future_free_iou_or_proxy<=0.0
+future_occupied_iou_or_proxy<=0.0
+latency_step_p95_ms>100.0
+```
+
+If a metric cannot be computed because labels are missing, the report must mark
+the run blocked or use a clearly named proxy. It must not silently pass.
 
 Product claim rule:
 

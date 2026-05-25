@@ -87,3 +87,19 @@ Reason: The highest return now is turning existing pieces into a real-time
 software brain, not adding more disconnected POC surfaces.
 
 Status: active.
+
+## D010 - Heuristic diversity is not learned policy success
+
+Decision: A runtime report cannot be accepted as a learned robot-brain policy
+success if action diversity comes from `guided_transparent`, hand-weighted
+transparent scoring, temporal diversity penalties, randomization, or
+hand-authored alternation. Those modes are allowed only as baselines or
+ablations. Accepted policy diversity must come from learned scoring, learned
+FutureBEV outputs, or another trained student evaluated route-heldout.
+
+Reason: Goal26 connected the system, but the non-collapsed action distribution
+was created by a hand-weighted selector while raw FutureBEV still collapsed.
+The project needs real physical prediction and learned action choice, not a
+metric workaround.
+
+Status: active.

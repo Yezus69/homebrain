@@ -78,44 +78,95 @@ Module map:
 
 ## Latest Real-Data Milestone
 
-Route-heldout OpenLORIS replay milestone command:
+Goal26 is the latest committed real-data connector milestone:
 
 ```text
-python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal25_openloris_route_heldout_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 48 --max-spatial-folds 2
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal26_scene_runtime_brain_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 96 --runtime-feature-source direct_rgbd --max-spatial-folds 2 --future-rollout-selection-mode guided_transparent
 ```
 
 Main report:
-`runs/goal25_openloris_route_heldout_milestone/milestone_report.json`
+`runs/goal26_scene_runtime_brain_milestone/milestone_report.json`
 
-Artifacts include SpatialMemoryNetV1 checkpoints, a FutureBEVRolloutV1
-checkpoint, route-heldout runtime reports, and a visual failure contact sheet.
-The result is real public OpenLORIS replay evidence only:
-`replay_only=true`, `control_safe=false`, `raw_pwm_emitted=false`.
+Goal26 connected OpenLORIS ingestion, replay-as-live, `Brain.step(...)`,
+SpatialMemoryNetV1 memory, direct RGB-D runtime features, FutureBEV scoring,
+bounded `cmd_vel` proposals, latency/leakage reports, and scene-memory
+visuals. It is real public OpenLORIS replay evidence only:
+`replay_only=true`, `control_safe=false`, `raw_pwm_emitted=false`,
+`teacher_runtime_dependency=false`.
 
-Known result: heldout corridor replay produced 96 non-empty decisions with
-p50/p95 latency `28.2573/31.700175 ms`, zero unsafe selected rate, and zero
-route-pose leakage, but both future rollout and runtime action selection
-collapsed to one candidate (`action_entropy=0.0`, dominant fraction `1.0`).
+Goal26 is not the requested robot brain yet. Treat it as plumbing and a baseline
+to improve, not as completion:
 
-That collapse is the current high-return blocker. The next strong Codex run
-should improve real-data route diversity, label quality, runtime-BEV policy
-training, or fallback/recovery logic, then prove the improvement with the same
-route-heldout and latency gates.
+- the apparent action diversity came from `guided_transparent`, a hand-weighted
+  selector with a temporal diversity prior;
+- raw FutureBEV action selection was still collapsed (`action_entropy=0.0`,
+  dominant fraction `1.0`);
+- future free/occupied IoU proxies were `0.0 / 0.0`;
+- scene memory had negative unknown reduction (`-0.3163`), so it did not yet
+  prove useful remembered physical geometry;
+- pose metrics used an odometry proxy, not independent learned localization.
+
+## Active Required Goal
+
+The next Codex run must build the user-requested scene-level robot-brain
+milestone, not another connector milestone.
+
+Goal27 must produce a learned real-data runtime system that satisfies the
+original hard constraints:
+
+- real public robot or robot-mounted data only for milestone metrics;
+- no classical SLAM stack as the core brain;
+- online `Brain.step(...)` consumes only current/past sensor data, prior memory,
+  calibration, previous command, and odom/IMU/wheel when available;
+- teacher outputs, future frames, future labels, route ground truth, and oracle
+  BEV are training/eval-only;
+- persistent scene-level memory must improve physical geometry, not only save a
+  visualization;
+- direct RGB-D/RGB-IR runtime student must be trained/evaluated, not just a
+  patch-stat adapter into a DINO-trained model;
+- near-future prediction must learn free/occupied/unknown/risk evolution for
+  candidate actions;
+- accepted action diversity must come from learned scoring or learned
+  FutureBEV/policy outputs, not from `guided_transparent`,
+  temporal-diversity penalties, randomization, or hand-authored alternation;
+- accepted pose/localization metrics must say whether they are independent
+  ground truth, odometry proxy, learned pose, or leakage ablation.
+
+Goal27 does not pass unless the main report shows all of these:
+
+```text
+real_public_data_only=true
+runtime_api_step_count>0
+teacher_runtime_dependency=false
+future_or_groundtruth_runtime_dependency=false
+route_pose_leakage_ablation_fraction=0.0
+raw_pwm_emitted=false
+control_safe=false
+accepted_policy_uses_handcrafted_diversity_prior=false
+accepted_policy_uses_guided_transparent=false
+action_entropy>0.0
+dominant_action_fraction<1.0
+future_free_iou_or_proxy>0.0
+future_occupied_iou_or_proxy>0.0
+unknown_reduction_vs_current>0.0
+coverage_memory_cells_seen>0
+latency_step_p95_ms<=100.0
+```
+
+If any of those fail, Codex must keep iterating or mark the run blocked with the
+exact artifact proving why. It must not call the run accepted.
 
 ## What To Build Next
 
-Prefer work that makes the existing stack run more like a robot:
+Prefer work that turns Goal26 plumbing into real physical understanding:
 
-- extend `run_openloris_route_heldout_milestone` or successor tools to more
-  real robot-mounted routes with route/scene-heldout splits;
-- improve robot-frame BEV/free-space quality instead of hiding weak labels;
-- train/evaluate non-collapsed `FutureBEVRolloutV1` or trajectory scoring on
-  runtime BEVs, not only oracle labels;
-- grow the direct RGB-D runtime student so deployment does not require
-  precomputed DINO features at every control tick;
-- add an explicit online `Brain.step(...)` style interface that owns memory
-  state, accepts current sensor events, and returns candidate decisions plus a
-  bounded `cmd_vel` proposal;
+- train a real direct RGB-D/RGB-IR student on real route-heldout data;
+- improve BEV/free/occupied labels and QA until physical geometry is visible
+  and measured;
+- make scene memory reduce unknown area and preserve free/occupied structure;
+- replace `guided_transparent` with learned non-collapsed scoring;
+- evaluate all accepted runtime metrics on at least two routes and preferably
+  three scenes;
 - add watchdog/recovery decision outputs as replay-only proposals before any
   physical hardware claim;
 - keep every artifact inspectable, deterministic, and honest about safety.

@@ -39,3 +39,8 @@ owned videos:
 6. improve scene-memory unknown/observed-cell metrics and direct RGB-D student
    quality on route-heldout real data;
 7. keep all outputs replay-only until hardware safety exists.
+
+Do not clear this risk by reporting `guided_transparent` success again. The
+next accepted repair must show learned non-collapsed action selection, positive
+unknown reduction, nonzero future free/occupied metrics, and explicit pose
+metric provenance.

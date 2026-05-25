@@ -155,6 +155,42 @@ observed-cell density, then replace the hand-weighted temporal diversity prior
 with a learned non-collapsed scorer trained/evaluated route-heldout on more
 real routes.
 
+## Active Next Goal
+
+Goal27 must implement the original scene-level robot-brain request, not repeat
+Goal26 plumbing. A successful run must train/evaluate a real direct RGB-D or
+RGB/IR student path, improve measured scene memory and physical BEV geometry,
+predict nonzero future free/occupied/unknown state for candidate actions, and
+select bounded trajectories with learned non-collapsed scoring.
+
+Goal27 must not count these as acceptance:
+
+```text
+guided_transparent
+temporal diversity prior
+hand-weighted action alternation
+patch-stat direct RGB-D adapter only
+odometry-vs-odometry pose metric as independent localization
+scene-memory artifact existence without unknown reduction
+```
+
+Minimum accepted report flags/metrics:
+
+```text
+accepted_policy_uses_guided_transparent=false
+accepted_policy_uses_handcrafted_diversity_prior=false
+teacher_runtime_dependency=false
+future_or_groundtruth_runtime_dependency=false
+route_pose_leakage_ablation_fraction=0.0
+action_entropy>0.0
+dominant_action_fraction<1.0
+unknown_reduction_vs_current>0.0
+coverage_memory_cells_seen>0
+future_free_iou_or_proxy>0.0
+future_occupied_iou_or_proxy>0.0
+latency_step_p95_ms<=100.0
+```
+
 ## Goal25 Result
 
 Objective: build one reproducible command that stages three OpenLORIS routes
@@ -214,11 +250,10 @@ Pass/fail: focused tests passed with `22 passed`; full pytest passed with
 warnings from Git on Windows. The shell tool still appends a non-project
 PowerShell `-Command` warning after commands.
 
-Recommended next step: build a Goal25 successor that uses more real routes or
-higher observed BEV density, improves free-space labels, trains a non-collapsed
-FutureBEV/action selector, grows the direct RGB-D runtime student, and exposes
-an online `Brain.step(...)` path. Do not add scaffolding-only modules before
-this real-data gate moves.
+Goal25 next step is superseded by Goal26 and the active Goal27 requirements
+above. Do not repeat Goal25/Goal26 connector work as success; improve learned
+direct runtime, scene memory, future free/occupied prediction, and policy
+selection quality.
 
 ## Documentation Alignment Update
 

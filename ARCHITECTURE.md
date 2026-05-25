@@ -189,9 +189,11 @@ Current action-labeling status: ActionLabelPack v5 can derive replay-only
 behavior-cloning candidate labels from robot-frame dataset future motion. The
 older synthetic coverage/risk label path remains available for ablation, but it
 is no longer treated as the action oracle after Goal 13B showed it collapsed.
-FutureBEV rollout can score candidates, but Goal25 showed the selected policy
-collapsed to one candidate on heldout OpenLORIS replay. Fixing that collapse on
-real route-heldout data is higher return than adding new standalone scaffolds.
+FutureBEV rollout can score candidates, but Goal26 only avoided a one-action
+runtime report by adding `guided_transparent`, a hand-weighted selector with a
+temporal diversity prior. That does not satisfy the robot-brain goal. Accepted
+runtime policy diversity must come from learned scoring or learned FutureBEV
+outputs.
 
 ## Memory philosophy
 
@@ -221,22 +223,29 @@ path resets memory on sequence boundaries and writes current BEV, memory BEV,
 uncertainty, update-mask, and memory debug artifacts. This is still
 representation pretraining and replay evaluation only.
 
-The next runtime step is a `Brain.step(...)` path that owns memory across sensor
-ticks, can run from direct RGB-D/RGB-IR inputs without precomputed DINO at
-runtime, and passes the same no-leakage/action-collapse/latency gates as
-OpenLORIS route-heldout replay.
+Goal26 added a first `Brain.step(...)` path that owns memory across replayed
+sensor ticks and can run without precomputed DINO at runtime. It is still not a
+complete physical robot brain: the direct RGB-D path is a patch-stat adapter
+into the existing feature interface, scene memory did not reduce unknown area,
+and pose was odometry-proxy only. The next runtime step is a trained direct
+RGB-D/RGB-IR student whose scene memory improves measured physical geometry and
+whose future rollout predicts nonzero free/occupied/unknown evolution for
+candidate actions.
 
 ## Integration priorities
 
 Prefer work that:
 
-- extends the Goal25 route-heldout milestone to more real routes and stronger
-  route splits;
+- extends the Goal26 route-heldout runtime milestone to more real routes and
+  stronger route/scene splits;
 - improves robot-frame BEV/free-space labels and QA;
 - trains direct RGB-D or RGB/IR runtime students that remove precomputed
-  teacher-feature dependency;
+  teacher-feature dependency at the control tick;
 - connects SpatialMemoryNet/current BEV/fused memory/FutureBEV outputs into a
-  non-collapsed candidate selector;
+  learned non-collapsed candidate selector;
+- makes scene memory measurably useful:
+  `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and nonzero
+  future free/occupied metrics when labels exist;
 - adds watchdog, stop, recovery, uncertainty, or fallback behavior in replay
   with measurable artifacts.
 
@@ -244,6 +253,7 @@ Avoid work that only adds:
 
 - empty CLIs;
 - unconnected model classes;
+- hand-weighted action diversity that is counted as learned policy success;
 - synthetic-only milestones;
 - broad rewrites that do not improve a real-data gate;
 - dashboards or viewers before the underlying BEV/risk/coverage outputs are
