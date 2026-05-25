@@ -7,6 +7,8 @@ HomeBrain should prove claims with deterministic artifacts, not demos.
 - Focused tests for the touched module.
 - `python -m pytest -q` before claiming a broad cleanup or behavior change.
 - `git diff --check` before finalizing edits.
+- For broad runtime/training work, produce or update a real-data replay report
+  when feasible. If not feasible, state exactly why.
 
 ## Gate 0: Log, Replay, Eval
 
@@ -181,3 +183,50 @@ runs/goal25_openloris_route_heldout_milestone/milestone_report.json
 The current report passes artifact creation and no-leakage gates, but fails
 policy quality because FutureBEV/runtime action selection collapsed to one
 candidate.
+
+## Gate 6: Deployable Runtime Integration
+
+Minimum proof:
+
+- an online-style `Brain.step(...)` or equivalent API owns persistent memory
+  across sensor ticks;
+- the control tick consumes only allowed online inputs;
+- teacher outputs, future labels, route ground truth, and oracle BEV are absent
+  from runtime unless the report marks an ablation;
+- outputs are bounded candidate trajectories or `cmd_vel`, never raw PWM;
+- stop/recovery/uncertainty reasons are explicit;
+- route-heldout replay writes latency, leakage, action-collapse, and unsafe
+  selection metrics;
+- failure cases are inspectable through JSON and small visual/contact-sheet
+  artifacts.
+
+Core metrics:
+
+```text
+runtime_api_step_count
+teacher_runtime_dependency
+future_or_groundtruth_runtime_dependency
+latency_step_p50_ms
+latency_step_p95_ms
+memory_update_latency_p95_ms
+action_entropy
+dominant_action_fraction
+unsafe_selected_rate
+stop_selected_fraction
+recovery_selected_fraction
+route_pose_leakage_ablation_fraction
+cmd_vel_proposal_count
+raw_pwm_emitted
+```
+
+Product claim rule:
+
+```text
+control_safe=false
+product_training_approved=false
+hardware_validated=false
+```
+
+These stay false until owned robot data, hardware safety review, and physical
+test evidence exist. The goal before hardware is production-directed software,
+not a product-safety claim.

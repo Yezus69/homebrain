@@ -61,3 +61,29 @@ Reason: HomeBrain needs to prove the approach before hardware or owned robot
 data exists. Over-blocking local POC work slows the core learning loop.
 
 Status: active.
+
+## D008 - Runtime control tick has a strict input boundary
+
+Decision: A production-directed runtime tick may consume current sensors,
+calibration, previous command, odom/IMU/wheel data when available, and prior
+memory. Future frames, future labels, route ground truth, teacher outputs, and
+oracle BEV are training/eval-only unless an artifact is explicitly marked as an
+ablation with leakage metrics.
+
+Reason: The repo must train from public robot data and heavy open-weight
+teachers without accidentally building a runtime that cannot deploy on a real
+robot.
+
+Status: active.
+
+## D009 - Connect before adding scaffolds
+
+Decision: When Codex has open scope, it should improve the connected
+replay-as-live path before adding standalone modules: ingestion, teachers,
+packs, spatial memory, future rollout, trajectory scoring, runtime reports, and
+eval gates should compose into one measurable robot-brain loop.
+
+Reason: The highest return now is turning existing pieces into a real-time
+software brain, not adding more disconnected POC surfaces.
+
+Status: active.

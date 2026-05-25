@@ -4,11 +4,12 @@ This file is repo memory for future Codex work. Keep it short.
 
 ## Mission
 
-Build HomeBrain: a proof-of-concept indoor robot brain for a future
-camera/IR/IMU/wheel-encoder floor-cleaning robot. The near-term proof is
-software-only: replay real indoor data, use open-weight teachers offline, train
-a smaller spatial-memory student, and score cleaning trajectories well enough
-to justify hardware work.
+Build HomeBrain: a production-directed indoor robot brain for a future
+camera/IR/IMU/wheel-encoder floor-cleaning robot. The near-term proof is still
+software-only, but every serious change should move toward a deployable runtime:
+replay real indoor robot data as if it were live, use open-weight teachers only
+offline, train a smaller spatial-memory student, and score bounded cleaning
+trajectories well enough to justify hardware work.
 
 ## Read First
 
@@ -21,6 +22,19 @@ Before coding, read:
 
 Read `EVALS.md`, `DECISIONS.md`, `LICENSE_AUDIT.md`, or deeper docs only when
 the task touches those areas.
+
+## Default Priority
+
+When scope is open, choose the work that most directly connects the system into
+a real robot brain:
+
+1. Connect existing modules end-to-end before adding new isolated modules.
+2. Prefer real robot or robot-mounted public data over mock, synthetic, or toy
+   examples. OpenLORIS-style route-heldout replay is the current baseline.
+3. Prefer online memory, BEV, trajectory scoring, and runtime APIs over
+   offline-only reports.
+4. Prefer evals that expose leakage, collapse, latency, and route generalization
+   over demo scripts.
 
 ## Working Rules
 
@@ -36,6 +50,14 @@ the task touches those areas.
   provenance over hidden-only state.
 - Keep modules small and directly tied to logging, replay, teachers, geometry,
   spatial memory, trajectory scoring, eval, or later hardware integration.
+- Avoid scaffolding-only PRs. A broad change should improve a real-data gate,
+  connect two runtime pieces, or remove an active blocker.
+- Treat the Goal25 OpenLORIS route-heldout milestone as the minimum real-data
+  baseline unless a newer baseline is documented.
+- Runtime code must clearly separate online inputs from labels, future frames,
+  route ground truth, teacher outputs, and other eval-only data.
+- Foundation-model teachers are for dataset creation, supervision, and audits.
+  The runtime should trend toward a teacher-free student control tick.
 - Delete stale context instead of adding more instructions.
 
 ## Latest Real-Data Milestone
@@ -61,6 +83,8 @@ For implementation tasks, leave proof:
 - update `CURRENT_STATUS.md` briefly with objective, files changed, commands,
   pass/fail result, artifacts, risks, and next recommended step;
 - update `BLOCKERS.md` only for active blockers that still need action.
+- for broad autonomous work, record the exact real-data artifact path and the
+  metric that improved or regressed.
 
 ## Dependency Policy
 

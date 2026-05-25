@@ -5,8 +5,9 @@ command history.
 
 ## Current State
 
-HomeBrain is a deterministic replay/eval and offline-teacher stack for a
-software-only floor-cleaning robot brain POC.
+HomeBrain is a deterministic replay/eval, offline-teacher, and early runtime
+stack for a software-only but production-directed floor-cleaning robot brain
+POC.
 
 Implemented:
 
@@ -25,11 +26,14 @@ Implemented:
 Not implemented:
 
 - real robot runtime process;
+- online `Brain.step(...)` deployment interface that owns memory across live
+  sensor ticks;
 - synchronized owned RGB/IR/IMU/wheel/command logs;
 - hardware controller, watchdog, recovery, docking, or physical safety gate;
 - robust dynamic-risk labels;
 - strong free-space traversability labels;
 - global home-scale coverage memory;
+- non-collapsed route-heldout runtime policy across multiple real routes;
 - a policy good enough to drive a real cleaning robot.
 
 ## Current Policy
@@ -132,6 +136,32 @@ Pass/fail: focused tests passed with `22 passed`; full pytest passed with
 warnings from Git on Windows. The shell tool still appends a non-project
 PowerShell `-Command` warning after commands.
 
-Recommended next step: collect or select routes with higher observed BEV
-density and train a non-collapsed FutureBEV/action selector before any hardware
-claim.
+Recommended next step: build a Goal25 successor that uses more real routes or
+higher observed BEV density, improves free-space labels, trains a non-collapsed
+FutureBEV/action selector, grows the direct RGB-D runtime student, and exposes
+an online `Brain.step(...)` path. Do not add scaffolding-only modules before
+this real-data gate moves.
+
+## Documentation Alignment Update
+
+Objective: align repo instructions and README docs toward meaningful
+production-directed robot-brain work: connected runtime modules, real public
+robot data, no synthetic/mock milestones, no teacher leakage at control time,
+and non-collapsed route-heldout policy progress.
+
+Files changed:
+
+```text
+README.md
+AGENTS.md
+PROJECT_BRIEF.md
+ARCHITECTURE.md
+EVALS.md
+BLOCKERS.md
+DECISIONS.md
+CURRENT_STATUS.md
+```
+
+Verification: docs-only change; `git diff --check` passed with only Git
+line-ending warnings on Windows. No pytest run was required because no code
+changed.
