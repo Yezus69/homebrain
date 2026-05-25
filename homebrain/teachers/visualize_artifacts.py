@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 
-from homebrain.messages.schema import JsonDict, deterministic_json
+from homebrain.artifacts.io import write_json_object
+from homebrain.messages.schema import JsonDict
 from homebrain.teachers.artifacts import EXPECTED_ARTIFACT_KINDS, load_array, load_teacher_manifest
+from homebrain.visualization.panels import write_pgm, write_ppm
 
 
 def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
@@ -17,35 +19,6 @@ def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
         return np.zeros(values.shape, dtype=np.uint8)
     normalized = (values - minimum) / np.float32(maximum - minimum)
     return np.clip(normalized * np.float32(255.0), 0, 255).astype(np.uint8)
-
-
-def _write_pgm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 2:
-        raise ValueError(f"PGM image must be 2D, got shape {image.shape}")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    h, w = image.shape
-    with target.open("wb") as handle:
-        handle.write(f"P5\n{w} {h}\n255\n".encode("ascii"))
-        handle.write(image.astype(np.uint8).tobytes(order="C"))
-
-
-def _write_ppm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise ValueError(f"PPM image must be HxWx3, got shape {image.shape}")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    h, w, _channels = image.shape
-    with target.open("wb") as handle:
-        handle.write(f"P6\n{w} {h}\n255\n".encode("ascii"))
-        handle.write(image.astype(np.uint8).tobytes(order="C"))
-
-
-def _write_manifest(path: Path, manifest: JsonDict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(deterministic_json(manifest))
-        handle.write("\n")
 
 
 def _artifact_kinds(manifest: JsonDict) -> tuple[str, ...]:
@@ -82,11 +55,11 @@ def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
             if kind == "dense_features":
                 rgb = _normalize_to_uint8(array[:, :, :3])
                 target = frame_dir / f"{kind}.ppm"
-                _write_ppm(target, rgb)
+                write_ppm(target, rgb)
             elif array.ndim == 2:
                 image = _normalize_to_uint8(array)
                 target = frame_dir / f"{kind}.pgm"
-                _write_pgm(target, image)
+                write_pgm(target, image)
             else:
                 continue
             previews[kind] = target.relative_to(output).as_posix()
@@ -112,7 +85,7 @@ def visualize_artifacts(artifacts_dir: str | Path, out_dir: str | Path) -> Path:
         "frames": frame_outputs,
     }
     manifest_path = output / "visualization_manifest.json"
-    _write_manifest(manifest_path, visualization_manifest)
+    write_json_object(manifest_path, visualization_manifest)
     return manifest_path
 
 

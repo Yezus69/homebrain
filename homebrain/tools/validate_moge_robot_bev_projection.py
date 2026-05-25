@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 import itertools
-import json
 import math
 from pathlib import Path
 import sys
@@ -12,12 +11,23 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from homebrain.artifacts.io import (
+    load_array_artifact_optional,
+    load_array_artifact_required,
+    read_json_object,
+    write_json_object,
+)
+from homebrain.data.spatial_io import (
+    load_spatial_example_arrays,
+    scene_frames_by_id,
+    spatial_examples_by_id,
+)
 from homebrain.datasets.openloris_scene import OPENLORIS_ROUTE_ASSOCIATIONS_FILE
 from homebrain.datasets.tum_rgbd import TUM_RGBD_ROUTE_ASSOCIATIONS_FILE
 from homebrain.geometry.bev_projector import robot_points_to_bev_arrays
 from homebrain.messages.schema import JsonDict, deterministic_json
-from homebrain.teachers.artifacts import load_array
 from homebrain.teachers.scene_teacher import load_scene_teacher_manifest
+from homebrain.visualization.panels import join_with_gap, resize_nearest, write_ppm
 
 SCHEMA_VERSION = "homebrain.moge_robot_bev_projection_gate.v0"
 AGGREGATE_SCHEMA_VERSION = "homebrain.moge_robot_bev_projection_gate_aggregate.v0"
@@ -207,15 +217,15 @@ def validate_moge_robot_bev_projection(
             runtime_sec=float(time.perf_counter() - started),
             command=command,
         )
-        _write_json(output_json, report)
+        write_json_object(output_json, report)
         _write_markdown(output_md, report)
         return report
 
     try:
-        route_metadata = _read_json(route_root / "route_metadata.json")
+        route_metadata = read_json_object(route_root / "route_metadata.json")
         associations, associations_path = _load_route_associations(route_root, route_metadata)
         scene_manifest = load_scene_teacher_manifest(scene_root)
-        spatial_manifest = _read_json(spatial_root / "manifest.json")
+        spatial_manifest = read_json_object(spatial_root / "manifest.json")
     except Exception as exc:  # noqa: BLE001 - report exact input failure.
         report = _blocked_report(
             route_root=route_root,
@@ -225,12 +235,12 @@ def validate_moge_robot_bev_projection(
             runtime_sec=float(time.perf_counter() - started),
             command=command,
         )
-        _write_json(output_json, report)
+        write_json_object(output_json, report)
         _write_markdown(output_md, report)
         return report
 
-    scene_frames = _scene_frames_by_id(scene_manifest)
-    spatial_examples = _spatial_examples_by_id(spatial_manifest)
+    scene_frames = scene_frames_by_id(scene_manifest)
+    spatial_examples = spatial_examples_by_id(spatial_manifest)
     matched_ids = sorted(set(scene_frames).intersection(spatial_examples))
     if max_frames is not None:
         matched_ids = matched_ids[: max(0, int(max_frames))]
@@ -250,7 +260,9 @@ def validate_moge_robot_bev_projection(
         spatial_example = spatial_examples[frame_id]
         try:
             source = _load_scene_frame_source(scene_root, scene_frame)
-            target = _load_spatial_example_arrays(spatial_root, spatial_example)
+            target = load_spatial_example_arrays(spatial_root, spatial_example, missing_ok=False, require_confidence=True)
+            if target is None:
+                raise ValueError(f"spatial example {frame_id} could not be loaded")
             camera_to_base = _camera_to_base_for_frame(
                 associations=associations,
                 frame_id=frame_id,
@@ -423,7 +435,7 @@ def validate_moge_robot_bev_projection(
         "commands_run": [command] if command else [],
         "runtime_sec": float(time.perf_counter() - started),
     }
-    _write_json(output_json, report)
+    write_json_object(output_json, report)
     _write_markdown(output_md, report)
     return report
 
@@ -489,7 +501,7 @@ def write_aggregate_report(
         },
         "commands_run": [command] if command else [],
     }
-    _write_json(out_json, report)
+    write_json_object(out_json, report)
     _write_aggregate_markdown(Path(out_md), report)
     return report
 
@@ -731,7 +743,7 @@ def _load_route_associations(route_root: Path, route_metadata: JsonDict) -> tupl
             continue
         seen.add(path)
         if path.exists():
-            return _read_json(path), path
+            return read_json_object(path), path
     return {}, None
 
 
@@ -764,14 +776,14 @@ def _load_scene_frame_source(scene_root: Path, frame: JsonDict) -> JsonDict:
     artifacts = frame.get("artifacts")
     if not isinstance(artifacts, dict):
         raise ValueError("scene frame is missing artifacts")
-    point_map = _load_required_artifact(scene_root, artifacts, "point_map")
-    depth = _load_optional_artifact(scene_root, artifacts, "depth")
-    confidence = _load_optional_artifact(scene_root, artifacts, "confidence")
-    validity_mask = _load_optional_artifact(scene_root, artifacts, "validity_mask")
+    point_map = load_array_artifact_required(scene_root, artifacts, "point_map")
+    depth = load_array_artifact_optional(scene_root, artifacts, "depth", missing_ok=False)
+    confidence = load_array_artifact_optional(scene_root, artifacts, "confidence", missing_ok=False)
+    validity_mask = load_array_artifact_optional(scene_root, artifacts, "validity_mask", missing_ok=False)
     metadata_path = frame.get("metadata_path")
     metadata: JsonDict = {}
     if isinstance(metadata_path, str) and (scene_root / metadata_path).exists():
-        metadata = _read_json(scene_root / metadata_path)
+        metadata = read_json_object(scene_root / metadata_path)
     return {
         "point_map": point_map,
         "depth": depth,
@@ -779,35 +791,6 @@ def _load_scene_frame_source(scene_root: Path, frame: JsonDict) -> JsonDict:
         "validity_mask": validity_mask,
         "metadata": metadata,
     }
-
-
-def _load_spatial_example_arrays(spatial_root: Path, example: JsonDict) -> dict[str, np.ndarray]:
-    path_value = example.get("example_path")
-    if not isinstance(path_value, str):
-        raise ValueError(f"spatial example {example.get('frame_id')} is missing example_path")
-    with np.load(spatial_root / path_value, allow_pickle=False) as data:
-        return {
-            "bev_free": np.asarray(data["bev_free"], dtype=np.float32),
-            "bev_obstacle": np.asarray(data["bev_obstacle"], dtype=np.float32),
-            "bev_unknown": np.asarray(data["bev_unknown"], dtype=np.float32),
-            "bev_confidence": np.asarray(data["bev_confidence"], dtype=np.float32)
-            if "bev_confidence" in data.files
-            else np.ones_like(np.asarray(data["bev_free"], dtype=np.float32)),
-        }
-
-
-def _load_required_artifact(scene_root: Path, artifacts: JsonDict, kind: str) -> np.ndarray:
-    array = _load_optional_artifact(scene_root, artifacts, kind)
-    if array is None:
-        raise ValueError(f"missing scene teacher artifact {kind}")
-    return array
-
-
-def _load_optional_artifact(scene_root: Path, artifacts: JsonDict, kind: str) -> np.ndarray | None:
-    record = artifacts.get(kind)
-    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
-        return None
-    return load_array(scene_root / str(record["path"]))
 
 
 def _sample_optional_2d(
@@ -823,28 +806,8 @@ def _sample_optional_2d(
     if array.ndim != 2:
         raise ValueError(f"expected 2D artifact, got {array.shape}")
     if array.shape != shape:
-        array = _resize_nearest(array, shape)
+        array = resize_nearest(array, shape)
     return array[::stride, ::stride].reshape(-1).astype(np.float32)
-
-
-def _scene_frames_by_id(manifest: JsonDict) -> dict[int, JsonDict]:
-    out: dict[int, JsonDict] = {}
-    for frame in manifest.get("frames", []):
-        if isinstance(frame, dict):
-            frame_id = _int_or_none(frame.get("frame_id"))
-            if frame_id is not None:
-                out[frame_id] = frame
-    return out
-
-
-def _spatial_examples_by_id(manifest: JsonDict) -> dict[int, JsonDict]:
-    out: dict[int, JsonDict] = {}
-    for example in manifest.get("examples", []):
-        if isinstance(example, dict):
-            frame_id = _int_or_none(example.get("frame_id"))
-            if frame_id is not None:
-                out[frame_id] = example
-    return out
 
 
 def _split_frame_ids(frame_ids: list[int]) -> tuple[list[int], list[int]]:
@@ -876,7 +839,14 @@ def _write_projection_viz(
         if frame_id not in scene_frames or frame_id not in spatial_examples:
             continue
         source = _load_scene_frame_source(scene_root, scene_frames[frame_id])
-        target = _load_spatial_example_arrays(spatial_root, spatial_examples[frame_id])
+        target = load_spatial_example_arrays(
+            spatial_root,
+            spatial_examples[frame_id],
+            missing_ok=False,
+            require_confidence=True,
+        )
+        if target is None:
+            raise ValueError(f"spatial example {frame_id} could not be loaded")
         camera_to_base = _camera_to_base_for_frame(
             associations=associations,
             frame_id=frame_id,
@@ -888,15 +858,15 @@ def _write_projection_viz(
             candidate=candidate,
             grid_config=grid_config,
         )
-        target_rgb = _resize_nearest_rgb(_bev_label_rgb(target), (96, 96))
-        predicted_rgb = _resize_nearest_rgb(_bev_label_rgb(predicted), (96, 96))
-        error_rgb = _resize_nearest_rgb(_bev_error_rgb(predicted, target), (96, 96))
-        rows.append(_join_with_gap([target_rgb, predicted_rgb, error_rgb], gap=4, axis=1))
+        target_rgb = resize_nearest(_bev_label_rgb(target), (96, 96))
+        predicted_rgb = resize_nearest(_bev_label_rgb(predicted), (96, 96))
+        error_rgb = resize_nearest(_bev_error_rgb(predicted, target), (96, 96))
+        rows.append(join_with_gap([target_rgb, predicted_rgb, error_rgb], gap=4, axis=1))
     if rows:
-        sheet = _join_with_gap(rows, gap=4, axis=0)
+        sheet = join_with_gap(rows, gap=4, axis=0)
     else:
         sheet = np.full((96, 292, 3), 255, dtype=np.uint8)
-    _write_ppm(out_path, sheet)
+    write_ppm(out_path, sheet)
 
 
 def _bev_label_rgb(arrays: dict[str, np.ndarray]) -> np.ndarray:
@@ -1115,81 +1085,11 @@ def _valid_matrix_or_none(value: object) -> np.ndarray | None:
     return matrix
 
 
-def _read_json(path: str | Path) -> JsonDict:
-    with Path(path).open("r", encoding="utf-8") as handle:
-        data = json.load(handle)
-    if not isinstance(data, dict):
-        raise ValueError(f"expected JSON object in {path}")
-    return data
-
-
-def _write_json(path: str | Path, data: JsonDict) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(deterministic_json(data) + "\n", encoding="utf-8", newline="\n")
-
-
 def _resolve_viz_path(path: str | Path) -> Path:
     target = Path(path)
     if target.suffix:
         return target
     return target / "moge_robot_bev_projection_review.ppm"
-
-
-def _resize_nearest(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    values = np.asarray(array)
-    out_h, out_w = shape
-    row_index = np.linspace(0, values.shape[0] - 1, out_h).round().astype(np.int64)
-    col_index = np.linspace(0, values.shape[1] - 1, out_w).round().astype(np.int64)
-    return values[row_index[:, None], col_index[None, :]]
-
-
-def _resize_nearest_rgb(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    values = np.asarray(array, dtype=np.uint8)
-    out_h, out_w = shape
-    row_index = np.linspace(0, values.shape[0] - 1, out_h).round().astype(np.int64)
-    col_index = np.linspace(0, values.shape[1] - 1, out_w).round().astype(np.int64)
-    return values[row_index[:, None], col_index[None, :], :]
-
-
-def _join_with_gap(items: list[np.ndarray], *, gap: int, axis: int) -> np.ndarray:
-    if not items:
-        raise ValueError("cannot join empty image list")
-    if axis == 1:
-        height = max(item.shape[0] for item in items)
-        padded = [_pad_to(item, height, item.shape[1]) for item in items]
-        spacer = np.full((height, gap, 3), 255, dtype=np.uint8)
-        pieces: list[np.ndarray] = []
-        for index, item in enumerate(padded):
-            if index:
-                pieces.append(spacer)
-            pieces.append(item)
-        return np.concatenate(pieces, axis=1)
-    width = max(item.shape[1] for item in items)
-    padded = [_pad_to(item, item.shape[0], width) for item in items]
-    spacer = np.full((gap, width, 3), 255, dtype=np.uint8)
-    pieces = []
-    for index, item in enumerate(padded):
-        if index:
-            pieces.append(spacer)
-        pieces.append(item)
-    return np.concatenate(pieces, axis=0)
-
-
-def _pad_to(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    if image.shape[0] == height and image.shape[1] == width:
-        return image
-    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    canvas[: image.shape[0], : image.shape[1], :] = image
-    return canvas
-
-
-def _write_ppm(path: Path, image: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    height, width, _channels = image.shape
-    with path.open("wb") as handle:
-        handle.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
-        handle.write(np.asarray(image, dtype=np.uint8).tobytes(order="C"))
 
 
 def _ratio_or_none(numerator: int, denominator: int) -> float | None:
@@ -1258,7 +1158,7 @@ def _distribution(values: Iterable[str]) -> JsonDict:
 
 
 def _load_reports(paths: Iterable[str]) -> list[JsonDict]:
-    return [_read_json(path) for path in paths]
+    return [read_json_object(path) for path in paths]
 
 
 def _command() -> str:

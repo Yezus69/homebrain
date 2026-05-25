@@ -6,19 +6,19 @@ default read-list.
 
 ## Current objective
 
-Goal 18A completed a MoGe point-map convention projection gate on existing
-OpenLORIS robot-frame routes. The new gate projected real MoGe SceneTeacherPack
-point maps through fixed signed-axis convention candidates and measured
-calibration/held-out BEV agreement against existing RGB-D SpatialTrainPack
-labels. All routes produced only local/replay candidate-review evidence; MoGe is
-still not robot-frame truth, action supervision, temporal-memory evidence,
-control safe, or product-training approved.
+Goal 19A completed an architecture contraction pass around the HomeBrain core
+spine. Reused artifact IO, spatial example loading, and deterministic
+visualization helpers now live in small shared modules, while the Goal 16A/17A/18A
+probe and MoGe audit CLIs keep their existing behavior with less local helper
+duplication. No training, MoGe SpatialTrainPack generator, simulator, ROS/Nav2
+integration, new dependency, `cmd_vel`, raw PWM, or product/control-safety claim
+was added.
 
 ## Last completed goal
 
-Goal 18A: MoGe-to-robot-BEV projection convention gate on OpenLORIS, with fixed
-signed-axis convention candidates, calibration-only selection, held-out safety
-metrics, visual review sheets, and aggregate local/replay-only recommendation.
+Goal 19A: architecture cleanup and core-boundary documentation, with shared
+artifact IO, SpatialTrainPack loading, and visualization helpers extracted from
+large goal/audit tools while preserving MoGe review-only behavior.
 
 ## Current implementation status
 
@@ -109,8 +109,15 @@ metrics, visual review sheets, and aggregate local/replay-only recommendation.
   three routes. Cafe/office selected `cam_x=+moge_x__cam_y=-moge_y__cam_z=+moge_z`;
   corridor selected `cam_x=-moge_y__cam_y=-moge_x__cam_z=+moge_z`, so there is no
   universal convention proof yet.
+- Goal 19A added `homebrain.artifacts.io`, `homebrain.data.spatial_io`, and
+  `homebrain.visualization.panels` for duplicated JSON/array artifact loading,
+  manifest frame/example lookup, SpatialTrainPack example loading, and
+  deterministic PPM/PGM/panel helpers. The large Goal 16A/17A/18A tools now use
+  those helpers, and teacher/geometry/spatial visualizers share the PPM/PGM
+  writers. Remaining large policy/audit scripts were not deleted because they
+  still preserve critical replay/eval diagnostics.
 - Policy, scorer, and memory-action work was not touched in Goals 16C, 17A, or
-  18A.
+  18A/19A.
   The real MoGe artifacts remove the missing-teacher setup blocker and now pass
   public robot-frame comparison/projection gates for local/replay single-frame review, but
   they do not provide control safety, product-training approval, robot-frame
@@ -123,6 +130,91 @@ metrics, visual review sheets, and aggregate local/replay-only recommendation.
   are separated below them for history.
 
 ## Goal completion log
+
+### 033 - Goal 19A architecture cleanup and core-boundary contraction
+
+Objective attempted: contract duplicated helper code around the active
+HomeBrain spine without changing behavior, deleting evidence, starting ML
+training, creating a MoGe SpatialTrainPack generator, adding dependencies, or
+making any control/product-safety claim.
+
+Inventory summary: the largest Python surfaces before cleanup were
+`homebrain/tools/goal13a_memory_policy_shadow_eval.py` (`64.9 KB`),
+`homebrain/policies/trajectory_scorer_net_v0.py` (`60.2 KB`),
+`homebrain/tools/validate_moge_robot_bev_projection.py` (`55.6 KB`),
+`homebrain/tools/compare_moge_scene_to_spatial_pack.py` (`53.3 KB`),
+`homebrain/tools/run_goal11b_nightly.py` (`52.4 KB`),
+`homebrain/policies/build_action_label_pack.py` (`44.0 KB`),
+`homebrain/policies/audit_goal13a_collapse.py` (`41.4 KB`), and
+`homebrain/tools/run_owned_geometry_probe.py` (`38.6 KB`). Repeated helpers were
+mainly JSON object read/write, optional scene artifact array loading, manifest
+frame/example lookup, SpatialTrainPack example loading, grayscale normalization,
+nearest-neighbor resize, tint/RGB panel composition, panel joining, and PPM/PGM
+writing.
+
+Files changed: added `homebrain/artifacts/__init__.py`,
+`homebrain/artifacts/io.py`, `homebrain/data/spatial_io.py`,
+`homebrain/visualization/__init__.py`, `homebrain/visualization/panels.py`,
+`tests/test_goal19a_core_helpers.py`, and `docs/CORE_ARCHITECTURE.md`; updated
+`.gitignore` to allow the new source package despite generated `artifacts/`
+ignores; refactored
+`homebrain/tools/validate_moge_robot_bev_projection.py`,
+`homebrain/tools/compare_moge_scene_to_spatial_pack.py`,
+`homebrain/tools/run_owned_geometry_probe.py`,
+`homebrain/teachers/visualize_artifacts.py`,
+`homebrain/geometry/visualize_bev.py`, and
+`homebrain/data/visualize_spatial_dataset.py`; updated `CURRENT_STATUS.md`.
+
+Commands run: required first reads; largest-file inventory and duplicate-helper
+searches with `Get-ChildItem`/`rg`; focused compile
+`python -m py_compile homebrain\artifacts\io.py
+homebrain\visualization\panels.py homebrain\data\spatial_io.py
+homebrain\tools\compare_moge_scene_to_spatial_pack.py
+homebrain\tools\validate_moge_robot_bev_projection.py
+homebrain\tools\run_owned_geometry_probe.py
+homebrain\teachers\visualize_artifacts.py homebrain\geometry\visualize_bev.py
+homebrain\data\visualize_spatial_dataset.py`; follow-up compile `python -m
+py_compile homebrain\tools\validate_moge_robot_bev_projection.py
+homebrain\tools\run_owned_geometry_probe.py`; focused tests `python -m pytest
+tests\test_goal19a_core_helpers.py tests\test_goal15b_scene_teacher_signal.py
+tests\test_goal18a_moge_robot_bev_projection.py -q`; CLI smoke via `python -m
+homebrain.tools.validate_moge_robot_bev_projection --aggregate-from
+runs\goal19a_cli_smoke\projection_input.json --out-json
+runs\goal19a_cli_smoke\aggregate.json --out-md
+runs\goal19a_cli_smoke\aggregate.md`; final hygiene `git diff --check`;
+required full verification `python -m pytest`.
+
+Pass/fail results: py_compile passed. Focused helper/affected-tool tests passed
+with `19 passed`. The first CLI smoke attempt failed because the generated
+smoke JSON fixture was malformed by shell escaping; the fixture was corrected
+and the same aggregate CLI passed with
+`next_allowed_use=local_replay_moge_bev_candidate_review` and `route_count=1`.
+Full pytest passed with `109 passed`.
+`git diff --check` passed; Git reported CRLF working-tree warnings only.
+
+Artifacts created: `docs/CORE_ARCHITECTURE.md`; generated smoke files
+`runs/goal19a_cli_smoke/projection_input.json`,
+`runs/goal19a_cli_smoke/aggregate.json`, and
+`runs/goal19a_cli_smoke/aggregate.md`.
+
+Metrics observed: the affected MoGe/probe tools shrank while preserving tests:
+`validate_moge_robot_bev_projection.py` moved from `55.6 KB` to `51.6 KB`,
+`compare_moge_scene_to_spatial_pack.py` from `53.3 KB` to `48.1 KB`, and
+`run_owned_geometry_probe.py` from `38.6 KB` to `34.5 KB`. Full suite count is
+now `109` tests. No MoGe route metrics changed, no model was trained, and all
+MoGe/projection safety flags remain false.
+
+Blockers/risks: no active blocker was added. Some larger policy/audit scripts
+remain intentionally large because they are still the only reproducible source
+for earlier replay/eval diagnostics. MoGe remains review-only: Goal 18A's zero
+held-out free IoU and corridor convention disagreement still block
+product-training approval and MoGe-generated SpatialTrainPack training.
+
+Recommended next goal: continue contraction only where it preserves evidence,
+especially by isolating reusable policy-audit/contact-sheet helpers from the
+remaining large replay-only audit scripts; do not start new training or MoGe
+SpatialTrainPack generation until the free-space and convention weaknesses are
+reviewed.
 
 ### 032 - Goal 18A MoGe-to-robot-BEV projection convention gate
 

@@ -11,9 +11,9 @@ from typing import Any
 
 import numpy as np
 
+from homebrain.artifacts.io import load_array_artifact_optional, write_json_object
 from homebrain.ingest.image_sequence import ImageSequenceIngestSummary, ingest_image_sequence
-from homebrain.messages.schema import JsonDict, deterministic_json
-from homebrain.teachers.artifacts import load_array
+from homebrain.messages.schema import JsonDict
 from homebrain.teachers.moge_scene_teacher import (
     MOGE_DEFAULT_MODEL_ID,
     MoGeSceneTeacherUnavailableError,
@@ -32,6 +32,15 @@ from homebrain.teachers.vggt_scene_teacher import (
     create_vggt_scene_teacher,
 )
 from homebrain.tools.audit_scene_teacher_signal import audit_scene_teacher_signal
+from homebrain.visualization.panels import (
+    gray_rgb,
+    join_with_gap,
+    normalize_gray,
+    resize_nearest,
+    thumbnail_shape,
+    tint,
+    write_ppm,
+)
 
 PROBE_SCHEMA_VERSION = "homebrain.owned_geometry_probe_result.v0"
 VISUAL_REVIEW_SCHEMA_VERSION = "homebrain.owned_geometry_probe_visual_review.v0"
@@ -329,7 +338,7 @@ def _write_visual_review_artifact(
     for frame in selected:
         artifacts = frame.get("artifacts") if isinstance(frame.get("artifacts"), dict) else {}
         panels = _review_panels(scene_root, artifacts, frame=frame, log_root=log_root)
-        rows.append(_join_with_gap(panels, gap=2, axis=1))
+        rows.append(join_with_gap(panels, gap=2, axis=1))
         frame_summaries.append(
             {
                 "frame_id": frame.get("frame_id"),
@@ -345,9 +354,9 @@ def _write_visual_review_artifact(
             }
         )
 
-    contact_sheet = _join_with_gap(rows, gap=2, axis=0)
+    contact_sheet = join_with_gap(rows, gap=2, axis=0)
     contact_sheet_path = output / "scene_teacher_review.ppm"
-    _write_ppm(contact_sheet_path, contact_sheet)
+    write_ppm(contact_sheet_path, contact_sheet)
     visual_manifest: JsonDict = {
         "schema_version": VISUAL_REVIEW_SCHEMA_VERSION,
         "source_scene_teacher": scene_root.as_posix(),
@@ -363,7 +372,7 @@ def _write_visual_review_artifact(
         "frames": frame_summaries,
     }
     visual_manifest_path = output / "visual_review_manifest.json"
-    _write_json(visual_manifest_path, visual_manifest)
+    write_json_object(visual_manifest_path, visual_manifest)
     return visual_manifest_path
 
 
@@ -625,7 +634,7 @@ def _probe_retry_command_from_values(
 
 def _finish_probe_result(result: JsonDict, result_json_path: Path, result_md_path: Path, started: float) -> JsonDict:
     result["runtime_sec"] = float(time.perf_counter() - started)
-    _write_json(result_json_path, result)
+    write_json_object(result_json_path, result)
     _write_result_markdown(result_md_path, result)
     return result
 
@@ -680,14 +689,6 @@ def _write_result_markdown(path: Path, result: JsonDict) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
-def _write_json(path: str | Path, data: JsonDict) -> None:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(deterministic_json(data))
-        handle.write("\n")
-
-
 def _review_panels(
     scene_root: Path,
     artifacts: Any,
@@ -697,30 +698,30 @@ def _review_panels(
 ) -> list[np.ndarray]:
     if not isinstance(artifacts, dict):
         raise ValueError("scene-teacher frame is missing artifacts")
-    depth = _load_optional_artifact(scene_root, artifacts, "depth")
-    confidence = _load_optional_artifact(scene_root, artifacts, "confidence")
-    floor = _load_optional_artifact(scene_root, artifacts, "floor_traversable_mask")
-    obstacle = _load_optional_artifact(scene_root, artifacts, "obstacle_risk_mask")
+    depth = load_array_artifact_optional(scene_root, artifacts, "depth", missing_ok=True)
+    confidence = load_array_artifact_optional(scene_root, artifacts, "confidence", missing_ok=True)
+    floor = load_array_artifact_optional(scene_root, artifacts, "floor_traversable_mask", missing_ok=True)
+    obstacle = load_array_artifact_optional(scene_root, artifacts, "obstacle_risk_mask", missing_ok=True)
     if depth is None:
-        point_map = _load_optional_artifact(scene_root, artifacts, "point_map")
+        point_map = load_array_artifact_optional(scene_root, artifacts, "point_map", missing_ok=True)
         if point_map is not None and point_map.ndim == 3 and point_map.shape[-1] == 3:
             depth = point_map[:, :, 2]
     if depth is None:
         raise ValueError("visual review requires depth or point_map artifacts")
-    base = _normalize_gray(np.asarray(depth, dtype=np.float32))
-    height, width = _thumbnail_shape(base)
+    base = normalize_gray(np.asarray(depth, dtype=np.float32), strict_2d=True)
+    height, width = thumbnail_shape(base)
     source_panel = _source_rgb_panel(frame=frame, log_root=log_root, shape=(height, width))
-    depth_panel = _gray_rgb(_resize_nearest(base, (height, width)))
-    confidence_panel = _tint(
-        _resize_nearest(_normalize_gray(confidence if confidence is not None else np.ones_like(base)), (height, width)),
+    depth_panel = gray_rgb(resize_nearest(base, (height, width)))
+    confidence_panel = tint(
+        resize_nearest(normalize_gray(confidence if confidence is not None else np.ones_like(base), strict_2d=True), (height, width)),
         (40, 180, 80),
     )
-    floor_panel = _tint(
-        _resize_nearest(_normalize_gray(floor if floor is not None else np.zeros_like(base)), (height, width)),
+    floor_panel = tint(
+        resize_nearest(normalize_gray(floor if floor is not None else np.zeros_like(base), strict_2d=True), (height, width)),
         (40, 190, 110),
     )
-    obstacle_panel = _tint(
-        _resize_nearest(_normalize_gray(obstacle if obstacle is not None else np.zeros_like(base)), (height, width)),
+    obstacle_panel = tint(
+        resize_nearest(normalize_gray(obstacle if obstacle is not None else np.zeros_like(base), strict_2d=True), (height, width)),
         (220, 55, 55),
     )
     return [source_panel, depth_panel, confidence_panel, floor_panel, obstacle_panel]
@@ -737,7 +738,7 @@ def _source_rgb_panel(*, frame: JsonDict | None, log_root: Path | None, shape: t
         rgb = _load_review_source_rgb(source_path, frame)
     except Exception:  # noqa: BLE001 - visual review should still show teacher panels.
         return np.full((shape[0], shape[1], 3), 230, dtype=np.uint8)
-    return _resize_nearest(np.asarray(rgb, dtype=np.uint8), shape)
+    return resize_nearest(np.asarray(rgb, dtype=np.uint8), shape)
 
 
 def _load_review_source_rgb(path: Path, frame: JsonDict) -> np.ndarray:
@@ -830,109 +831,6 @@ def _read_review_encoded_image(path: Path) -> np.ndarray:
             return np.asarray(image.convert("RGB"), dtype=np.uint8)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"could not decode source image {path}") from exc
-
-
-def _load_optional_artifact(scene_root: Path, artifacts: JsonDict, kind: str) -> np.ndarray | None:
-    record = artifacts.get(kind)
-    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
-        return None
-    path = scene_root / str(record["path"])
-    if not path.exists():
-        return None
-    return load_array(path)
-
-
-def _normalize_gray(array: np.ndarray) -> np.ndarray:
-    values = np.asarray(array, dtype=np.float32).squeeze()
-    if values.ndim != 2:
-        raise ValueError(f"expected 2D review panel, got shape {values.shape}")
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return np.zeros(values.shape, dtype=np.uint8)
-    minimum = float(np.percentile(finite, 1))
-    maximum = float(np.percentile(finite, 99))
-    if maximum <= minimum:
-        return np.zeros(values.shape, dtype=np.uint8)
-    normalized = (values - np.float32(minimum)) / np.float32(maximum - minimum)
-    normalized = np.where(np.isfinite(normalized), normalized, np.float32(0.0))
-    return np.clip(normalized * np.float32(255.0), 0, 255).astype(np.uint8)
-
-
-def _thumbnail_shape(panel: np.ndarray, max_side: int = 96, min_side: int = 16) -> tuple[int, int]:
-    height, width = panel.shape
-    scale = max_side / float(max(height, width, 1))
-    out_h = max(1, int(round(height * scale)))
-    out_w = max(1, int(round(width * scale)))
-    if max(height, width) < min_side:
-        scale = min_side / float(max(height, width, 1))
-        out_h = max(1, int(round(height * scale)))
-        out_w = max(1, int(round(width * scale)))
-    return out_h, out_w
-
-
-def _resize_nearest(array: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
-    values = np.asarray(array)
-    out_h, out_w = shape
-    row_index = np.linspace(0, values.shape[0] - 1, out_h).round().astype(np.int64)
-    col_index = np.linspace(0, values.shape[1] - 1, out_w).round().astype(np.int64)
-    return values[row_index[:, None], col_index[None, :]]
-
-
-def _gray_rgb(panel: np.ndarray) -> np.ndarray:
-    values = np.asarray(panel, dtype=np.uint8)
-    return np.stack([values, values, values], axis=2)
-
-
-def _tint(panel: np.ndarray, color: tuple[int, int, int]) -> np.ndarray:
-    values = np.asarray(panel, dtype=np.float32) / np.float32(255.0)
-    rgb = np.zeros((*values.shape, 3), dtype=np.uint8)
-    for channel, channel_value in enumerate(color):
-        rgb[:, :, channel] = np.clip(values * np.float32(channel_value), 0, 255).astype(np.uint8)
-    return rgb
-
-
-def _join_with_gap(items: list[np.ndarray], *, gap: int, axis: int) -> np.ndarray:
-    if not items:
-        raise ValueError("cannot join empty image list")
-    if axis == 1:
-        height = max(item.shape[0] for item in items)
-        padded = [_pad_to(item, height, item.shape[1]) for item in items]
-        spacer = np.full((height, gap, 3), 255, dtype=np.uint8)
-        pieces: list[np.ndarray] = []
-        for index, item in enumerate(padded):
-            if index:
-                pieces.append(spacer)
-            pieces.append(item)
-        return np.concatenate(pieces, axis=1)
-    if axis == 0:
-        width = max(item.shape[1] for item in items)
-        padded = [_pad_to(item, item.shape[0], width) for item in items]
-        spacer = np.full((gap, width, 3), 255, dtype=np.uint8)
-        pieces = []
-        for index, item in enumerate(padded):
-            if index:
-                pieces.append(spacer)
-            pieces.append(item)
-        return np.concatenate(pieces, axis=0)
-    raise ValueError(f"unsupported join axis: {axis}")
-
-
-def _pad_to(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    if image.shape[0] == height and image.shape[1] == width:
-        return image
-    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
-    canvas[: image.shape[0], : image.shape[1], :] = image
-    return canvas
-
-
-def _write_ppm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise ValueError(f"PPM image must be HxWx3, got {image.shape}")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    height, width, _channels = image.shape
-    with path.open("wb") as handle:
-        handle.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
-        handle.write(np.asarray(image, dtype=np.uint8).tobytes(order="C"))
 
 
 def main(argv: list[str] | None = None) -> int:

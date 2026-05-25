@@ -7,6 +7,8 @@ data/public/
 *.pt
 *.pth
 *.onnx
+!homebrain/artifacts/
+!homebrain/artifacts/*.py
 
 # python
 __pycache__/

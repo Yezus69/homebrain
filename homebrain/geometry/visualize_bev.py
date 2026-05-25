@@ -5,9 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
+from homebrain.artifacts.io import write_json_object
 from homebrain.geometry.validate_bev import load_bev_manifest
-from homebrain.messages.schema import JsonDict, deterministic_json
+from homebrain.messages.schema import JsonDict
 from homebrain.teachers.artifacts import load_array
+from homebrain.visualization.panels import write_pgm, write_ppm
 
 
 def visualize_bev(bev_dir: str | Path, out_dir: str | Path) -> Path:
@@ -43,9 +45,9 @@ def visualize_bev(bev_dir: str | Path, out_dir: str | Path) -> Path:
         label_path = frame_dir / "bev_labels.ppm"
         confidence_path = frame_dir / "bev_confidence.pgm"
         height_path = frame_dir / "bev_height.pgm"
-        _write_ppm(label_path, label_rgb)
-        _write_pgm(confidence_path, _normalize_to_uint8(arrays["bev_confidence"]))
-        _write_pgm(height_path, _normalize_to_uint8(arrays["bev_height"]))
+        write_ppm(label_path, label_rgb)
+        write_pgm(confidence_path, _normalize_to_uint8(arrays["bev_confidence"]))
+        write_pgm(height_path, _normalize_to_uint8(arrays["bev_height"]))
 
         frame_outputs.append(
             {
@@ -72,7 +74,7 @@ def visualize_bev(bev_dir: str | Path, out_dir: str | Path) -> Path:
         "frames": frame_outputs,
     }
     manifest_path = output / "visualization_manifest.json"
-    _write_json(manifest_path, visualization_manifest)
+    write_json_object(manifest_path, visualization_manifest)
     return manifest_path
 
 
@@ -104,35 +106,6 @@ def _normalize_to_uint8(array: np.ndarray) -> np.ndarray:
     return np.where(finite, np.clip(normalized * np.float32(255.0), 0, 255), 0).astype(np.uint8)
 
 
-def _write_pgm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 2:
-        raise ValueError(f"PGM image must be 2D, got shape {image.shape}")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    height, width = image.shape
-    with target.open("wb") as handle:
-        handle.write(f"P5\n{width} {height}\n255\n".encode("ascii"))
-        handle.write(image.astype(np.uint8).tobytes(order="C"))
-
-
-def _write_ppm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise ValueError(f"PPM image must be HxWx3, got shape {image.shape}")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    height, width, _channels = image.shape
-    with target.open("wb") as handle:
-        handle.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
-        handle.write(image.astype(np.uint8).tobytes(order="C"))
-
-
-def _write_json(path: Path, data: JsonDict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
-        handle.write(deterministic_json(data))
-        handle.write("\n")
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Create simple previews for BEV weak geometry labels.")
     parser.add_argument("--bev", required=True, help="Input BEV artifact directory.")
@@ -145,4 +118,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -14,6 +14,7 @@ from homebrain.data.spatial_dataset import (
     read_json,
     write_json,
 )
+from homebrain.visualization.panels import write_ppm
 
 
 def visualize_spatial_dataset(
@@ -117,7 +118,7 @@ def _label_overlay_rgb(example: dict[str, np.ndarray]) -> np.ndarray:
 
 def _write_contact_sheet(path: Path, images: list[np.ndarray]) -> None:
     if not images:
-        _write_ppm(path, np.zeros((1, 1, 3), dtype=np.uint8))
+        write_ppm(path, np.zeros((1, 1, 3), dtype=np.uint8))
         return
     thumbs = [_resize_nearest(image, _scale_for_image(image)) for image in images]
     padding = 4
@@ -129,7 +130,7 @@ def _write_contact_sheet(path: Path, images: list[np.ndarray]) -> None:
         h, w, _ = image.shape
         sheet[:h, x : x + w] = image
         x += w + padding
-    _write_ppm(path, sheet)
+    write_ppm(path, sheet)
 
 
 def _scale_for_image(image: np.ndarray) -> int:
@@ -141,17 +142,6 @@ def _resize_nearest(image: np.ndarray, scale: int) -> np.ndarray:
     if scale <= 1:
         return image.astype(np.uint8)
     return np.repeat(np.repeat(image, scale, axis=0), scale, axis=1).astype(np.uint8)
-
-
-def _write_ppm(path: Path, image: np.ndarray) -> None:
-    if image.ndim != 3 or image.shape[2] != 3:
-        raise ValueError(f"PPM image must be HxWx3, got shape {image.shape}")
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    height, width, _channels = image.shape
-    with target.open("wb") as handle:
-        handle.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
-        handle.write(image.astype(np.uint8).tobytes(order="C"))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -171,4 +161,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
