@@ -6,20 +6,19 @@ default read-list.
 
 ## Current objective
 
-Goal 20A completed the first closed-loop replay brain path. SpatialMemoryNet v1
-modeld/replay now emits replay-only candidate trajectory decisions from v1 memory
-or current BEV, optional learned trajectory scorer checkpoints are supported, and
-closed-loop replay reports summarize coverage/risk/unknown/uncertainty metrics.
-The first real OpenLORIS cafe route run produced non-empty decisions, but selected
-actions collapsed to one candidate and memory-BEV selections did not differ from
-current-BEV selections. No hardware execution, `cmd_vel`, raw PWM, new training,
-MoGe SpatialTrainPack generation, or product/control-safety claim was added.
+Goal 21A completed the closed-loop policy-collapse diagnosis. The learned scorer
+collapsed to `arc_right_medium` on cafe, office, and corridor in both current and
+memory BEV modes, while the transparent scorer did not collapse. The next repair
+should retrain or recalibrate the trajectory scorer on runtime model-BEV inputs
+with a focused left/right feature ablation and explicit checks that memory deltas
+can alter candidate ranking. No hardware execution, `cmd_vel`, raw PWM, new
+training, MoGe SpatialTrainPack generation, or product/control-safety claim was
+added.
 
 ## Last completed goal
 
-Goal 20A: first closed-loop HomeBrain replay path, wiring SpatialMemoryNet v1
-memory/current BEV through candidate trajectory scoring inside BrainOutputEvents
-and route-level closed-loop replay reporting.
+Goal 21A: closed-loop policy collapse audit for the Goal 20A runtime decision
+path across cafe, office, and corridor replay routes.
 
 ## Current implementation status
 
@@ -42,6 +41,13 @@ and route-level closed-loop replay reporting.
   `1200` memory-BEV decisions with `9` candidates per frame and zero `cmd_vel`,
   but all selected `arc_right_medium`; memory/current selections matched on all
   `1200` compared frames.
+- Goal 21A added `homebrain.policies.audit_closed_loop_policy_collapse` and ran
+  the current/memory x learned/transparent replay matrix on cafe, office, and
+  corridor. Learned scorer collapse is cross-route (`6/6` learned logs collapsed
+  to `arc_right_medium`), transparent scorer collapse did not occur (`0/6`),
+  and the likely repair target is runtime model-BEV scorer training/calibration
+  with a left/right feature-bias ablation. Current safety flags remain
+  `replay_only=true`, `not_executed=true`, and `control_safe=false`.
 - SpatialMemoryNet v1 has explicit persistent BEV memory, route-pose/odom warp
   defaults, conservative update masks, hard validation, and true route-out folds.
   Goal 12C showed useful memory in spatial eval, but not control-safe behavior.
@@ -143,6 +149,86 @@ and route-level closed-loop replay reporting.
   are separated below them for history.
 
 ## Goal completion log
+
+### 035 - Goal 21A closed-loop policy collapse diagnosis
+
+Objective attempted: diagnose the Goal 20A closed-loop runtime decision collapse
+before training or adding models, using replay-only artifacts to compare learned
+vs transparent scoring, current vs memory BEV, candidate feature/logit behavior,
+left/right margins, ActionLabelPack v5 labels, and cross-route behavior. No new
+open-weight wrapper, new training, MoGe SpatialTrainPack data, `cmd_vel`, raw
+PWM, or product/control-safety claim was added.
+
+Files changed: added `homebrain/policies/audit_closed_loop_policy_collapse.py`
+and `tests/test_goal21a_closed_loop_policy_collapse.py`; updated
+`CURRENT_STATUS.md`.
+
+Commands run: required first reads; focused source/artifact searches with `rg`
+and PowerShell readers; compile `python -m py_compile
+homebrain\policies\audit_closed_loop_policy_collapse.py
+tests\test_goal21a_closed_loop_policy_collapse.py`; focused tests `python -m
+pytest tests\test_goal21a_closed_loop_policy_collapse.py -q`; 12 real replay
+commands for cafe, office, and corridor using current/memory BEV with learned
+and transparent scoring under
+`runs\goal21a_closed_loop_policy_collapse_audit\replays\`; real audit `python
+-m homebrain.policies.audit_closed_loop_policy_collapse ... --out-json
+runs\goal21a_closed_loop_policy_collapse_audit\report.json --out-md
+runs\goal21a_closed_loop_policy_collapse_audit\report.md --summary-csv
+runs\goal21a_closed_loop_policy_collapse_audit\summary.csv --summary-jsonl
+runs\goal21a_closed_loop_policy_collapse_audit\summary.jsonl`; full verification
+`python -m pytest`; hygiene `git diff --check`.
+
+Pass/fail results: py_compile passed. Focused Goal 21A tests passed with
+`3 passed`. The first replay matrix shell loop failed before replay work because
+of PowerShell format-string quoting, then the corrected loop completed all 12
+replays. An initial audit run exposed an audit-side false positive that treated
+transparent logs with no learned features as an implementation-bug signal; the
+audit was fixed and rerun. The final real audit completed. Full pytest passed
+with `115 passed in 126.39s`. `git diff --check` passed.
+
+Artifacts created: replay logs under
+`runs/goal21a_closed_loop_policy_collapse_audit/replays/`; aggregate audit
+`runs/goal21a_closed_loop_policy_collapse_audit/report.json`;
+`runs/goal21a_closed_loop_policy_collapse_audit/report.md`;
+`runs/goal21a_closed_loop_policy_collapse_audit/summary.csv`; and
+`runs/goal21a_closed_loop_policy_collapse_audit/summary.jsonl`.
+
+Metrics observed: safety metadata stayed replay-only with
+`cmd_vel_non_null_count=0`, `replay_only=true`, `not_executed=true`,
+`control_safe=false`, and `raw_pwm_emitted=false`. The audit covered `12` logs
+across `3` routes. Learned scorer collapse occurred in `6/6` learned logs:
+cafe, office, and corridor current/memory runs all selected
+`arc_right_medium` for every decision. Transparent scorer collapse occurred in
+`0/6` transparent logs; dominant fractions were route-dependent rather than
+single-candidate collapse. Aggregate v5 labels were diverse:
+`straight_medium=1344`, `arc_left_small=376`, `stop=354`,
+`straight_short=271`, `arc_right_small=252`, `arc_left_medium=152`, and
+`arc_right_medium=145`. Learned-vs-v5 agreement was low: cafe memory learned
+`0.128546`, office memory learned `0.0`, and corridor memory learned `0.0`.
+Learned-vs-transparent agreement was also near zero: cafe memory `0.0025`,
+office memory `0.0`, corridor memory `0.0075`. Left/right learned logit margins
+consistently favored right candidates; for memory-BEV logs,
+`arc_left_medium - arc_right_medium` was about `-1.44` cafe, `-1.38` office,
+and `-1.42` corridor with right-favored fraction `1.0`. Current-vs-memory BEV
+and feature/logit values changed, but learned selected difference remained `0.0`
+for same-route learned comparisons. Candidate hash metadata matched the scorer
+checkpoint.
+
+Root-cause classification: present buckets are `model_bev_distribution_shift`,
+`left_right_signed_feature_bias`, `learned_scorer_prior_bias`, and
+`memory_delta_too_small_for_policy`. Absent buckets are
+`candidate_feature_scaling_bug`, `transparent_scorer_collapse`,
+`route_data_too_narrow`, and `implementation_bug_suspected`.
+
+Blockers/risks: no active setup blocker was added. The closed-loop policy remains
+diagnostic only and not control-safe. The learned scorer appears misaligned with
+runtime model-BEV inputs and has a persistent right-candidate prior, so tuning
+transparent weights or adding route execution would be premature.
+
+Recommended next goal: retrain or recalibrate the trajectory scorer on runtime
+model-BEV/current-memory inputs with a left/right feature ablation, then rerun
+the same collapse audit and require non-collapsed route-diverse decisions before
+claiming policy progress.
 
 ### 034 - Goal 20A first closed-loop replay brain path
 
