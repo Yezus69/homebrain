@@ -19,7 +19,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | DINO-family visual model | dense features / teacher | UNVERIFIED / pending_human_review | No | Goal 7 used DINOv2-small `dinov2_vits14` through torch.hub as an offline frozen feature teacher; verify exact repo + weight license before product/training approval. |
 | Depth Anything family | geometry/depth teacher | UNVERIFIED / pending_human_review | No | DA3-SMALL setup added for offline teacher use; verify exact code/model card/license before product use. |
 | Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
-| MoGe / point-map model | geometry teacher | UNVERIFIED | No | Verify official license. |
+| MoGe / point-map model | geometry teacher | UNVERIFIED / pending_human_review | No | Goal 16B added a built-in official-interface adapter for `moge.model.v2.MoGeModel`; no MoGe code or weights were installed, imported, downloaded, or approved in this workspace. |
 | VGGT-family | offline multi-view geometry teacher | UNVERIFIED / pending_human_review | No | Goal 15A added an optional local VGGT-style scene-teacher adapter plus fake backend tests. No real code/checkpoint was downloaded or approved. Verify exact repo/checkpoint license before real use. |
 | SAM-family video segmentation | mask/dynamic-object teacher | UNVERIFIED | No | Verify exact version. |
 | GNM / ViNT / NoMaD | navigation prior / baseline | UNVERIFIED | No | Verify code/checkpoint/dataset license. |
@@ -280,3 +280,33 @@ train models, run policies, or add product-runtime requirements.
   extrinsics or route pose/odometry evidence. Any future real MoGe license and
   checkpoint provenance still require human review before product training or
   runtime use.
+
+## Goal 16B dependency update
+
+Goal 16B added a built-in adapter for the official MoGe v2 Python interface. It
+did not install MoGe, download model weights, train models, run policies, or add
+product-runtime requirements.
+
+- MoGe code interface: `from moge.model.v2 import MoGeModel`.
+- Default adapter: `homebrain.teachers.moge_official_adapter:run_scene_teacher`.
+- Default model id when explicit download is allowed:
+  `Ruicheng/moge-2-vits-normal`.
+- Operator-selected model id source: `HOMEBRAIN_MOGE_MODEL_ID`.
+- Local checkpoint source: `--checkpoint` or `HOMEBRAIN_MOGE_CHECKPOINT` when
+  the path exists.
+- Download policy: no default model download unless
+  `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`; current Goal 16B probe did not set it.
+- Current provenance: no importable MoGe package was present, no checkpoint was
+  loaded, and no model id/checkpoint license could be audited from an actual
+  artifact.
+- License name/status in HomeBrain: `pending_human_review`; no product runtime,
+  product-safety, or product-training approval.
+- Intended use: offline scene/geometry teacher for owned or license-approved
+  route logs only.
+- Required at runtime: no.
+- Required for normal tests: no; tests monkeypatch a fake `moge.model.v2`
+  module and never download weights.
+- Mock/fallback status: fake MoGe remains explicit review-only and never
+  trainable. `backend=real` has no fake fallback.
+- Risk: exact MoGe code/checkpoint/model-card license and provenance still need
+  human review before any product training or runtime use.

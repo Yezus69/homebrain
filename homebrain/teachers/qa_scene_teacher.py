@@ -126,11 +126,16 @@ def qa_scene_teacher_artifacts(artifacts_dir: str | Path) -> JsonDict:
 
         intrinsics = _optional_artifact_array(root, artifacts, "intrinsics", errors)
         extrinsics = _optional_artifact_array(root, artifacts, "extrinsics", errors)
-        if intrinsics is not None and extrinsics is not None and _matrix_ok(intrinsics, (3, 3)) and _extrinsics_ok(extrinsics):
-            pose_valid_count += 1
-        elif intrinsics is not None or extrinsics is not None:
+        intrinsics_ok = intrinsics is not None and _matrix_ok(intrinsics, (3, 3))
+        extrinsics_ok = extrinsics is not None and _extrinsics_ok(extrinsics)
+        if intrinsics is not None and not intrinsics_ok:
             shape_error_count += 1
-            errors.append(f"invalid camera matrices for frame {frame.get('frame_id')}")
+            errors.append(f"invalid intrinsics for frame {frame.get('frame_id')}: shape={intrinsics.shape}")
+        if extrinsics is not None and not extrinsics_ok:
+            shape_error_count += 1
+            errors.append(f"invalid extrinsics for frame {frame.get('frame_id')}: shape={extrinsics.shape}")
+        if intrinsics_ok and extrinsics_ok:
+            pose_valid_count += 1
 
         for kind, record in artifacts.items():
             if kind not in SCENE_TEACHER_FRAME_ARTIFACT_KINDS:

@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+import sys
+import types
 
 import numpy as np
 import pytest
@@ -24,6 +26,7 @@ from homebrain.tools.audit_scene_teacher_signal import audit_scene_teacher_signa
 from homebrain.tools.run_owned_geometry_probe import (
     STATUS_BLOCKED_MISSING_TEACHER_SETUP,
     STATUS_REVIEW_ONLY_NOT_TRAINABLE,
+    main as probe_main,
     run_owned_geometry_probe,
 )
 
@@ -205,6 +208,11 @@ def test_owned_geometry_probe_missing_real_moge_setup_blocks_before_qa_audit(
     monkeypatch.delenv("HOMEBRAIN_MOGE_ADAPTER", raising=False)
     monkeypatch.delenv("HOMEBRAIN_MOGE_DIR", raising=False)
     monkeypatch.delenv("HOMEBRAIN_MOGE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD", raising=False)
+    monkeypatch.setitem(sys.modules, "moge", None)
+    monkeypatch.delitem(sys.modules, "moge.model", raising=False)
+    monkeypatch.delitem(sys.modules, "moge.model.v2", raising=False)
 
     result = run_owned_geometry_probe(
         frames_dir=frames,
@@ -231,9 +239,136 @@ def test_owned_geometry_probe_missing_real_moge_setup_blocks_before_qa_audit(
     assert not Path(result["paths"]["qa_path"]).exists()
     assert not Path(result["paths"]["audit_json_path"]).exists()
     missing_fields = {item["field"] for item in result["missing_setup_fields"]}
-    assert {"HOMEBRAIN_MOGE_ADAPTER", "model_dir", "checkpoint"} <= missing_fields
+    assert {"moge_import", "model_source"} <= missing_fields
+    assert "MoGe is not installed or importable" in result["steps"]["scene_teacher_run"]["error"]
     assert result["retry_command"].startswith("python -m homebrain.tools.run_owned_geometry_probe")
     assert json.loads((out / "result.json").read_text(encoding="utf-8"))["status"] == STATUS_BLOCKED_MISSING_TEACHER_SETUP
+    _assert_no_motion_or_training_claims(out)
+
+
+def test_owned_geometry_probe_cli_blocked_status_is_nonzero_unless_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = _owned_probe_frames(tmp_path)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ADAPTER", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_DIR", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD", raising=False)
+    monkeypatch.setitem(sys.modules, "moge", None)
+    monkeypatch.delitem(sys.modules, "moge.model", raising=False)
+    monkeypatch.delitem(sys.modules, "moge.model.v2", raising=False)
+
+    base_args = [
+        "--frames",
+        str(frames),
+        "--camera",
+        "front_rgb",
+        "--fps",
+        "10",
+        "--teacher",
+        "moge",
+        "--backend",
+        "real",
+        "--owned-or-license-approved",
+        "--max-frames",
+        "2",
+    ]
+
+    blocked_out = tmp_path / "probe_cli_blocked"
+    assert probe_main([*base_args, "--out", str(blocked_out)]) == 1
+    assert json.loads((blocked_out / "result.json").read_text(encoding="utf-8"))["status"] == STATUS_BLOCKED_MISSING_TEACHER_SETUP
+
+    allowed_out = tmp_path / "probe_cli_blocked_allowed"
+    assert probe_main([*base_args, "--out", str(allowed_out), "--allow-blocked-exit-zero"]) == 0
+    assert json.loads((allowed_out / "result.json").read_text(encoding="utf-8"))["status"] == STATUS_BLOCKED_MISSING_TEACHER_SETUP
+
+
+def test_owned_geometry_probe_real_moge_official_adapter_with_monkeypatched_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frames = _owned_probe_frames(tmp_path, frame_count=3)
+    out = tmp_path / "probe_real_monkeypatched_moge"
+    loaded_sources: list[str] = []
+
+    class FakeMoGeModel:
+        @classmethod
+        def from_pretrained(cls, source: str) -> "FakeMoGeModel":
+            loaded_sources.append(source)
+            return cls()
+
+        def to(self, _device: str) -> "FakeMoGeModel":
+            return self
+
+        def eval(self) -> "FakeMoGeModel":
+            return self
+
+        def infer(self, input_image: object) -> dict[str, np.ndarray]:
+            shape = getattr(input_image, "shape")
+            height = int(shape[1])
+            width = int(shape[2])
+            row, col = np.indices((height, width), dtype=np.float32)
+            depth = np.float32(1.0) + row * np.float32(0.1) + col * np.float32(0.01)
+            points = np.stack([col * np.float32(0.01), row * np.float32(0.01), depth], axis=2)
+            return {
+                "depth": depth,
+                "points": points,
+                "mask": np.ones((height, width), dtype=bool),
+                "intrinsics": np.asarray(
+                    [[4.0, 0.0, 1.5], [0.0, 4.0, 1.0], [0.0, 0.0, 1.0]],
+                    dtype=np.float32,
+                ),
+            }
+
+    moge_module = types.ModuleType("moge")
+    moge_model_module = types.ModuleType("moge.model")
+    moge_v2_module = types.ModuleType("moge.model.v2")
+    moge_v2_module.MoGeModel = FakeMoGeModel
+    moge_module.model = moge_model_module
+    moge_model_module.v2 = moge_v2_module
+    monkeypatch.setitem(sys.modules, "moge", moge_module)
+    monkeypatch.setitem(sys.modules, "moge.model", moge_model_module)
+    monkeypatch.setitem(sys.modules, "moge.model.v2", moge_v2_module)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ADAPTER", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD", raising=False)
+    monkeypatch.setenv("HOMEBRAIN_MOGE_MODEL_ID", "unit-test/local-moge")
+
+    result = run_owned_geometry_probe(
+        frames_dir=frames,
+        out_dir=out,
+        camera_name="front_rgb",
+        fps=10.0,
+        teacher_name="moge",
+        backend_name="real",
+        owned_or_license_approved=True,
+        max_frames=2,
+        device="cpu",
+    )
+
+    assert loaded_sources == ["unit-test/local-moge"]
+    assert result["status"] == "SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE"
+    assert result["teacher_artifacts_exist"] is True
+    assert result["qa_exists"] is True
+    assert result["audit_exists"] is True
+    assert result["visual_review_exists"] is True
+    assert result["steps"]["scene_teacher_qa"]["attempted"] is True
+    assert result["steps"]["signal_audit"]["attempted"] is True
+    assert result["steps"]["visual_review"]["attempted"] is True
+    manifest = load_scene_teacher_manifest(Path(result["paths"]["teacher_artifacts_dir"]))
+    assert manifest["backend"] == "real"
+    assert manifest["mock"] is False
+    assert manifest["real_perception"] is True
+    assert manifest["scale_status"] == "metric"
+    assert manifest["model_id"] == "unit-test/local-moge"
+    first_frame = manifest["frames"][0]
+    frame_metadata = json.loads((Path(result["paths"]["teacher_artifacts_dir"]) / first_frame["metadata_path"]).read_text())
+    assert frame_metadata["backend_metadata"]["adapter"] == "homebrain.teachers.moge_official_adapter:run_scene_teacher"
+    assert frame_metadata["backend_metadata"]["scale_status"] == "metric"
+    assert frame_metadata["backend_metadata"]["dynamic_motion_mask_source"] == "unavailable_static_zero_placeholder"
+    visual_manifest = json.loads((out / "visual_review" / "visual_review_manifest.json").read_text(encoding="utf-8"))
+    assert visual_manifest["frames"][0]["panels"][0] == "source_rgb"
+    assert (out / "visual_review" / "scene_teacher_review.ppm").exists()
     _assert_no_motion_or_training_claims(out)
 
 
@@ -401,11 +536,16 @@ def test_real_moge_backend_fails_clearly_without_local_assets(tmp_path: Path, mo
     monkeypatch.delenv("HOMEBRAIN_MOGE_ADAPTER", raising=False)
     monkeypatch.delenv("HOMEBRAIN_MOGE_DIR", raising=False)
     monkeypatch.delenv("HOMEBRAIN_MOGE_CHECKPOINT", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_MODEL_ID", raising=False)
+    monkeypatch.delenv("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD", raising=False)
+    monkeypatch.setitem(sys.modules, "moge", None)
+    monkeypatch.delitem(sys.modules, "moge.model", raising=False)
+    monkeypatch.delitem(sys.modules, "moge.model.v2", raising=False)
 
     teacher = create_moge_scene_teacher(
         backend_name="real",
         model_dir=tmp_path / "missing_moge",
         checkpoint=tmp_path / "missing_moge.pt",
     )
-    with pytest.raises(MoGeSceneTeacherUnavailableError, match="does not clone repositories"):
+    with pytest.raises(MoGeSceneTeacherUnavailableError, match="MoGe is not installed or importable"):
         teacher.run(SceneTeacherRunConfig(log_dir=route, out_dir=tmp_path / "real_out"))

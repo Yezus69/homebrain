@@ -6,16 +6,16 @@ default read-list.
 
 ## Current objective
 
-Goal 16A completed: the repo now has one active production-directed owned-frame
-geometry probe command. It imports owned frames, attempts the requested real or
-fake scene teacher, conditionally runs QA/audit/visual review only when upstream
-artifacts exist, and writes `result.json` plus `result.md`.
+Goal 16B completed with a true external setup blocker: HomeBrain now has a
+built-in official MoGe adapter path, but the real owned-frame probe stops because
+this workspace cannot import `moge.model.v2.MoGeModel`.
 
 ## Last completed goal
 
-Goal 16A: contract the repo around one production geometry-probe path. The real
-owned MoGe probe currently answers `BLOCKED_MISSING_TEACHER_SETUP` because this
-workspace still lacks local MoGe assets or `HOMEBRAIN_MOGE_ADAPTER`.
+Goal 16B: make the real MoGe path executable through the official
+`moge.model.v2.MoGeModel` interface when MoGe is installed, or stop on the true
+external setup error. The current workspace stops on missing MoGe import/model
+setup, not on a missing HomeBrain adapter.
 
 ## Current implementation status
 
@@ -50,11 +50,12 @@ workspace still lacks local MoGe assets or `HOMEBRAIN_MOGE_ADAPTER`.
   `robot_frame_truth=false`, `action_supervision_ok=false`, `replay_only=true`,
   `not_executed=true`, `control_safe=false`, and
   `product_training_approved=false`.
-- Goal 15B added `homebrain.teachers.moge_scene_teacher` with fake and real
-  backends following SceneTeacherPack v0. The real backend requires local
-  operator-supplied MoGe assets or `HOMEBRAIN_MOGE_ADAPTER=module:function`;
-  HomeBrain still does not clone or download teacher repos/checkpoints during
-  runs.
+- Goal 15B/16B added `homebrain.teachers.moge_scene_teacher` with fake and real
+  backends following SceneTeacherPack v0. The real MoGe backend now defaults to
+  `homebrain.teachers.moge_official_adapter:run_scene_teacher`, while still
+  allowing `HOMEBRAIN_MOGE_ADAPTER=module:function` override. HomeBrain still
+  does not clone repos or download default MoGe weights unless
+  `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1` is explicitly set.
 - Goal 15B added `homebrain.tools.audit_scene_teacher_signal`, which combines
   route metadata truth, SceneTeacherPack QA, mask-source distribution, scale
   status, robot-frame/action-supervision claims, and `next_allowed_use`.
@@ -71,6 +72,11 @@ workspace still lacks local MoGe assets or `HOMEBRAIN_MOGE_ADAPTER`.
   image-sequence ingest, scene teacher run, scene-teacher QA, signal audit,
   visual review, and final result reporting with explicit skip behavior when
   upstream artifacts do not exist.
+- Goal 16B added `homebrain.teachers.moge_official_adapter`, real-backend
+  default wiring, blocked-status CLI failures by default, and RGB/source panels
+  in probe visual review artifacts. SceneTeacherPack QA now treats absent
+  extrinsics as missing pose evidence instead of an invalid shape, so single
+  frame metric MoGe output can pass structural QA without fake pose.
 - Policy, scorer, and memory-action goals are frozen until a real MoGe or VGGT
   SceneTeacherPack exists on owned or license-approved frames and passes signal
   audit beyond review-only.
@@ -82,6 +88,66 @@ workspace still lacks local MoGe assets or `HOMEBRAIN_MOGE_ADAPTER`.
   are separated below them for history.
 
 ## Goal completion log
+
+### 029 - Goal 16B official MoGe adapter and true setup blocker
+
+Objective attempted: make the real MoGe path executable through the official
+`from moge.model.v2 import MoGeModel` interface when MoGe is installed, or stop
+on the true missing external setup error without fake fallback.
+
+Files changed: added `homebrain/teachers/moge_official_adapter.py`; updated
+`homebrain/teachers/moge_scene_teacher.py`,
+`homebrain/tools/run_owned_geometry_probe.py`,
+`homebrain/teachers/qa_scene_teacher.py`,
+`tests/test_goal15b_scene_teacher_signal.py`, `CURRENT_STATUS.md`, `EVALS.md`,
+`BLOCKERS.md`, and `LICENSE_AUDIT.md`. The QA change was narrowly required
+because official MoGe provides intrinsics but not temporal extrinsics; absent
+extrinsics should reduce pose evidence, not create an artifact-shape failure.
+
+Commands run: required context reads; `python -m py_compile
+homebrain\teachers\moge_official_adapter.py
+homebrain\teachers\moge_scene_teacher.py
+homebrain\tools\run_owned_geometry_probe.py`; an additional py_compile including
+`homebrain\teachers\qa_scene_teacher.py`; required real probe `python -m
+homebrain.tools.run_owned_geometry_probe --frames
+data\inbox\room_walk_001\frames --out runs\goal16b_moge_real_probe --camera
+front_rgb --fps 10 --teacher moge --backend real
+--owned-or-license-approved --max-frames 20 --device cuda`; in-process blocked
+exit-code check on `runs\goal16b_moge_real_probe_exit_check`; targeted tests
+`python -m pytest tests\test_goal15b_scene_teacher_signal.py -q`; full tests
+`python -m pytest -q`.
+
+Pass/fail results: py_compile passed. The real probe wrote
+`status=BLOCKED_MISSING_TEACHER_SETUP` with the true error that MoGe is not
+installed/importable; this is the accepted Goal 16B outcome
+`TRUE_EXTERNAL_MOGE_SETUP_BLOCKER`. The in-process CLI check returned `1` for a
+blocked status, and tests cover `--allow-blocked-exit-zero`. Targeted tests
+passed with `9 passed`. Full pytest passed with `99 passed`.
+
+Artifacts created: `runs/goal16b_moge_real_probe/result.json`,
+`runs/goal16b_moge_real_probe/result.md`,
+`runs/goal16b_moge_real_probe/route/`, and diagnostic
+`runs/goal16b_moge_real_probe_exit_check/`. No real SceneTeacherPack, QA JSON,
+signal audit JSON/MD, or visual review was created because real MoGe did not
+start.
+
+Metrics observed: the required probe imported `20` frames with `0` image load
+errors and `owned_or_license_approved=true`. `teacher_artifacts_exist=false`,
+`qa_exists=false`, `audit_exists=false`, and `visual_review_exists=false`. Exact
+scene-teacher error: `real MoGe scene adapter failed: MoGe is not installed or
+importable... set HOMEBRAIN_MOGE_DIR ... provide a local checkpoint path, set
+HOMEBRAIN_MOGE_MODEL_ID, or set HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`.
+
+Blockers/risks: active blocker is now the external MoGe setup itself, not a
+missing HomeBrain adapter. No SpatialMemoryNet or TrajectoryScorerNet training,
+policy/scorer/memory-action work, SAM2, ROS, Nav2, Isaac, Habitat, sim,
+`cmd_vel`, raw PWM, fake fallback, control-safety claim, or product-training
+approval was added.
+
+Recommended next goal: install or point to official MoGe so Python can import
+`moge.model.v2.MoGeModel`, then configure one model source via
+`HOMEBRAIN_MOGE_MODEL_ID`, `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`, or a local
+checkpoint and rerun the Goal 16B probe.
 
 ### 028 - Goal 16A single owned geometry production probe
 

@@ -1216,12 +1216,17 @@ visual review artifact only when teacher artifacts exist, and always writes
 
 Single current production-probe command:
 ```bash
-python -m homebrain.tools.run_owned_geometry_probe --frames data/inbox/room_walk_001/frames --out runs/goal16a_owned_geometry_probe_moge_real --camera front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved
+python -m homebrain.tools.run_owned_geometry_probe --frames data/inbox/room_walk_001/frames --out runs/goal16b_moge_real_probe --camera front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved --max-frames 20 --device cuda
 ```
 
 Operator rule: do not use the separate ingest, scene-teacher, QA, audit, or
 visualization commands as the production path unless debugging this probe. Those
 commands remain implementation steps behind the probe.
+
+Exit-code rule: `BLOCKED_*` and `FAILED_*` probe statuses return nonzero from the
+CLI by default. `--allow-blocked-exit-zero` is diagnostic-only and may be used
+only when a caller needs to collect blocked-result files without failing the
+outer command.
 
 Probe statuses:
 ```text
@@ -1246,3 +1251,12 @@ to `runs/goal16a_owned_geometry_probe_moge_real/route` and wrote
 `runs/goal16a_owned_geometry_probe_moge_real/result.json` with
 `status=BLOCKED_MISSING_TEACHER_SETUP`. No fake fallback was used, no real
 SceneTeacherPack exists, and QA/audit/visual review were not attempted.
+
+Current Goal 16B outcome: the real MoGe probe now uses the built-in official
+adapter `homebrain.teachers.moge_official_adapter:run_scene_teacher`, which
+calls `from moge.model.v2 import MoGeModel` lazily and refuses default model
+download unless `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`. The probe imported `20` owned
+frames to `runs/goal16b_moge_real_probe/route` and stopped with
+`status=BLOCKED_MISSING_TEACHER_SETUP` because MoGe is not installed/importable
+in this workspace. No fake fallback was used; QA, signal audit, and visual
+review were skipped because no real SceneTeacherPack exists.

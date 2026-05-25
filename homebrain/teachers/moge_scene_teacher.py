@@ -21,9 +21,9 @@ from homebrain.teachers.scene_teacher import (
     write_scene_teacher_pack,
 )
 
-MOGE_DEFAULT_MODEL_ID = "moge-local"
+MOGE_DEFAULT_MODEL_ID = "Ruicheng/moge-2-vits-normal"
 MOGE_LICENSE_REVIEW_STATUS = "pending_human_review"
-MOGE_MODEL_SOURCE = "local external/moge install/checkpoint or operator-provided adapter"
+MOGE_MODEL_SOURCE = "official MoGe install plus local checkpoint/operator model id, or operator-provided adapter"
 
 
 class MoGeSceneTeacherUnavailableError(RuntimeError):
@@ -112,7 +112,7 @@ class RealMoGeSceneBackend:
     deterministic = False
     model_source = MOGE_MODEL_SOURCE
     license_review_status = MOGE_LICENSE_REVIEW_STATUS
-    scale_status = "teacher_relative_not_metric"
+    scale_status = "metric"
 
     def __init__(
         self,
@@ -129,7 +129,7 @@ class RealMoGeSceneBackend:
         self._adapter: Any | None = None
 
     def dependency_status(self) -> JsonDict:
-        adapter_ref = os.environ.get("HOMEBRAIN_MOGE_ADAPTER")
+        adapter_ref = os.environ.get("HOMEBRAIN_MOGE_ADAPTER") or _default_official_adapter_ref()
         return {
             "backend": self.name,
             "model_id": self.model_id,
@@ -139,6 +139,8 @@ class RealMoGeSceneBackend:
             "checkpoint_exists": self.checkpoint.exists() if self.checkpoint is not None else False,
             "adapter": adapter_ref,
             "adapter_loaded": self._adapter is not None,
+            "env_model_id": os.environ.get("HOMEBRAIN_MOGE_MODEL_ID"),
+            "allow_default_download": os.environ.get("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD") == "1",
             "device": self.device or "auto",
             "downloads_attempted_by_homebrain": False,
             "python_executable": sys.executable,
@@ -157,27 +159,16 @@ class RealMoGeSceneBackend:
             )
         except Exception as exc:  # noqa: BLE001 - real backend failures should surface with setup context.
             raise MoGeSceneTeacherUnavailableError(f"real MoGe scene adapter failed: {exc}") from exc
-        return _coerce_external_result(raw, len(frames))
+        result = _coerce_external_result(raw, len(frames))
+        self._refresh_scale_status_from_predictions(result.frames)
+        return result
 
     def _load_adapter(self) -> Any:
         if self._adapter is not None:
             return self._adapter
-        adapter_ref = os.environ.get("HOMEBRAIN_MOGE_ADAPTER")
-        if adapter_ref is None:
-            if self.model_dir is None or not self.model_dir.exists():
-                raise MoGeSceneTeacherUnavailableError(
-                    "Real MoGe backend requires a local external/moge checkout via --model-dir "
-                    "or HOMEBRAIN_MOGE_DIR, or HOMEBRAIN_MOGE_ADAPTER=module:function. "
-                    "HomeBrain does not clone repositories during teacher runs."
-                )
-            if self.checkpoint is None or not self.checkpoint.exists():
-                raise MoGeSceneTeacherUnavailableError(
-                    "Real MoGe backend requires a local checkpoint via --checkpoint or "
-                    "HOMEBRAIN_MOGE_CHECKPOINT. HomeBrain does not auto-download MoGe weights."
-                )
-            if str(self.model_dir) not in sys.path:
-                sys.path.insert(0, str(self.model_dir))
-            adapter_ref = "homebrain_moge_adapter:run_scene_teacher"
+        if self.model_dir is not None and self.model_dir.exists() and str(self.model_dir) not in sys.path:
+            sys.path.insert(0, str(self.model_dir))
+        adapter_ref = os.environ.get("HOMEBRAIN_MOGE_ADAPTER") or _default_official_adapter_ref()
         module_name, sep, attr = adapter_ref.partition(":")
         if not sep or not module_name or not attr:
             raise MoGeSceneTeacherUnavailableError(
@@ -188,13 +179,37 @@ class RealMoGeSceneBackend:
             adapter = getattr(module, attr)
         except Exception as exc:  # noqa: BLE001 - include setup hint.
             raise MoGeSceneTeacherUnavailableError(
-                "No HomeBrain-compatible MoGe adapter callable was importable. "
-                "Set HOMEBRAIN_MOGE_ADAPTER=module:function; the callable must return "
-                "SceneFramePrediction objects or dictionaries with depth/point_map/camera fields. "
-                "HomeBrain will not install MoGe or download checkpoints automatically."
+                f"MoGe adapter callable {adapter_ref!r} was not importable. "
+                "The default is homebrain.teachers.moge_official_adapter:run_scene_teacher, "
+                "which uses `from moge.model.v2 import MoGeModel`. Set HOMEBRAIN_MOGE_ADAPTER=module:function "
+                "only for an operator-supplied override. HomeBrain will not install MoGe or download "
+                "checkpoints automatically."
             ) from exc
         self._adapter = adapter
         return adapter
+
+    def _refresh_scale_status_from_predictions(self, frames: tuple[SceneFramePrediction, ...]) -> None:
+        statuses = {
+            str(frame.extra_metadata.get("scale_status"))
+            for frame in frames
+            if isinstance(frame.extra_metadata, dict) and frame.extra_metadata.get("scale_status") is not None
+        }
+        if len(statuses) == 1:
+            self.scale_status = statuses.pop()
+        model_ids = {
+            str(frame.extra_metadata.get("model_id"))
+            for frame in frames
+            if isinstance(frame.extra_metadata, dict) and frame.extra_metadata.get("model_id") is not None
+        }
+        if len(model_ids) == 1:
+            self.model_id = model_ids.pop()
+        model_sources = {
+            str(frame.extra_metadata.get("model_source"))
+            for frame in frames
+            if isinstance(frame.extra_metadata, dict) and frame.extra_metadata.get("model_source") is not None
+        }
+        if len(model_sources) == 1:
+            self.model_source = model_sources.pop()
 
 
 class MoGeSceneTeacher(SceneTeacher):
@@ -409,3 +424,7 @@ def _default_moge_checkpoint() -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _default_official_adapter_ref() -> str:
+    return "homebrain.teachers.moge_official_adapter:run_scene_teacher"

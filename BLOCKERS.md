@@ -2,34 +2,38 @@
 
 ## Active Blockers
 
-### 2026-05-24 - Goal 16A owned geometry probe blocked by missing real MoGe setup
+### 2026-05-24 - Goal 16B real MoGe probe blocked by missing MoGe import/model setup
 
 Exact failure: `python -m homebrain.tools.run_owned_geometry_probe --frames
-data\inbox\room_walk_001\frames --out runs\goal16a_owned_geometry_probe_moge_real
---camera front_rgb --fps 10 --teacher moge --backend real
---owned-or-license-approved` wrote
-`runs\goal16a_owned_geometry_probe_moge_real\result.json` with
-`status=BLOCKED_MISSING_TEACHER_SETUP`. The scene-teacher step reported: `Real
-MoGe backend requires a local external/moge checkout via --model-dir or
-HOMEBRAIN_MOGE_DIR, or HOMEBRAIN_MOGE_ADAPTER=module:function. HomeBrain does
-not clone repositories during teacher runs.`
+data\inbox\room_walk_001\frames --out runs\goal16b_moge_real_probe --camera
+front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved
+--max-frames 20 --device cuda` wrote
+`runs\goal16b_moge_real_probe\result.json` with
+`status=BLOCKED_MISSING_TEACHER_SETUP`. The scene-teacher step reported: `real
+MoGe scene adapter failed: MoGe is not installed or importable. Install the
+official MoGe package/check out the official MoGe repository in this environment,
+or set HOMEBRAIN_MOGE_DIR so Python can import moge.model.v2.MoGeModel. Then
+provide a local checkpoint path, set HOMEBRAIN_MOGE_MODEL_ID, or set
+HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1 to allow the default MoGe-2 small model.`
 
-Likely cause: the owned inbox frames exist and import cleanly, but this
-workspace has no `external/moge`, no local MoGe checkpoint, and no configured
-`HOMEBRAIN_MOGE_ADAPTER`, `HOMEBRAIN_MOGE_DIR`, or
-`HOMEBRAIN_MOGE_CHECKPOINT`.
+Likely cause: HomeBrain now has an official adapter at
+`homebrain.teachers.moge_official_adapter:run_scene_teacher`, but this workspace
+does not have an importable MoGe package/check out exposing
+`moge.model.v2.MoGeModel`. No operator-approved checkpoint or model source is
+configured either.
 
-Minimal next repair action: install or clone MoGe outside HomeBrain's teacher
-run path, place the selected checkpoint locally, and set `HOMEBRAIN_MOGE_DIR`
-plus `HOMEBRAIN_MOGE_CHECKPOINT` or provide a HomeBrain-compatible
-`HOMEBRAIN_MOGE_ADAPTER=module:function`. Then rerun the same Goal 16A probe
-command. Do not tune policies, scorers, or memory-action goals until this real
-teacher signal exists and passes audit beyond review-only.
+Minimal next repair action: install or clone the official MoGe package outside
+HomeBrain's run path or set `HOMEBRAIN_MOGE_DIR` to an importable checkout, then
+set one model source: `HOMEBRAIN_MOGE_MODEL_ID`, `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`
+for `Ruicheng/moge-2-vits-normal`, or `HOMEBRAIN_MOGE_CHECKPOINT` / `--checkpoint`
+for a local checkpoint. Then rerun the Goal 16B probe command. Do not tune
+policies, scorers, or memory-action goals until real teacher signal exists and
+passes audit beyond review-only.
 
-Command output summary: the probe imported `350` frames with `0` image load
-errors and `owned_or_license_approved=true`. No real SceneTeacherPack exists, no
-fake fallback was used, and no SceneTeacherPack QA, signal audit, or visual
-review artifact was attempted.
+Command output summary: the probe imported `20` owned frames with `0` image load
+errors and `owned_or_license_approved=true`. No fake fallback was used. No real
+SceneTeacherPack exists, so SceneTeacherPack QA, signal audit, and visual review
+were intentionally skipped.
 
 ## Historical / Non-active Blockers
 

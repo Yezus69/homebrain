@@ -274,9 +274,10 @@ def run_owned_geometry_probe(
 
     if teacher_artifacts_exist:
         try:
-            visual_manifest = write_visual_review_artifact(
+            visual_manifest = _write_visual_review_artifact(
                 scene_teacher_dir=teacher_artifacts_dir,
                 out_dir=visual_review_dir,
+                log_dir=route_dir,
             )
             result["visual_review_exists"] = visual_manifest.exists()
             result["steps"]["visual_review"] = {
@@ -298,9 +299,25 @@ def run_owned_geometry_probe(
 
 
 def write_visual_review_artifact(*, scene_teacher_dir: str | Path, out_dir: str | Path, max_frames: int = 6) -> Path:
+    return _write_visual_review_artifact(
+        scene_teacher_dir=scene_teacher_dir,
+        out_dir=out_dir,
+        log_dir=None,
+        max_frames=max_frames,
+    )
+
+
+def _write_visual_review_artifact(
+    *,
+    scene_teacher_dir: str | Path,
+    out_dir: str | Path,
+    log_dir: str | Path | None,
+    max_frames: int = 6,
+) -> Path:
     scene_root = Path(scene_teacher_dir)
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
+    log_root = Path(log_dir) if log_dir is not None else None
     manifest = load_scene_teacher_manifest(scene_root)
     frame_records = [frame for frame in manifest.get("frames", []) if isinstance(frame, dict)]
     selected = frame_records[:max_frames]
@@ -311,14 +328,20 @@ def write_visual_review_artifact(*, scene_teacher_dir: str | Path, out_dir: str 
     frame_summaries: list[JsonDict] = []
     for frame in selected:
         artifacts = frame.get("artifacts") if isinstance(frame.get("artifacts"), dict) else {}
-        panels = _review_panels(scene_root, artifacts)
+        panels = _review_panels(scene_root, artifacts, frame=frame, log_root=log_root)
         rows.append(_join_with_gap(panels, gap=2, axis=1))
         frame_summaries.append(
             {
                 "frame_id": frame.get("frame_id"),
                 "camera_id": frame.get("camera_id"),
                 "source_data_ref": frame.get("source_data_ref"),
-                "panels": ["depth", "confidence", "floor_traversable_mask", "obstacle_risk_mask"],
+                "panels": [
+                    "source_rgb",
+                    "depth",
+                    "confidence",
+                    "floor_traversable_mask",
+                    "obstacle_risk_mask",
+                ],
             }
         )
 
@@ -421,17 +444,42 @@ def _missing_teacher_setup_fields(
 
     missing: list[JsonDict] = []
     if teacher_name == "moge":
-        if adapter_valid:
-            return missing
+        if adapter is not None and not adapter_valid:
+            missing.append(
+                {
+                    "field": adapter_env,
+                    "accepted_source": "environment variable with value module:function",
+                    "value": adapter,
+                    "exists": False,
+                    "requirement": "must be module:function when set",
+                }
+            )
         missing.append(
             {
-                "field": adapter_env,
-                "accepted_source": "environment variable with value module:function",
-                "value": adapter,
-                "exists": adapter_valid,
-                "requirement": "required unless an existing local model_dir and checkpoint are supplied",
+                "field": "moge_import",
+                "accepted_source": "official MoGe package exposing moge.model.v2.MoGeModel",
+                "value": "from moge.model.v2 import MoGeModel",
+                "exists": None,
+                "requirement": "MoGe must be installed or HOMEBRAIN_MOGE_DIR must point at an importable checkout",
             }
         )
+        model_id_configured = bool(os.environ.get("HOMEBRAIN_MOGE_MODEL_ID"))
+        default_download_allowed = os.environ.get("HOMEBRAIN_MOGE_ALLOW_DOWNLOAD") == "1"
+        checkpoint_exists = checkpoint_candidate is not None and checkpoint_candidate.exists()
+        if not checkpoint_exists and not model_id_configured and not default_download_allowed:
+            missing.append(
+                {
+                    "field": "model_source",
+                    "accepted_source": (
+                        f"--checkpoint, {checkpoint_env}, HOMEBRAIN_MOGE_MODEL_ID, "
+                        "or HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1"
+                    ),
+                    "value": checkpoint_candidate.as_posix() if checkpoint_candidate is not None else None,
+                    "exists": False,
+                    "requirement": "operator-approved checkpoint/model source; default download is disabled unless allowed",
+                }
+        )
+        return missing
     elif adapter is not None and not adapter_valid:
         missing.append(
             {
@@ -640,7 +688,13 @@ def _write_json(path: str | Path, data: JsonDict) -> None:
         handle.write("\n")
 
 
-def _review_panels(scene_root: Path, artifacts: Any) -> list[np.ndarray]:
+def _review_panels(
+    scene_root: Path,
+    artifacts: Any,
+    *,
+    frame: JsonDict | None = None,
+    log_root: Path | None = None,
+) -> list[np.ndarray]:
     if not isinstance(artifacts, dict):
         raise ValueError("scene-teacher frame is missing artifacts")
     depth = _load_optional_artifact(scene_root, artifacts, "depth")
@@ -655,6 +709,7 @@ def _review_panels(scene_root: Path, artifacts: Any) -> list[np.ndarray]:
         raise ValueError("visual review requires depth or point_map artifacts")
     base = _normalize_gray(np.asarray(depth, dtype=np.float32))
     height, width = _thumbnail_shape(base)
+    source_panel = _source_rgb_panel(frame=frame, log_root=log_root, shape=(height, width))
     depth_panel = _gray_rgb(_resize_nearest(base, (height, width)))
     confidence_panel = _tint(
         _resize_nearest(_normalize_gray(confidence if confidence is not None else np.ones_like(base)), (height, width)),
@@ -668,7 +723,113 @@ def _review_panels(scene_root: Path, artifacts: Any) -> list[np.ndarray]:
         _resize_nearest(_normalize_gray(obstacle if obstacle is not None else np.zeros_like(base)), (height, width)),
         (220, 55, 55),
     )
-    return [depth_panel, confidence_panel, floor_panel, obstacle_panel]
+    return [source_panel, depth_panel, confidence_panel, floor_panel, obstacle_panel]
+
+
+def _source_rgb_panel(*, frame: JsonDict | None, log_root: Path | None, shape: tuple[int, int]) -> np.ndarray:
+    if frame is None or log_root is None:
+        return np.full((shape[0], shape[1], 3), 230, dtype=np.uint8)
+    data_ref = frame.get("source_data_ref")
+    if not isinstance(data_ref, str):
+        return np.full((shape[0], shape[1], 3), 230, dtype=np.uint8)
+    source_path = log_root / data_ref
+    try:
+        rgb = _load_review_source_rgb(source_path, frame)
+    except Exception:  # noqa: BLE001 - visual review should still show teacher panels.
+        return np.full((shape[0], shape[1], 3), 230, dtype=np.uint8)
+    return _resize_nearest(np.asarray(rgb, dtype=np.uint8), shape)
+
+
+def _load_review_source_rgb(path: Path, frame: JsonDict) -> np.ndarray:
+    suffix = path.suffix.lower()
+    if suffix in {".ppm", ".pgm"}:
+        return _read_review_netpbm(path)
+    if suffix in {".jpg", ".jpeg", ".png"}:
+        return _read_review_encoded_image(path)
+    width = _positive_int(frame.get("width"))
+    height = _positive_int(frame.get("height"))
+    frame_format = str(frame.get("format", "")).lower()
+    if width is None or height is None:
+        raise ValueError("raw source frame width/height are missing")
+    raw = np.frombuffer(path.read_bytes(), dtype=np.uint8)
+    if frame_format == "rgb8":
+        expected = width * height * 3
+        if raw.size != expected:
+            raise ValueError(f"raw rgb8 source has {raw.size} bytes, expected {expected}")
+        return raw.reshape((height, width, 3)).copy()
+    if frame_format == "gray8":
+        expected = width * height
+        if raw.size != expected:
+            raise ValueError(f"raw gray8 source has {raw.size} bytes, expected {expected}")
+        gray = raw.reshape((height, width)).copy()
+        return np.stack([gray, gray, gray], axis=2)
+    raise ValueError(f"unsupported source frame format for review: {frame_format!r}")
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _read_review_netpbm(path: Path) -> np.ndarray:
+    data = path.read_bytes()
+    index = 0
+
+    def read_token() -> bytes:
+        nonlocal index
+        while index < len(data):
+            char = data[index : index + 1]
+            index += 1
+            if char == b"#":
+                while index < len(data) and data[index : index + 1] not in {b"\n", b"\r"}:
+                    index += 1
+                continue
+            if char.isspace():
+                continue
+            token = bytearray(char)
+            while index < len(data) and not data[index : index + 1].isspace():
+                token.extend(data[index : index + 1])
+                index += 1
+            return bytes(token)
+        raise ValueError("unexpected EOF in Netpbm header")
+
+    magic = read_token()
+    width = int(read_token())
+    height = int(read_token())
+    max_value = int(read_token())
+    if max_value <= 0 or max_value > 255:
+        raise ValueError(f"unsupported Netpbm max value {max_value}")
+    while index < len(data) and data[index : index + 1].isspace():
+        index += 1
+    channels = 3 if magic == b"P6" else 1 if magic == b"P5" else 0
+    if channels == 0:
+        raise ValueError(f"unsupported Netpbm magic {magic!r}")
+    raw = np.frombuffer(data[index : index + width * height * channels], dtype=np.uint8)
+    if raw.size != width * height * channels:
+        raise ValueError("truncated Netpbm payload")
+    if channels == 3:
+        return raw.reshape((height, width, 3)).copy()
+    gray = raw.reshape((height, width)).copy()
+    return np.stack([gray, gray, gray], axis=2)
+
+
+def _read_review_encoded_image(path: Path) -> np.ndarray:
+    try:
+        import cv2  # type: ignore
+
+        image = cv2.imread(path.as_posix(), cv2.IMREAD_COLOR)
+        if image is not None:
+            return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from PIL import Image  # type: ignore
+
+        with Image.open(path) as image:
+            return np.asarray(image.convert("RGB"), dtype=np.uint8)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"could not decode source image {path}") from exc
 
 
 def _load_optional_artifact(scene_root: Path, artifacts: JsonDict, kind: str) -> np.ndarray | None:
@@ -795,6 +956,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default=None, help="Optional teacher device.")
     parser.add_argument("--max-frames", type=int, default=None, help="Optional frame cap.")
     parser.add_argument("--stride", type=int, default=1, help="Optional input/teacher stride.")
+    parser.add_argument(
+        "--allow-blocked-exit-zero",
+        action="store_true",
+        help="Diagnostic only: return exit code 0 for BLOCKED_* probe statuses while still writing result files.",
+    )
     args = parser.parse_args(argv)
 
     result = run_owned_geometry_probe(
@@ -813,7 +979,12 @@ def main(argv: list[str] | None = None) -> int:
         retry_command=_retry_command(args),
     )
     print(json.dumps({"status": result["status"], "result": result["paths"]["result_json"]}, sort_keys=True))
-    return 1 if str(result["status"]).startswith("FAILED_") else 0
+    status = str(result["status"])
+    if status.startswith("FAILED_"):
+        return 1
+    if status.startswith("BLOCKED_") and not args.allow_blocked_exit_zero:
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
