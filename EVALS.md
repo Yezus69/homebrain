@@ -1360,3 +1360,71 @@ Gate interpretation: proceed only to a local/replay MoGe SpatialTrainPack
 candidate generator for single-frame geometry review. Do not train temporal
 memory, do not use MoGe as robot-frame truth or action supervision, and do not
 make any control-safety or product-training claim.
+
+## Gate 1.14: MoGe robot-BEV projection convention validation
+
+This gate tests whether real MoGe `point_map` outputs can be projected through
+measured OpenLORIS camera-to-base transforms into the same BEV grid convention
+used by `robot_rgbd_to_bev`, then judged against existing RGB-D
+SpatialTrainPack labels. It does not train SpatialMemoryNet, TrajectoryScorerNet,
+or any policy/scorer loop.
+
+Projection command shape:
+```bash
+python -m homebrain.tools.validate_moge_robot_bev_projection --route runs/goal11b_nightly/routes/openloris_cafe1_1_2_route --scene-teacher runs/goal17a_moge_openloris_teacher_quality/openloris_cafe1_1_2/teacher_artifacts/moge_scene_v0_real --spatial-pack runs/goal11b_nightly/spatial_packs/openloris_cafe1_1_2_spatial_pack --out-json runs/goal18a_moge_robot_bev_projection/openloris_cafe1_1_2/projection.json --out-md runs/goal18a_moge_robot_bev_projection/openloris_cafe1_1_2/projection.md --out-viz runs/goal18a_moge_robot_bev_projection/openloris_cafe1_1_2/projection.ppm --max-frames 100
+```
+
+Projection metrics:
+```text
+matched_frame_count
+candidate_convention_count
+per-convention free_iou / obstacle_iou / unknown_iou
+obstacle_recall
+false_free_over_obstacle_rate
+false_obstacle_over_free_rate
+unknown_ratio_delta
+confidence_valid_ratio
+calibration_split_metrics
+heldout_split_metrics
+per-route summary
+aggregate summary
+next_allowed_use
+```
+
+Acceptance interpretation:
+- The gate evaluates fixed signed-axis convention candidates only; it does not
+  fit per-frame transforms.
+- The best convention is selected from a deterministic calibration split only.
+  Held-out metrics are reported separately and are the primary safety-critical
+  result.
+- Fake or synthetic SceneTeacherPacks may not be promoted beyond
+  `review_only_do_not_train`.
+- Real MoGe projections may only produce
+  `local_replay_moge_bev_candidate_review`; they are not robot-frame truth,
+  action supervision, control safe, or product-training approved.
+- All reports must keep `replay_only=true`, `not_executed=true`,
+  `control_safe=false`, `product_training_approved=false`,
+  `action_supervision_ok=false`, `raw_pwm_emitted=false`,
+  `cmd_vel_emitted=false`, and `moge_robot_frame_truth=false`.
+
+Current Goal 18A outcome: the new projection gate evaluated `48` signed-axis
+conventions on capped 100-frame OpenLORIS runs for `cafe1-1_2`,
+`office1-1_7`, and `corridor1-1`, then aggregated the reports under
+`runs/goal18a_moge_robot_bev_projection/`. Targeted tests passed with
+`3 passed`; full pytest passed with `106 passed`.
+
+Goal 18A observed held-out metrics:
+```text
+cafe1-1_2: best=cam_x=+moge_x__cam_y=-moge_y__cam_z=+moge_z, free_iou=0.0, obstacle_iou=0.5604915999548991, unknown_iou=0.8843150403426421, obstacle_recall=0.8037186742118028, false_free_over_obstacle_rate=0.0, false_obstacle_over_free_rate=0.0, unknown_ratio_delta=-0.000390625
+office1-1_7: best=cam_x=+moge_x__cam_y=-moge_y__cam_z=+moge_z, free_iou=0.0, obstacle_iou=0.32220639120700184, unknown_iou=0.903662051313058, obstacle_recall=0.7218422252621979, false_free_over_obstacle_rate=0.0, false_obstacle_over_free_rate=0.0, unknown_ratio_delta=-0.012890625
+corridor1-1: best=cam_x=-moge_y__cam_y=-moge_x__cam_z=+moge_z, free_iou=0.0, obstacle_iou=0.07538416932444186, unknown_iou=0.8433701657458563, obstacle_recall=0.2521823472356935, false_free_over_obstacle_rate=0.0, false_obstacle_over_free_rate=0.0, unknown_ratio_delta=-0.0381640625
+aggregate: matched_frame_count=300, heldout_false_free_over_obstacle_rate_mean=0.0, heldout_obstacle_recall_mean=0.5925810822365647, next_allowed_use=local_replay_moge_bev_candidate_review
+```
+
+Gate interpretation: MoGe can currently produce only robot-frame-ish
+single-frame BEV candidate supervision for local replay review, strongest for
+obstacle/unknown geometry and not for free-space traversability. The next step
+may be a local/replay candidate generator gated by these metrics, but generated
+packs must preserve `moge_robot_frame_truth=false`, `action_supervision_ok=false`,
+`control_safe=false`, and `product_training_approved=false`; the zero free IoU
+and corridor convention disagreement must be reviewed before any training.

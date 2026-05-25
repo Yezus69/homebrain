@@ -73,7 +73,72 @@ def build_bev_from_depth(
 
 
 def points_to_bev(points: ProjectedPoints, config: CameraConfig) -> BevProjection:
-    cells = config.grid_cell_count
+    arrays, stats, raw_obstacle_count = robot_points_to_bev_arrays(
+        forward_m=points.forward_m,
+        left_m=points.left_m,
+        height_m=points.height_m,
+        confidence=points.confidence,
+        grid_cells=config.grid_cell_count,
+        meters_per_cell=config.meters_per_cell,
+        grid_size_m=config.grid_size_m,
+        floor_height_tol_m=config.floor_height_tol_m,
+        obstacle_height_min_m=config.obstacle_height_min_m,
+        obstacle_dilation_cells=config.obstacle_dilation_cells,
+        sampled_pixel_count=points.sampled_pixel_count,
+        valid_point_count=points.valid_point_count,
+    )
+
+    return BevProjection(
+        bev_free=arrays["bev_free"],
+        bev_obstacle=arrays["bev_obstacle"],
+        bev_unknown=arrays["bev_unknown"],
+        bev_floor_candidate=arrays["bev_floor_candidate"],
+        bev_height=arrays["bev_height"],
+        bev_confidence=arrays["bev_confidence"],
+        projected=points,
+        raw_obstacle_count=raw_obstacle_count,
+        stats=stats,
+        assumptions=points.assumptions,
+        warnings=points.warnings,
+    )
+
+
+def robot_points_to_bev_arrays(
+    *,
+    forward_m: np.ndarray,
+    left_m: np.ndarray,
+    height_m: np.ndarray,
+    confidence: np.ndarray,
+    grid_cells: int,
+    meters_per_cell: float,
+    grid_size_m: float | None = None,
+    floor_height_tol_m: float,
+    obstacle_height_min_m: float,
+    obstacle_dilation_cells: int,
+    sampled_pixel_count: int | None = None,
+    valid_point_count: int | None = None,
+) -> tuple[dict[str, np.ndarray], JsonDict, int]:
+    """Bin robot-frame points into the standard HomeBrain local BEV arrays."""
+    cells = int(grid_cells)
+    if cells <= 0:
+        raise ValueError(f"grid_cells must be positive, got {grid_cells}")
+    meters = np.float32(meters_per_cell)
+    if not np.isfinite(meters) or float(meters) <= 0.0:
+        raise ValueError(f"meters_per_cell must be positive and finite, got {meters_per_cell!r}")
+    grid_size = np.float32(grid_size_m if grid_size_m is not None else cells * float(meters))
+    if not np.isfinite(grid_size) or float(grid_size) <= 0.0:
+        raise ValueError(f"grid_size_m must be positive and finite, got {grid_size_m!r}")
+
+    forward = np.asarray(forward_m, dtype=np.float32).reshape(-1)
+    left = np.asarray(left_m, dtype=np.float32).reshape(-1)
+    height = np.asarray(height_m, dtype=np.float32).reshape(-1)
+    point_confidence = np.asarray(confidence, dtype=np.float32).reshape(-1)
+    if not (forward.shape == left.shape == height.shape == point_confidence.shape):
+        raise ValueError(
+            "forward_m, left_m, height_m, and confidence must have matching flat shapes; "
+            f"got {forward.shape}, {left.shape}, {height.shape}, {point_confidence.shape}"
+        )
+
     grid_shape = (cells, cells)
     floor_counts = np.zeros(grid_shape, dtype=np.uint16)
     obstacle_counts = np.zeros(grid_shape, dtype=np.uint16)
@@ -81,30 +146,32 @@ def points_to_bev(points: ProjectedPoints, config: CameraConfig) -> BevProjectio
     confidence_sum = np.zeros(grid_shape, dtype=np.float32)
     height_max = np.full(grid_shape, -np.inf, dtype=np.float32)
 
-    half_width = np.float32(config.grid_size_m / 2.0)
+    finite = np.isfinite(forward) & np.isfinite(left) & np.isfinite(height) & np.isfinite(point_confidence)
+    half_width = np.float32(grid_size / np.float32(2.0))
     in_grid = (
-        (points.forward_m >= np.float32(0.0))
-        & (points.forward_m < np.float32(config.grid_size_m))
-        & (points.left_m >= -half_width)
-        & (points.left_m < half_width)
+        finite
+        & (forward >= np.float32(0.0))
+        & (forward < grid_size)
+        & (left >= -half_width)
+        & (left < half_width)
     )
     if np.any(in_grid):
-        forward = points.forward_m[in_grid]
-        left = points.left_m[in_grid]
-        height = points.height_m[in_grid]
-        confidence = points.confidence[in_grid]
+        forward_grid = forward[in_grid]
+        left_grid = left[in_grid]
+        height_grid = height[in_grid]
+        confidence_grid = np.clip(point_confidence[in_grid], np.float32(0.0), np.float32(1.0))
 
-        row = cells - 1 - np.floor(forward / np.float32(config.meters_per_cell)).astype(np.int64)
-        col = np.floor((left + half_width) / np.float32(config.meters_per_cell)).astype(np.int64)
+        row = cells - 1 - np.floor(forward_grid / meters).astype(np.int64)
+        col = np.floor((left_grid + half_width) / meters).astype(np.int64)
         row = np.clip(row, 0, cells - 1)
         col = np.clip(col, 0, cells - 1)
 
-        floor_point = np.abs(height) <= np.float32(config.floor_height_tol_m)
-        obstacle_point = height >= np.float32(config.obstacle_height_min_m)
+        floor_point = np.abs(height_grid) <= np.float32(floor_height_tol_m)
+        obstacle_point = height_grid >= np.float32(obstacle_height_min_m)
 
         np.add.at(point_counts, (row, col), 1)
-        np.add.at(confidence_sum, (row, col), confidence)
-        np.maximum.at(height_max, (row, col), height)
+        np.add.at(confidence_sum, (row, col), confidence_grid)
+        np.maximum.at(height_max, (row, col), height_grid)
         if np.any(floor_point):
             np.add.at(floor_counts, (row[floor_point], col[floor_point]), 1)
         if np.any(obstacle_point):
@@ -112,7 +179,7 @@ def points_to_bev(points: ProjectedPoints, config: CameraConfig) -> BevProjectio
 
     floor_candidate = floor_counts > 0
     raw_obstacle = obstacle_counts > 0
-    obstacle = _dilate_mask(raw_obstacle, config.obstacle_dilation_cells)
+    obstacle = _dilate_mask(raw_obstacle, int(obstacle_dilation_cells))
     free = floor_candidate & ~obstacle
     unknown = ~(free | obstacle)
 
@@ -136,28 +203,16 @@ def points_to_bev(points: ProjectedPoints, config: CameraConfig) -> BevProjectio
     stats = bev_array_stats(arrays)
     stats.update(
         {
-            "sampled_pixel_count": points.sampled_pixel_count,
-            "valid_depth_point_count": points.valid_point_count,
+            "sampled_pixel_count": int(sampled_pixel_count if sampled_pixel_count is not None else forward.size),
+            "valid_depth_point_count": int(valid_point_count if valid_point_count is not None else np.count_nonzero(finite)),
             "points_in_grid_count": int(np.count_nonzero(in_grid)),
             "observed_cell_count": int(np.count_nonzero(observed)),
             "raw_obstacle_cell_count": int(np.count_nonzero(raw_obstacle)),
-            "obstacle_dilation_cells": config.obstacle_dilation_cells,
+            "obstacle_dilation_cells": int(obstacle_dilation_cells),
         }
     )
 
-    return BevProjection(
-        bev_free=arrays["bev_free"],
-        bev_obstacle=arrays["bev_obstacle"],
-        bev_unknown=arrays["bev_unknown"],
-        bev_floor_candidate=arrays["bev_floor_candidate"],
-        bev_height=arrays["bev_height"],
-        bev_confidence=arrays["bev_confidence"],
-        projected=points,
-        raw_obstacle_count=int(np.count_nonzero(raw_obstacle)),
-        stats=stats,
-        assumptions=points.assumptions,
-        warnings=points.warnings,
-    )
+    return arrays, stats, int(np.count_nonzero(raw_obstacle))
 
 
 def bev_array_stats(arrays: dict[str, np.ndarray]) -> JsonDict:
@@ -196,4 +251,3 @@ def _dilate_mask(mask: np.ndarray, radius_cells: int) -> np.ndarray:
         valid = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
         dilated[rows[valid], cols[valid]] = True
     return dilated
-

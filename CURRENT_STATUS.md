@@ -6,20 +6,19 @@ default read-list.
 
 ## Current objective
 
-Goal 17A completed a real MoGe teacher-quality comparison on existing
-OpenLORIS robot-frame routes before training anything. Real MoGe ran on capped
-100-frame subsets of `cafe1-1_2`, `office1-1_7`, and `corridor1-1`; structural
-QA passed, comparison against existing SpatialTrainPack labels matched 100
-frames per route, and the aggregate recommendation is a local/replay-only
-single-frame geometry candidate gate. MoGe is still not robot-frame truth,
-action supervision, temporal-memory evidence, control safe, or product-training
-approved.
+Goal 18A completed a MoGe point-map convention projection gate on existing
+OpenLORIS robot-frame routes. The new gate projected real MoGe SceneTeacherPack
+point maps through fixed signed-axis convention candidates and measured
+calibration/held-out BEV agreement against existing RGB-D SpatialTrainPack
+labels. All routes produced only local/replay candidate-review evidence; MoGe is
+still not robot-frame truth, action supervision, temporal-memory evidence,
+control safe, or product-training approved.
 
 ## Last completed goal
 
-Goal 17A: validate real MoGe against existing OpenLORIS robot-frame RGB-D
-SpatialTrainPack labels before training anything, with comparison reports,
-visual review sheets, and aggregate local/replay-only recommendation.
+Goal 18A: MoGe-to-robot-BEV projection convention gate on OpenLORIS, with fixed
+signed-axis convention candidates, calibration-only selection, held-out safety
+metrics, visual review sheets, and aggregate local/replay-only recommendation.
 
 ## Current implementation status
 
@@ -96,9 +95,24 @@ visual review sheets, and aggregate local/replay-only recommendation.
   comparison recommends only a local/replay single-frame geometry candidate gate,
   not direct BEV conversion, temporal memory training, action supervision,
   control safety, or product training.
-- Policy, scorer, and memory-action work was not touched in Goals 16C or 17A.
+- Goal 18A added `homebrain.tools.validate_moge_robot_bev_projection`, which
+  evaluates 48 fixed signed-axis point-map conventions, projects each through
+  measured OpenLORIS camera-to-base transforms into the existing
+  `robot_rgbd_to_bev` grid convention, selects only on a deterministic
+  calibration split, and reports held-out free/obstacle/unknown IoU plus
+  safety-critical false-free/false-obstacle rates. It keeps
+  `moge_robot_frame_truth=false`, `action_supervision_ok=false`,
+  `control_safe=false`, and `product_training_approved=false`.
+- Goal 18A real OpenLORIS results are useful but weak: held-out obstacle IoU was
+  `0.5604915999548991` for cafe, `0.32220639120700184` for office, and
+  `0.07538416932444186` for corridor, while held-out free IoU was `0.0` on all
+  three routes. Cafe/office selected `cam_x=+moge_x__cam_y=-moge_y__cam_z=+moge_z`;
+  corridor selected `cam_x=-moge_y__cam_y=-moge_x__cam_z=+moge_z`, so there is no
+  universal convention proof yet.
+- Policy, scorer, and memory-action work was not touched in Goals 16C, 17A, or
+  18A.
   The real MoGe artifacts remove the missing-teacher setup blocker and now pass
-  a public robot-frame comparison gate for local/replay single-frame review, but
+  public robot-frame comparison/projection gates for local/replay single-frame review, but
   they do not provide control safety, product-training approval, robot-frame
   truth, or temporal-memory evidence.
 - Owned image/video route metadata can now explicitly record
@@ -109,6 +123,75 @@ visual review sheets, and aggregate local/replay-only recommendation.
   are separated below them for history.
 
 ## Goal completion log
+
+### 032 - Goal 18A MoGe-to-robot-BEV projection convention gate
+
+Objective attempted: build and run a narrow falsifiable projection gate that
+tests whether real MoGe SceneTeacherPack `point_map`/depth outputs can be
+converted into robot-frame-ish BEV supervision on existing OpenLORIS routes by
+comparing fixed-convention projections against existing RGB-D robot-frame
+SpatialTrainPack labels. No training, policy/scorer loop, `cmd_vel`, raw PWM,
+product-training claim, action-supervision claim, or robot-frame-truth claim was
+added.
+
+Files changed: added
+`homebrain/tools/validate_moge_robot_bev_projection.py`; added
+`tests/test_goal18a_moge_robot_bev_projection.py`; updated
+`homebrain/geometry/bev_projector.py` with a reusable robot-frame point-to-BEV
+helper; updated `CURRENT_STATUS.md` and `EVALS.md`.
+
+Commands run: required context reads; `python -m py_compile
+homebrain\tools\validate_moge_robot_bev_projection.py
+tests\test_goal18a_moge_robot_bev_projection.py`; targeted tests `python -m
+pytest tests\test_goal18a_moge_robot_bev_projection.py -q`; smoke projection on
+5 cafe frames; real projection gate on 100-frame caps for
+`openloris_cafe1_1_2`, `openloris_office1_1_7`, and
+`openloris_corridor1_1`; aggregate `python -m
+homebrain.tools.validate_moge_robot_bev_projection --aggregate-from ...`;
+required full verification `python -m pytest -q`.
+
+Pass/fail results: py_compile passed. Targeted Goal 18A tests passed with
+`3 passed`. The three real per-route projection commands completed and wrote
+reports/visual review sheets. Aggregate completed with
+`next_allowed_use=local_replay_moge_bev_candidate_review`. Full pytest passed
+with `106 passed`.
+
+Artifacts created: per-route projection JSON, Markdown, and PPM review sheets
+under `runs/goal18a_moge_robot_bev_projection/openloris_cafe1_1_2/`,
+`runs/goal18a_moge_robot_bev_projection/openloris_office1_1_7/`, and
+`runs/goal18a_moge_robot_bev_projection/openloris_corridor1_1/`; aggregate
+`runs/goal18a_moge_robot_bev_projection/report.json` and `report.md`; smoke
+artifacts under `runs/goal18a_moge_robot_bev_projection/smoke_cafe/`.
+
+Metrics observed: each route matched and projected `100` frames and evaluated
+`48` signed-axis convention candidates. Cafe selected
+`cam_x=+moge_x__cam_y=-moge_y__cam_z=+moge_z`; held-out metrics were
+free/obstacle/unknown IoU `0.0 / 0.5604915999548991 / 0.8843150403426421`,
+obstacle recall `0.8037186742118028`, false-free-over-obstacle `0.0`,
+false-obstacle-over-free `0.0`, unknown ratio delta `-0.000390625`, and
+confidence valid ratio `1.0`. Office selected the same convention; held-out
+metrics were `0.0 / 0.32220639120700184 / 0.903662051313058`, obstacle recall
+`0.7218422252621979`, both safety-critical false rates `0.0`, unknown ratio
+delta `-0.012890625`, and confidence valid ratio `1.0`. Corridor selected
+`cam_x=-moge_y__cam_y=-moge_x__cam_z=+moge_z`; held-out metrics were
+`0.0 / 0.07538416932444186 / 0.8433701657458563`, obstacle recall
+`0.2521823472356935`, both safety-critical false rates `0.0`, unknown ratio
+delta `-0.0381640625`, and confidence valid ratio `1.0`. Aggregate held-out
+false-free-over-obstacle mean was `0.0`; aggregate held-out obstacle recall mean
+was `0.5925810822365647`.
+
+Blockers/risks: no active blocker was added. The evidence is weak and
+review-only: held-out free IoU is `0.0` on all three routes, corridor selected a
+different convention than cafe/office, SpatialTrainPack free labels are dominated
+by the robot-footprint prior, OpenLORIS remains local research/replay only, and
+MoGe remains single-frame geometry without temporal pose/track evidence. All
+safety/product flags remain false.
+
+Recommended next goal: build a local/replay-only MoGe SpatialTrainPack candidate
+generator gated by this projection report, preserving per-route convention
+calibration and all safety/product flags false; do not train from the generated
+candidates until the free-space weakness and corridor convention disagreement
+are reviewed.
 
 ### 031 - Goal 17A real MoGe on OpenLORIS robot-frame geometry
 
