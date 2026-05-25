@@ -19,7 +19,7 @@ Do not assume a dependency is production-safe. Verify from official repos/model 
 | DINO-family visual model | dense features / teacher | UNVERIFIED / pending_human_review | No | Goal 7 used DINOv2-small `dinov2_vits14` through torch.hub as an offline frozen feature teacher; verify exact repo + weight license before product/training approval. |
 | Depth Anything family | geometry/depth teacher | UNVERIFIED / pending_human_review | No | DA3-SMALL setup added for offline teacher use; verify exact code/model card/license before product use. |
 | Apple Depth Pro | optional metric depth teacher | UNVERIFIED / pending_human_review | No | Official repo: https://github.com/apple/ml-depth-pro. License terms require human review before product use. |
-| MoGe / point-map model | geometry teacher | UNVERIFIED / pending_human_review | No | Goal 16B added a built-in official-interface adapter for `moge.model.v2.MoGeModel`; no MoGe code or weights were installed, imported, downloaded, or approved in this workspace. |
+| MoGe / point-map model | geometry teacher | MIT observed / pending_human_review | No | Goal 16C installed official MoGe from `https://github.com/microsoft/MoGe` at commit `07444410f1e33f402353b99d6ccd26bd31e469e8` and downloaded `Ruicheng/moge-2-vits-normal` revision `679230677b4d282c6f304189a93e98e14f085902` to the local Hugging Face cache for offline teacher use only. Not product-training-approved or runtime-safe. |
 | VGGT-family | offline multi-view geometry teacher | UNVERIFIED / pending_human_review | No | Goal 15A added an optional local VGGT-style scene-teacher adapter plus fake backend tests. No real code/checkpoint was downloaded or approved. Verify exact repo/checkpoint license before real use. |
 | SAM-family video segmentation | mask/dynamic-object teacher | UNVERIFIED | No | Verify exact version. |
 | GNM / ViNT / NoMaD | navigation prior / baseline | UNVERIFIED | No | Verify code/checkpoint/dataset license. |
@@ -310,3 +310,54 @@ product-runtime requirements.
   trainable. `backend=real` has no fake fallback.
 - Risk: exact MoGe code/checkpoint/model-card license and provenance still need
   human review before any product training or runtime use.
+
+## Goal 16C dependency update
+
+Goal 16C installed and ran real official MoGe for the first owned-frame
+SceneTeacherPack. It did not edit HomeBrain source, train models, run policies,
+or add product-runtime requirements.
+
+- MoGe code source URL: https://github.com/microsoft/MoGe.
+- Local code path: ignored checkout `external/moge`.
+- Code commit used: `07444410f1e33f402353b99d6ccd26bd31e469e8`.
+- Python package install: `python -m pip install -e external\moge`, resulting in
+  editable `moge==2.0.0` at
+  `C:\Users\Asav\source\repos\homebrain\external\moge`.
+- Observed code license: `MIT` from `pyproject.toml` / `pip show moge`; the
+  repository `LICENSE` file also includes Apache-2.0 text, so human review is
+  still required before product training/runtime approval.
+- MoGe model source: Hugging Face `Ruicheng/moge-2-vits-normal`.
+- Model source URL: https://huggingface.co/Ruicheng/moge-2-vits-normal.
+- Model revision used: `679230677b4d282c6f304189a93e98e14f085902`.
+- Observed model-card metadata: Hugging Face API returned `license: mit` and tag
+  `license:mit`.
+- Local model cache path:
+  `C:\Users\Asav\.cache\huggingface\hub\models--Ruicheng--moge-2-vits-normal\snapshots\679230677b4d282c6f304189a93e98e14f085902\model.pt`.
+- Local model file size observed: `140550416` bytes. The model was not committed
+  to HomeBrain and remains outside tracked source.
+- Model-source configuration used for the probe:
+  `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`; no `HOMEBRAIN_MOGE_MODEL_ID`,
+  `HOMEBRAIN_MOGE_CHECKPOINT`, or `--checkpoint` was used.
+- Transitive packages installed from MoGe requirements include `utils3d` from
+  `https://github.com/EasternJournalist/utils3d.git` at
+  `3fab839f0be9931dac7c8488eb0e1600c236e183`, `pipeline` from
+  `https://github.com/EasternJournalist/pipeline.git` at
+  `866f059d2a05cde05e4a52211ec5051fd5f276d6`, and PyPI packages such as
+  `trimesh`, `gradio`, `fastapi`, `pydantic`, `moderngl`, and `orjson`.
+- Intended use: offline scene/geometry teacher on owned or
+  license-approved route logs.
+- Required at runtime: no.
+- Required for normal tests: no.
+- Mock/fallback status: `backend=real` used no fake fallback; fake MoGe remains
+  explicit review-only when selected by tests.
+- Goal 16C artifact status: real non-mock SceneTeacherPack exists at
+  `runs/goal16c_moge_real_probe/route/teacher_artifacts/moge_scene_v0_real` and
+  signal audit reports `next_allowed_use=single_frame_geometry_pretrain_candidate`.
+- Safety/license status: `control_safe=false`, `product_training_approved=false`,
+  `robot_frame_truth=false`, `action_supervision_ok=false`, and
+  `license_review_status=pending_human_review`.
+- Risk: output has no teacher temporal extrinsics, no route pose/odom evidence,
+  no measured camera-to-base transform, no point tracks, uniform confidence, and
+  placeholder floor/obstacle masks. It is usable only as review-gated
+  single-frame geometry pretraining evidence until deeper audit and human/legal
+  approval.

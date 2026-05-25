@@ -1214,9 +1214,10 @@ artifacts exist, runs `audit_scene_teacher_signal` only when QA exists, writes a
 visual review artifact only when teacher artifacts exist, and always writes
 `result.json` plus `result.md`.
 
-Single current production-probe command:
-```bash
-python -m homebrain.tools.run_owned_geometry_probe --frames data/inbox/room_walk_001/frames --out runs/goal16b_moge_real_probe --camera front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved --max-frames 20 --device cuda
+Single current production-probe command (PowerShell):
+```powershell
+$env:HOMEBRAIN_MOGE_ALLOW_DOWNLOAD='1'
+python -m homebrain.tools.run_owned_geometry_probe --frames data/inbox/room_walk_001/frames --out runs/goal16c_moge_real_probe --camera front_rgb --fps 10 --teacher moge --backend real --owned-or-license-approved --max-frames 20 --device cuda
 ```
 
 Operator rule: do not use the separate ingest, scene-teacher, QA, audit, or
@@ -1241,10 +1242,11 @@ BLOCKED_SIGNAL_AUDIT
 Fake backend rule: `--backend fake` may only produce
 `REVIEW_ONLY_NOT_TRAINABLE` and is never training signal.
 
-Cleanup/freeze note: policy, scorer, and memory-action goals are frozen until a
-real MoGe or VGGT SceneTeacherPack exists for owned or license-approved indoor
-frames and passes the signal audit beyond review-only. The active blocker is
-real teacher setup, not policy tuning.
+Cleanup/freeze note: Goal 16C did not touch policy, scorer, or memory-action
+work. The active missing-teacher setup blocker is resolved for this workspace,
+but the first real MoGe artifact is single-frame geometry only. It is not
+control safe, not product-training-approved, not robot-frame truth, and not
+temporal-memory evidence.
 
 Current Goal 16A outcome: the single probe command imported `350` owned frames
 to `runs/goal16a_owned_geometry_probe_moge_real/route` and wrote
@@ -1260,3 +1262,33 @@ frames to `runs/goal16b_moge_real_probe/route` and stopped with
 `status=BLOCKED_MISSING_TEACHER_SETUP` because MoGe is not installed/importable
 in this workspace. No fake fallback was used; QA, signal audit, and visual
 review were skipped because no real SceneTeacherPack exists.
+
+Current Goal 16C outcome: official MoGe was cloned to ignored
+`external/moge`, installed as editable `moge==2.0.0`, and configured with the
+single model source `HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1` for
+`Ruicheng/moge-2-vits-normal`. The required probe imported `20` owned frames to
+`runs/goal16c_moge_real_probe/route` and wrote real non-mock SceneTeacherPack
+artifacts under
+`runs/goal16c_moge_real_probe/route/teacher_artifacts/moge_scene_v0_real`.
+`result.json` reports `status=SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`,
+`teacher_artifacts_exist=true`, `qa_exists=true`, `audit_exists=true`,
+`visual_review_exists=true`, and `fake_fallback_used=false`.
+
+Goal 16C SceneTeacherPack QA metrics: `frame_count=20`,
+`missing_artifact_count=0`, `artifact_shape_error_count=0`,
+`depth_valid_ratio=1.0`, `confidence_valid_ratio=1.0`,
+`pose_valid_ratio=0.0`, `track_valid_ratio=0.0`,
+`temporal_geometry_consistency=0.9682095191226556`, `scale_status=metric`,
+`real_perception=true`, `mock=false`, `control_safe=false`, and
+`product_training_approved=false`.
+
+Goal 16C signal-audit metrics: `next_allowed_use=single_frame_geometry_pretrain_candidate`,
+`single_frame_geometry_pretrain_candidate=true`,
+`temporal_memory_pretrain_candidate=false`, `hard_blockers=[]`,
+`robot_frame_truth=false`, `action_supervision_ok=false`,
+`route_metadata_sensor_truth.truth_pass=true`, and
+`owned_or_license_approved=true`. Manual visual review of
+`runs/goal16c_moge_real_probe/visual_review/scene_teacher_review.ppm` found
+plausible single-frame geometry for the visible floor/chair/cord scene, but the
+confidence panel is uniform and there is still no temporal pose or odometry
+evidence.

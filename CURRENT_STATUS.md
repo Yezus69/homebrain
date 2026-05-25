@@ -6,16 +6,16 @@ default read-list.
 
 ## Current objective
 
-Goal 16B completed with a true external setup blocker: HomeBrain now has a
-built-in official MoGe adapter path, but the real owned-frame probe stops because
-this workspace cannot import `moge.model.v2.MoGeModel`.
+Goal 16C completed with the first real MoGe SceneTeacherPack on owned frames.
+The official MoGe checkout is installed from `external/moge`, the probe used the
+operator-allowed default model download path for `Ruicheng/moge-2-vits-normal`,
+and the result is `SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`.
 
 ## Last completed goal
 
-Goal 16B: make the real MoGe path executable through the official
-`moge.model.v2.MoGeModel` interface when MoGe is installed, or stop on the true
-external setup error. The current workspace stops on missing MoGe import/model
-setup, not on a missing HomeBrain adapter.
+Goal 16C: install/expose official MoGe outside HomeBrain source, configure one
+explicit model source, run the existing owned geometry probe, inspect the real
+visual review, and update status/audit docs without HomeBrain source churn.
 
 ## Current implementation status
 
@@ -77,9 +77,14 @@ setup, not on a missing HomeBrain adapter.
   in probe visual review artifacts. SceneTeacherPack QA now treats absent
   extrinsics as missing pose evidence instead of an invalid shape, so single
   frame metric MoGe output can pass structural QA without fake pose.
-- Policy, scorer, and memory-action goals are frozen until a real MoGe or VGGT
-  SceneTeacherPack exists on owned or license-approved frames and passes signal
-  audit beyond review-only.
+- Goal 16C installed the official MoGe package from an ignored external checkout
+  at `external/moge` and ran `Ruicheng/moge-2-vits-normal` through the existing
+  production probe on 20 owned frames. The generated SceneTeacherPack is real,
+  non-mock, metric-scale single-frame geometry with no temporal pose evidence.
+- Policy, scorer, and memory-action work was not touched in Goal 16C. The new
+  real MoGe artifact removes the missing-teacher setup blocker, but it does not
+  provide control safety, product-training approval, robot-frame truth, or
+  temporal-memory evidence.
 - Owned image/video route metadata can now explicitly record
   `owned_or_license_approved`; the audit blocks missing approval, invented
   IMU/odom/command streams, and robot-frame truth claims without measured
@@ -88,6 +93,84 @@ setup, not on a missing HomeBrain adapter.
   are separated below them for history.
 
 ## Goal completion log
+
+### 030 - Goal 16C real MoGe SceneTeacherPack on owned frames
+
+Objective attempted: install or expose official MoGe outside HomeBrain source,
+configure exactly one model source, run the existing owned geometry probe on
+owned frames, manually inspect the real visual review, run required tests, and
+update status/blocker/eval/license docs without HomeBrain source changes.
+
+Files changed: updated `CURRENT_STATUS.md`, `BLOCKERS.md`, `EVALS.md`, and
+`LICENSE_AUDIT.md`. No `homebrain/` source code was edited. Ignored external
+setup and generated artifacts were created under `external/`, the Hugging Face
+cache, and `runs/`.
+
+Commands run: required context reads; MoGe import check with `from
+moge.model.v2 import MoGeModel` initially failed with `ModuleNotFoundError`;
+`git clone https://github.com/microsoft/MoGe.git external\moge`; `git -C
+external\moge rev-parse HEAD`; `python -m pip install -e external\moge`; MoGe
+import check passed with `MOGE_IMPORT_OK`; model-source configuration via
+`HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1`; required probe `python -m
+homebrain.tools.run_owned_geometry_probe --frames
+data\inbox\room_walk_001\frames --out runs\goal16c_moge_real_probe --camera
+front_rgb --fps 10 --teacher moge --backend real
+--owned-or-license-approved --max-frames 20 --device cuda`; visual-review PPM
+conversion to PNG for local inspection; artifact metric inspection; targeted
+tests `python -m pytest tests\test_goal15b_scene_teacher_signal.py -q`; full
+tests `python -m pytest -q`.
+
+Pass/fail results: external setup passed. Official MoGe import now resolves to
+`moge.model.v2.MoGeModel`. The real probe completed with
+`status=SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`, `teacher_artifacts_exist=true`,
+`qa_exists=true`, `audit_exists=true`, `visual_review_exists=true`, and
+`fake_fallback_used=false`. Targeted tests passed with `9 passed`; full pytest
+passed with `99 passed`.
+
+Artifacts created: official checkout `external/moge` at commit
+`07444410f1e33f402353b99d6ccd26bd31e469e8`; editable Python package
+`moge==2.0.0`; Hugging Face cache model
+`C:\Users\Asav\.cache\huggingface\hub\models--Ruicheng--moge-2-vits-normal\snapshots\679230677b4d282c6f304189a93e98e14f085902\model.pt`;
+`runs/goal16c_moge_real_probe/result.json`, `result.md`, route import,
+`teacher_artifacts/moge_scene_v0_real/`, `moge_scene_v0_real_qa.json`,
+`moge_scene_v0_real_signal_audit.json`,
+`moge_scene_v0_real_signal_audit.md`,
+`visual_review/scene_teacher_review.ppm`, `visual_review_manifest.json`, and
+`visual_review/scene_teacher_review.png` for inspection.
+
+Metrics observed: the probe imported `20` frames with `0` image load errors and
+`owned_or_license_approved=true`. SceneTeacherPack QA reported `frame_count=20`,
+`missing_artifact_count=0`, `artifact_shape_error_count=0`,
+`depth_valid_ratio=1.0`, `confidence_valid_ratio=1.0`, `pose_valid_ratio=0.0`,
+`track_valid_ratio=0.0`, `temporal_geometry_consistency=0.9682095191226556`,
+`scale_status=metric`, `real_perception=true`, `mock=false`,
+`control_safe=false`, and `product_training_approved=false`. Signal audit
+reported `next_allowed_use=single_frame_geometry_pretrain_candidate`,
+`single_frame_geometry_pretrain_candidate=true`,
+`temporal_memory_pretrain_candidate=false`, `hard_blockers=[]`,
+`robot_frame_truth=false`, and `action_supervision_ok=false`.
+
+Manual visual review: the RGB/depth/floor/obstacle panels look geometrically
+plausible for the visible carpet/floor, chair base, caster wheels, and cord.
+Depth has coherent foreground/background structure and the floor/obstacle
+placeholder masks roughly separate floor from chair geometry. The confidence
+panel is visually black because the adapter-derived confidence is uniform
+`1.0`, so it is not an informative uncertainty image. This is not a control
+safety or product-training approval claim.
+
+Blockers/risks: the missing MoGe import/model setup blocker is resolved for this
+workspace. Remaining risks are license/human review, the large external
+dependency surface installed for MoGe, no measured camera-to-base transform, no
+IMU/odom/command streams, no teacher temporal extrinsics, no point tracks,
+uniform confidence, review-only placeholder floor/obstacle masks, and all safety
+flags remaining false. No policy, scorer, memory-action work, SAM2, ROS, Nav2,
+Isaac, Habitat, sim, `cmd_vel`, raw PWM, fake fallback, control-safety claim, or
+product-training approval was added.
+
+Recommended next goal: review the real MoGe SceneTeacherPack more deeply across
+more owned frames and either add calibrated pose/odometry evidence for temporal
+memory pretraining or build a narrow geometry-pack promotion gate that preserves
+`control_safe=false` and `product_training_approved=false`.
 
 ### 029 - Goal 16B official MoGe adapter and true setup blocker
 

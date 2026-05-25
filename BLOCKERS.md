@@ -2,7 +2,24 @@
 
 ## Active Blockers
 
-### 2026-05-24 - Goal 16B real MoGe probe blocked by missing MoGe import/model setup
+None as of Goal 16C. The external MoGe import/model setup blocker was repaired
+in this workspace, and the real owned-frame probe produced
+`SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`.
+
+Residual risks remain, but they are not active setup blockers: MoGe license and
+model provenance still require human review, the artifact has no measured
+camera-to-base transform, no IMU/odom/command streams, no temporal teacher
+extrinsics, no point tracks, uniform confidence, placeholder floor/obstacle
+masks, and no control-safety or product-training approval.
+
+## Historical / Non-active Blockers
+
+The entries below are retained for audit context. They are not the active
+production path. Goal 16C resolved the missing real scene-teacher setup blocker,
+but policy/scorer/memory-action work still requires a separate goal and must not
+claim control safety from this single-frame geometry artifact.
+
+## 2026-05-24 - Goal 16B real MoGe probe blocked by missing MoGe import/model setup
 
 Exact failure: `python -m homebrain.tools.run_owned_geometry_probe --frames
 data\inbox\room_walk_001\frames --out runs\goal16b_moge_real_probe --camera
@@ -35,11 +52,14 @@ errors and `owned_or_license_approved=true`. No fake fallback was used. No real
 SceneTeacherPack exists, so SceneTeacherPack QA, signal audit, and visual review
 were intentionally skipped.
 
-## Historical / Non-active Blockers
-
-The entries below are retained for audit context. They are not the active
-production path. Goal 16A freezes policy/scorer/memory-action work until the
-active real scene-teacher blocker above is repaired.
+Resolution update: Goal 16C cloned official MoGe to ignored `external/moge`,
+installed editable `moge==2.0.0`, configured the single model source
+`HOMEBRAIN_MOGE_ALLOW_DOWNLOAD=1` for `Ruicheng/moge-2-vits-normal`, and reran
+the existing owned geometry probe at `runs\goal16c_moge_real_probe`. The probe
+wrote real non-mock SceneTeacherPack artifacts, QA JSON, signal audit JSON/MD,
+and a visual review artifact, with final
+`status=SINGLE_FRAME_GEOMETRY_PRETRAIN_CANDIDATE`. Targeted tests passed with
+`9 passed`; full pytest passed with `99 passed`.
 
 ## 2026-05-24 - Goal 10B TUM Pioneer robot-frame BEV blocked by missing transform semantics
 
