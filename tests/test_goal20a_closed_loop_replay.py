@@ -196,6 +196,12 @@ def test_openloris_runtime_wrapper_runs_transparent_baseline_and_preserves_route
     assert report["cmd_vel_proposal_count"] == 3
     assert report["cmd_vel_executed"] is False
     assert report["raw_pwm_emitted"] is False
+    assert report["runtime_api"] == "Brain.step"
+    assert report["runtime_api_step_count"] == 3
+    assert report["scene_memory"]["step_count"] == 3
+    assert Path(report["scene_memory_artifact"]).exists()
+    assert Path(report["scene_memory_visual"]).exists()
+    assert report["scene_memory"]["runtime_api_step_count"] == 3
 
 
 def _write_route_with_pose(route: Path, *, count: int) -> None:

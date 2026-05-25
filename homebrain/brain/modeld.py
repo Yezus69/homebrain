@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from math import atan2, cos, sin
 from pathlib import Path
 import time
-from typing import Iterable
+from typing import Any, Iterable
 
 import numpy as np
 import torch
@@ -109,6 +109,131 @@ class DirectRGBDFeatureStore:
             return None
 
 
+class Brain:
+    """Online-style runtime owner for SpatialMemoryNetV1 replay ticks.
+
+    The replay CLI still supplies synchronized sensor events, but this object
+    owns the persistent model memory, coverage memory, pose estimate, and action
+    history across calls to ``step``.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: torch.nn.Module,
+        feature_store: Any,
+        output_root: Path,
+        checkpoint: Path,
+        feature_dir: Path | None,
+        runtime_feature_source: str,
+        start_timestamp_ns: int,
+        pose_warp_source_requested: str,
+        policy_bev_source: str,
+        trajectory_scorer: RuntimeTrajectoryScorer | None,
+        future_rollout_scorer: RuntimeFutureRolloutScorer | None,
+        trajectory_candidates: list,
+        meters_per_cell: float,
+        device: torch.device,
+        future_rollout_selection_mode: str = "guided_transparent",
+    ) -> None:
+        self.model = model
+        self.feature_store = feature_store
+        self.output_root = output_root
+        self.checkpoint = checkpoint
+        self.feature_dir = feature_dir
+        self.runtime_feature_source = runtime_feature_source
+        self.start_timestamp_ns = int(start_timestamp_ns)
+        self.pose_warp_source_requested = pose_warp_source_requested
+        self.policy_bev_source = policy_bev_source
+        self.trajectory_scorer = trajectory_scorer
+        self.future_rollout_scorer = future_rollout_scorer
+        self.trajectory_candidates = trajectory_candidates
+        self.meters_per_cell = float(meters_per_cell)
+        self.device = device
+        self.future_rollout_selection_mode = future_rollout_selection_mode
+        self.state: SpatialMemoryState | None = None
+        self.previous_predicted_pose_delta: torch.Tensor | None = None
+        self.previous_sequence_camera: tuple[str, str] | None = None
+        self.trajectory_coverage = CoverageMemory(model.config.bev_shape, meters_per_cell=self.meters_per_cell)
+        self.pose_estimate = (0.0, 0.0, 0.0)
+        self.step_count = 0
+        self.selection_history: list[str] = []
+
+    def should_reset(self, frame: FrameEvent) -> bool:
+        key = (frame.sequence_id, frame.camera_id)
+        return self.previous_sequence_camera is None or key != self.previous_sequence_camera
+
+    def step(
+        self,
+        frame: FrameEvent,
+        *,
+        pose_delta_to_current: torch.Tensor | None,
+        pose_warp_source: str,
+        route_pose_delta_available: bool,
+        predicted_pose_warp_ablation: bool,
+        route_pose_leakage_ablation: bool,
+        reset_memory: bool,
+    ) -> tuple[BrainOutputEvent, str]:
+        if reset_memory:
+            self.state = None
+            self.previous_predicted_pose_delta = None
+            self.pose_estimate = (0.0, 0.0, 0.0)
+            self.selection_history = []
+            self.trajectory_coverage = CoverageMemory(
+                self.model.config.bev_shape,
+                meters_per_cell=self.meters_per_cell,
+            )
+        else:
+            self.pose_estimate = _integrate_pose_estimate(self.pose_estimate, pose_delta_to_current)
+
+        output, artifact, state, predicted_pose_delta = _spatial_v1_output_for_frame(
+            model=self.model,
+            frame=frame,
+            feature_store=self.feature_store,
+            output_root=self.output_root,
+            checkpoint=self.checkpoint,
+            feature_dir=self.feature_dir,
+            runtime_feature_source=self.runtime_feature_source,
+            start_timestamp_ns=self.start_timestamp_ns,
+            pose_delta_to_current=pose_delta_to_current,
+            pose_warp_source=pose_warp_source,
+            pose_warp_source_requested=self.pose_warp_source_requested,
+            route_pose_delta_available=route_pose_delta_available,
+            predicted_pose_warp_ablation=predicted_pose_warp_ablation,
+            route_pose_leakage_ablation=route_pose_leakage_ablation,
+            reset_memory=reset_memory,
+            state=self.state,
+            trajectory_scorer=self.trajectory_scorer,
+            future_rollout_scorer=self.future_rollout_scorer,
+            trajectory_candidates=self.trajectory_candidates,
+            trajectory_coverage=self.trajectory_coverage,
+            policy_bev_source=self.policy_bev_source,
+            device=self.device,
+            future_rollout_selection_mode=self.future_rollout_selection_mode,
+            selection_history=list(self.selection_history),
+        )
+        self.state = state
+        self.previous_predicted_pose_delta = predicted_pose_delta
+        self.previous_sequence_camera = (frame.sequence_id, frame.camera_id)
+        self.step_count += 1
+        if output.selected_trajectory_id is not None:
+            self.selection_history.append(str(output.selected_trajectory_id))
+            self.selection_history = self.selection_history[-24:]
+        output.debug.update(
+            {
+                "runtime_api": "Brain.step",
+                "runtime_api_step_index": self.step_count - 1,
+                "runtime_api_owns_persistent_memory": True,
+                "scene_pose_estimate": _pose_estimate_dict(self.pose_estimate),
+                "pose_estimate_source": pose_warp_source,
+                "teacher_runtime_dependency": self.runtime_feature_source == "dino",
+                "future_or_groundtruth_runtime_dependency": bool(route_pose_leakage_ablation),
+                "accepted_runtime_student_path": self.runtime_feature_source == "direct_rgbd",
+            }
+        )
+        return output, artifact
+
+
 def dummy_brain_output_for_frame(frame: FrameEvent) -> BrainOutputEvent:
     input_id = event_identity(frame)
     stop_candidate = {
@@ -174,6 +299,7 @@ def replay_events_with_spatial_model(
     v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
     runtime_feature_source: str = "dino",
+    future_rollout_selection_mode: str = "guided_transparent",
 ) -> tuple[list[Event], list[str]]:
     ordered_events = list(events)
     outputs, artifacts = spatial_model_outputs(
@@ -188,6 +314,7 @@ def replay_events_with_spatial_model(
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
         runtime_feature_source=runtime_feature_source,
+        future_rollout_selection_mode=future_rollout_selection_mode,
     )
     by_identity = {event.input_event_ids[0]: event for event in outputs}
     replayed: list[Event] = []
@@ -224,6 +351,7 @@ def write_spatial_model_outputs(
     v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
     runtime_feature_source: str = "dino",
+    future_rollout_selection_mode: str = "guided_transparent",
 ) -> None:
     manifest = load_manifest(log_dir)
     events = read_events(log_dir)
@@ -239,6 +367,7 @@ def write_spatial_model_outputs(
         v1_pose_warp_source=v1_pose_warp_source,
         v1_policy_bev_source=v1_policy_bev_source,
         runtime_feature_source=runtime_feature_source,
+        future_rollout_selection_mode=future_rollout_selection_mode,
     )
     suffix = "spatial-v1-model" if outputs and outputs[0].source == SPATIAL_MEMORY_V1_SOURCE else "spatial-v0-model"
     write_segment(
@@ -262,6 +391,7 @@ def spatial_model_outputs(
     v1_pose_warp_source: str = "odom",
     v1_policy_bev_source: str = "memory",
     runtime_feature_source: str = "dino",
+    future_rollout_selection_mode: str = "guided_transparent",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if runtime_feature_source not in RUNTIME_FEATURE_SOURCES:
         raise ValueError(f"runtime_feature_source must be one of {RUNTIME_FEATURE_SOURCES}")
@@ -280,6 +410,7 @@ def spatial_model_outputs(
             pose_warp_source=v1_pose_warp_source,
             policy_bev_source=v1_policy_bev_source,
             runtime_feature_source=runtime_feature_source,
+            future_rollout_selection_mode=future_rollout_selection_mode,
         )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -352,6 +483,7 @@ def _spatial_v1_model_outputs(
     pose_warp_source: str = "odom",
     policy_bev_source: str = "memory",
     runtime_feature_source: str = "dino",
+    future_rollout_selection_mode: str = "guided_transparent",
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if pose_warp_source not in V1_POSE_WARP_SOURCES:
         raise ValueError(f"v1_pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
@@ -401,16 +533,26 @@ def _spatial_v1_model_outputs(
         meters_per_cell=meters_per_cell,
         robot_radius_m=robot_radius_m,
     )
-    trajectory_coverage = CoverageMemory(model.config.bev_shape, meters_per_cell=meters_per_cell)
-    state: SpatialMemoryState | None = None
-    previous_predicted_pose_delta: torch.Tensor | None = None
-    previous_sequence_camera: tuple[str, str] | None = None
+    brain = Brain(
+        model=model,
+        feature_store=feature_store,
+        output_root=output_root,
+        checkpoint=Path(checkpoint),
+        feature_dir=Path(resolved_feature_dir) if isinstance(resolved_feature_dir, (str, Path)) else None,
+        runtime_feature_source=runtime_feature_source,
+        start_timestamp_ns=start_timestamp_ns,
+        pose_warp_source_requested=pose_warp_source,
+        policy_bev_source=policy_bev_source,
+        trajectory_scorer=trajectory_scorer,
+        future_rollout_scorer=future_rollout_scorer,
+        trajectory_candidates=trajectory_candidates,
+        meters_per_cell=meters_per_cell,
+        device=device,
+        future_rollout_selection_mode=future_rollout_selection_mode,
+    )
     route_pose_deltas = _route_pose_deltas(frames, ordered_events, pose_warp_source=pose_warp_source)
     for frame in frames:
-        current_key = (frame.sequence_id, frame.camera_id)
-        reset = previous_sequence_camera is None or current_key != previous_sequence_camera
-        if reset:
-            trajectory_coverage = CoverageMemory(model.config.bev_shape, meters_per_cell=meters_per_cell)
+        reset = brain.should_reset(frame)
         selected_pose_delta: torch.Tensor | None = None
         selected_pose_source = pose_warp_source
         route_pose_available = False
@@ -424,40 +566,23 @@ def _spatial_v1_model_outputs(
             else:
                 selected_pose_source = f"{pose_warp_source}_missing"
         elif not reset and pose_warp_source == "predicted_pose":
-            selected_pose_delta = previous_predicted_pose_delta
+            selected_pose_delta = brain.previous_predicted_pose_delta
             route_pose_available = selected_pose_delta is not None
             selected_pose_source = "predicted_pose" if selected_pose_delta is not None else "predicted_pose_missing"
         elif reset:
             selected_pose_source = "sequence_reset"
         else:
             selected_pose_source = "none"
-        output, artifact, state, previous_pose_delta = _spatial_v1_output_for_frame(
-            model=model,
-            frame=frame,
-            feature_store=feature_store,
-            output_root=output_root,
-            checkpoint=Path(checkpoint),
-            feature_dir=Path(resolved_feature_dir) if isinstance(resolved_feature_dir, (str, Path)) else None,
-            runtime_feature_source=runtime_feature_source,
-            start_timestamp_ns=start_timestamp_ns,
+        output, artifact = brain.step(
+            frame,
             pose_delta_to_current=selected_pose_delta,
             pose_warp_source=selected_pose_source,
-            pose_warp_source_requested=pose_warp_source,
             route_pose_delta_available=route_pose_available,
             predicted_pose_warp_ablation=pose_warp_source == "predicted_pose",
             route_pose_leakage_ablation=pose_warp_source in {"route_pose", "route_pose_ablation"}
             or selected_pose_source == "route_pose",
             reset_memory=reset,
-            state=None if reset else state,
-            trajectory_scorer=trajectory_scorer,
-            future_rollout_scorer=future_rollout_scorer,
-            trajectory_candidates=trajectory_candidates,
-            trajectory_coverage=trajectory_coverage,
-            policy_bev_source=policy_bev_source,
-            device=device,
         )
-        previous_predicted_pose_delta = previous_pose_delta
-        previous_sequence_camera = current_key
         brain_outputs.append(output)
         artifact_files.append(artifact)
     return brain_outputs, artifact_files
@@ -605,6 +730,8 @@ def _spatial_v1_output_for_frame(
     trajectory_coverage: CoverageMemory,
     policy_bev_source: str,
     device: torch.device,
+    future_rollout_selection_mode: str = "guided_transparent",
+    selection_history: list[str] | None = None,
 ) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor]:
     total_started = time.perf_counter()
     feature_started = time.perf_counter()
@@ -708,6 +835,8 @@ def _spatial_v1_output_for_frame(
         sensor_mask=sensor_mask.detach().cpu().numpy()[0],
         policy_bev_source=policy_bev_source,
         coverage_memory_reset=reset_memory,
+        future_rollout_selection_mode=future_rollout_selection_mode,
+        selection_history=selection_history,
     )
     _sync_device(device)
     decision_latency_ms = _elapsed_ms(decision_started)
@@ -873,6 +1002,31 @@ def _relative_planar_delta(previous: dict[str, object], current: dict[str, objec
     return (float(dx), float(dy), float(dyaw))
 
 
+def _integrate_pose_estimate(
+    pose: tuple[float, float, float],
+    delta: torch.Tensor | None,
+) -> tuple[float, float, float]:
+    if delta is None:
+        return pose
+    values = delta.detach().cpu().numpy().reshape(-1)
+    if values.shape[0] < 3 or not np.all(np.isfinite(values[:3])):
+        return pose
+    x_m, y_m, yaw_rad = pose
+    dx, dy, dyaw = (float(values[0]), float(values[1]), float(values[2]))
+    x_m += cos(yaw_rad) * dx - sin(yaw_rad) * dy
+    y_m += sin(yaw_rad) * dx + cos(yaw_rad) * dy
+    yaw_rad = _wrap_angle(yaw_rad + dyaw)
+    return (float(x_m), float(y_m), float(yaw_rad))
+
+
+def _pose_estimate_dict(pose: tuple[float, float, float]) -> dict[str, float]:
+    return {
+        "x_m": round(float(pose[0]), 6),
+        "y_m": round(float(pose[1]), 6),
+        "yaw_rad": round(float(pose[2]), 6),
+    }
+
+
 def _load_runtime_rgb(path: Path) -> np.ndarray:
     if not path.exists():
         raise FileNotFoundError(f"runtime RGB frame is missing: {path}")
@@ -1021,6 +1175,12 @@ def main(argv: list[str] | None = None) -> int:
         default="dino",
         help="Use precomputed DINO features or direct current RGB-D runtime features.",
     )
+    parser.add_argument(
+        "--future-rollout-selection-mode",
+        choices=("argmin", "guided_transparent"),
+        default="guided_transparent",
+        help="Select from raw FutureBEV argmin or a safety/coverage-guided FutureBEV score.",
+    )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)
     if args.checkpoint:
@@ -1035,6 +1195,7 @@ def main(argv: list[str] | None = None) -> int:
             v1_pose_warp_source=args.v1_pose_warp_source,
             v1_policy_bev_source=args.v1_policy_bev_source,
             runtime_feature_source=args.runtime_feature_source,
+            future_rollout_selection_mode=args.future_rollout_selection_mode,
         )
     else:
         write_dummy_model_outputs(args.log, args.out)

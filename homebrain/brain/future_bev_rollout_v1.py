@@ -265,6 +265,8 @@ def score_local_bev_with_future_rollout(
         sensor = torch.from_numpy(sensor_array).to(device)
     with torch.no_grad():
         outputs = model(current, features, feature_mask, sensor)
+    future_bev = torch.sigmoid(outputs["future_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
+    future_uncertainty = outputs["uncertainty_grid"][0, :, 0].detach().cpu().numpy().astype(np.float32)
     collision = torch.sigmoid(outputs["candidate_collision_logit"])[0].detach().cpu().numpy().astype(np.float32)
     future_collision = outputs["candidate_future_collision"][0].detach().cpu().numpy().astype(np.float32)
     unsafe_now = outputs["candidate_unsafe_now"][0].detach().cpu().numpy().astype(np.float32)
@@ -284,6 +286,9 @@ def score_local_bev_with_future_rollout(
         "candidate_new_area_gain": gain,
         "candidate_progress": progress,
         "candidate_lower_is_better_score": lower_score,
+        "future_bev_prob": future_bev,
+        "future_uncertainty_grid": future_uncertainty,
+        "future_horizons_s": np.asarray(model.config.horizons_s, dtype=np.float32),
         "scoring_formula": (
             "8*combined_collision + 2*unsafe_now + 1.25*unknown "
             "- 2.4*new_area_gain - 2*progress + 0.8*stop"

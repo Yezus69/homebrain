@@ -72,6 +72,7 @@ def run_openloris_route_heldout_milestone(
     future_max_examples: int | None = None,
     runtime_max_frames: int | None = None,
     runtime_feature_source: str = "dino",
+    future_rollout_selection_mode: str = "guided_transparent",
     run_direct_rgbd_runtime_slice: bool = True,
     pose_warp_source: str = "odom",
     command: str | None = None,
@@ -298,6 +299,7 @@ def run_openloris_route_heldout_milestone(
         device_name=future_device,
         v1_pose_warp_source=pose_warp_source,
         runtime_feature_source=runtime_feature_source,
+        future_rollout_selection_mode=future_rollout_selection_mode,
         command=command,
     )
     contact_sheet = write_runtime_failure_contact_sheet(
@@ -320,6 +322,7 @@ def run_openloris_route_heldout_milestone(
             device_name=future_device,
             v1_pose_warp_source=pose_warp_source,
             runtime_feature_source="direct_rgbd",
+            future_rollout_selection_mode=future_rollout_selection_mode,
             command=(
                 "direct RGB-D runtime smoke slice from "
                 "homebrain.tools.run_openloris_route_heldout_milestone"
@@ -328,9 +331,16 @@ def run_openloris_route_heldout_milestone(
         direct_runtime_record = {
             "runtime_report": (direct_out / "runtime_report.json").as_posix(),
             "decision_count": direct_report.get("decision_count"),
+            "selected_candidate_entropy": direct_report.get("selected_candidate_entropy"),
+            "selected_candidate_dominant_fraction": direct_report.get("selected_candidate_dominant_fraction"),
+            "cmd_vel_proposal_count": direct_report.get("cmd_vel_proposal_count"),
             "latency_end_to_end_p95_ms": direct_report.get("latency_end_to_end_p95_ms"),
+            "latency_step_p50_ms": direct_report.get("latency_step_p50_ms"),
+            "latency_step_p95_ms": direct_report.get("latency_step_p95_ms"),
             "requires_precomputed_dino_runtime": direct_report.get("requires_precomputed_dino_runtime"),
             "direct_rgbd_runtime_path": direct_report.get("direct_rgbd_runtime_path"),
+            "teacher_runtime_dependency": direct_report.get("teacher_runtime_dependency"),
+            "future_or_groundtruth_runtime_dependency": direct_report.get("future_or_groundtruth_runtime_dependency"),
             "control_safe": False,
         }
 
@@ -395,6 +405,20 @@ def run_openloris_route_heldout_milestone(
             "cmd_vel_proposal_count": runtime_report.get("cmd_vel_proposal_count"),
             "cmd_vel_non_null_count": runtime_report.get("cmd_vel_non_null_count"),
             "raw_pwm_emitted": runtime_report.get("raw_pwm_emitted", False),
+            "runtime_api_step_count": runtime_report.get("runtime_api_step_count"),
+            "scene_memory_artifact": runtime_report.get("scene_memory_artifact"),
+            "scene_memory_visual": runtime_report.get("scene_memory_visual"),
+            "observed_cell_ratio": runtime_report.get("observed_cell_ratio"),
+            "unknown_reduction_vs_current": runtime_report.get("unknown_reduction_vs_current"),
+            "pose_ate_rmse_m_or_proxy": runtime_report.get("pose_ate_rmse_m_or_proxy"),
+            "pose_rpe_translation_rmse_m_or_proxy": runtime_report.get("pose_rpe_translation_rmse_m_or_proxy"),
+            "pose_metric_proxy": runtime_report.get("pose_metric_proxy"),
+            "pose_metric_source": runtime_report.get("pose_metric_source"),
+            "latency_step_p50_ms": runtime_report.get("latency_step_p50_ms"),
+            "latency_step_p95_ms": runtime_report.get("latency_step_p95_ms"),
+            "teacher_runtime_dependency": runtime_report.get("teacher_runtime_dependency"),
+            "future_or_groundtruth_runtime_dependency": runtime_report.get("future_or_groundtruth_runtime_dependency"),
+            "future_rollout_selection_mode": future_rollout_selection_mode,
             "control_safe": False,
             "contact_sheet": contact_sheet.as_posix(),
         },
@@ -420,6 +444,35 @@ def run_openloris_route_heldout_milestone(
         "product_training_approved": False,
         "raw_pwm_emitted": False,
     }
+    accepted_runtime = direct_runtime_record if direct_runtime_record is not None else summary["runtime_replay"]
+    summary.update(
+        {
+            "runtime_api_step_count": accepted_runtime.get("decision_count"),
+            "current_bev_iou_or_proxy": primary_fold.get("current_bev_iou_or_proxy"),
+            "fused_memory_bev_iou_or_proxy": primary_fold.get("fused_memory_bev_iou_or_proxy"),
+            "pose_metric_proxy": runtime_report.get("pose_metric_proxy"),
+            "pose_metric_source": runtime_report.get("pose_metric_source"),
+            "pose_ate_rmse_m_or_proxy": runtime_report.get("pose_ate_rmse_m_or_proxy"),
+            "pose_rpe_translation_rmse_m_or_proxy": runtime_report.get("pose_rpe_translation_rmse_m_or_proxy"),
+            "pose_warp_valid_fraction": runtime_report.get("pose_warp_valid_fraction"),
+            "future_prediction_metric_proxy": future_eval_metrics.get("future_unknown_iou_or_proxy"),
+            "future_unknown_iou_or_proxy": future_eval_metrics.get("future_unknown_iou_or_proxy"),
+            "action_entropy": accepted_runtime.get("selected_candidate_entropy"),
+            "dominant_action_fraction": accepted_runtime.get("selected_candidate_dominant_fraction"),
+            "unsafe_selected_rate": runtime_report.get("unsafe_selected_rate"),
+            "cmd_vel_proposal_count": accepted_runtime.get("cmd_vel_proposal_count"),
+            "latency_step_p50_ms": accepted_runtime.get("latency_step_p50_ms"),
+            "latency_step_p95_ms": accepted_runtime.get("latency_step_p95_ms"),
+            "teacher_runtime_dependency": accepted_runtime.get("teacher_runtime_dependency"),
+            "future_or_groundtruth_runtime_dependency": accepted_runtime.get("future_or_groundtruth_runtime_dependency"),
+            "route_pose_leakage_ablation_fraction": runtime_report.get("route_pose_leakage_ablation_fraction"),
+            "future_rollout_selection_mode": future_rollout_selection_mode,
+        }
+    )
+    summary["acceptance"]["non_collapsed_action_distribution"] = (
+        float(summary.get("action_entropy") or 0.0) > 0.0
+        and float(summary.get("dominant_action_fraction") or 1.0) < 1.0
+    )
     summary_path = output / "milestone_report.json"
     write_json(summary_path, summary, pretty=True)
     _write_markdown_report(output / "milestone_report.md", summary)
@@ -906,6 +959,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--future-max-examples", type=int, default=None)
     parser.add_argument("--runtime-max-frames", type=int, default=None)
     parser.add_argument("--runtime-feature-source", choices=RUNTIME_FEATURE_SOURCES, default="dino")
+    parser.add_argument(
+        "--future-rollout-selection-mode",
+        choices=("argmin", "guided_transparent"),
+        default="guided_transparent",
+    )
     parser.add_argument("--skip-direct-rgbd-runtime-slice", action="store_true")
     parser.add_argument("--pose-warp-source", choices=V1_POSE_WARP_SOURCES, default="odom")
     args = parser.parse_args(argv)
@@ -928,6 +986,7 @@ def main(argv: list[str] | None = None) -> int:
         future_max_examples=args.future_max_examples,
         runtime_max_frames=args.runtime_max_frames,
         runtime_feature_source=args.runtime_feature_source,
+        future_rollout_selection_mode=args.future_rollout_selection_mode,
         run_direct_rgbd_runtime_slice=not args.skip_direct_rgbd_runtime_slice,
         pose_warp_source=args.pose_warp_source,
         command=command,

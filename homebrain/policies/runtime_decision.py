@@ -107,6 +107,8 @@ def decide_trajectory(
     sensor_mask: np.ndarray | None = None,
     policy_bev_source: str,
     coverage_memory_reset: bool = False,
+    future_rollout_selection_mode: str = "argmin",
+    selection_history: list[str] | None = None,
 ) -> RuntimeDecisionResult:
     bev.validate()
     if not candidates:
@@ -134,7 +136,13 @@ def decide_trajectory(
         )
         _validate_future_candidate_ids(candidates, future_scores)
         lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
-        selected_index_raw = int(np.argmin(lower_score))
+        selected_index_raw, guided_scores = _select_future_rollout_candidate(
+            candidates=candidates,
+            future_scores=future_scores,
+            transparent_decision=transparent_decision,
+            selection_mode=future_rollout_selection_mode,
+            selection_history=selection_history,
+        )
         selected_candidate_id = candidates[selected_index_raw].id
         candidate_records = _future_rollout_candidate_score_records(
             candidates=candidates,
@@ -161,6 +169,13 @@ def decide_trajectory(
             "future_rollout_candidate_new_area_gain": np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32),
             "future_rollout_candidate_progress": np.asarray(future_scores["candidate_progress"], dtype=np.float32),
             "future_rollout_candidate_lower_is_better_score": lower_score,
+            "future_rollout_guided_total_scores": guided_scores.astype(np.float32),
+            "future_rollout_future_bev_prob": np.asarray(future_scores["future_bev_prob"], dtype=np.float32),
+            "future_rollout_future_uncertainty_grid": np.asarray(
+                future_scores["future_uncertainty_grid"],
+                dtype=np.float32,
+            ),
+            "future_rollout_horizons_s": np.asarray(future_scores["future_horizons_s"], dtype=np.float32),
         }
     elif learned_scorer is None:
         selected_candidate_id = transparent_decision.selected_candidate_id
@@ -195,6 +210,8 @@ def decide_trajectory(
     coverage_memory.update_current_frame(bev)
     coverage_after_update = coverage_memory.to_dict()
     selected_metrics = _score_dict_for_candidate(transparent_decision, selected_candidate_id)
+    selected_record_score = _score_dict_from_records(candidate_records, selected_candidate_id)
+    selected_metrics.update(selected_record_score)
     artifact_arrays: dict[str, np.ndarray] = {
         "trajectory_selected_index": np.asarray([selected_index], dtype=np.int64),
         "trajectory_transparent_total_scores": np.asarray(
@@ -245,6 +262,7 @@ def decide_trajectory(
         "cmd_vel_proposal_is_bounded": True,
         "cmd_vel_bounds": dict(DEFAULT_CMD_VEL_LIMITS),
         "cmd_vel_proposal_note": "review_only_not_executed",
+        "selection_history_recent": list(selection_history or []),
         "replay_only": True,
         "not_executed": True,
         "control_safe": False,
@@ -266,6 +284,14 @@ def decide_trajectory(
                 "future_rollout_checkpoint": future_rollout_scorer.checkpoint.as_posix(),
                 "future_rollout_checkpoint_sha256": _file_sha256(future_rollout_scorer.checkpoint),
                 "future_rollout_metadata": future_rollout_scorer.metadata,
+                "future_rollout_selection_mode": future_rollout_selection_mode,
+                "future_rollout_guided_total_scores": [
+                    round(float(value), 6) for value in future_rollout_arrays["future_rollout_guided_total_scores"]
+                ],
+                "future_rollout_raw_argmin_candidate_id": candidates[
+                    int(np.argmin(future_rollout_arrays["future_rollout_candidate_lower_is_better_score"]))
+                ].id,
+                "temporal_diversity_prior_enabled": future_rollout_selection_mode != "argmin",
                 "future_rollout_replay_only": True,
                 "future_rollout_control_safe": False,
             }
@@ -391,6 +417,77 @@ def _validate_future_candidate_ids(
         raise ValueError(f"Future BEV rollout candidate ids do not match runtime candidates: {scored_ids} != {expected}")
 
 
+def _select_future_rollout_candidate(
+    *,
+    candidates: list[CandidateTrajectory],
+    future_scores: dict[str, np.ndarray | list[str] | str],
+    transparent_decision: TrajectoryDecision,
+    selection_mode: str,
+    selection_history: list[str] | None,
+) -> tuple[int, np.ndarray]:
+    lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
+    if selection_mode == "argmin":
+        return int(np.argmin(lower_score)), lower_score.copy()
+    if selection_mode != "guided_transparent":
+        raise ValueError("future_rollout_selection_mode must be 'argmin' or 'guided_transparent'")
+
+    transparent_scores = np.asarray([score.total_score for score in transparent_decision.scores], dtype=np.float32)
+    collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
+    unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
+    unknown = np.asarray(future_scores["candidate_unknown_exposure"], dtype=np.float32)
+    gain = np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32)
+    progress = np.asarray(future_scores["candidate_progress"], dtype=np.float32)
+    repeated = _recent_selection_penalty(candidates, selection_history or [])
+    nonprogress = np.asarray(
+        [
+            0.18
+            if abs(float(candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0))) < 1.0e-6
+            and candidate.id != "stop"
+            else 0.0
+            for candidate in candidates
+        ],
+        dtype=np.float32,
+    )
+    future_norm = _normalise_scores(lower_score)
+    guided = (
+        transparent_scores
+        + 0.20 * future_norm
+        + 0.75 * collision
+        + 0.50 * unsafe_now
+        + 0.08 * unknown
+        - 0.05 * gain
+        - 0.03 * progress
+        + repeated
+        + nonprogress
+    ).astype(np.float32)
+    hard_unsafe = (collision >= 0.5) | (unsafe_now >= 0.5)
+    guided = guided + hard_unsafe.astype(np.float32) * np.float32(100.0)
+    return int(np.argmin(guided)), guided
+
+
+def _normalise_scores(values: np.ndarray) -> np.ndarray:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.zeros_like(values, dtype=np.float32)
+    lower = float(np.min(finite))
+    upper = float(np.max(finite))
+    if upper - lower <= 1.0e-6:
+        return np.zeros_like(values, dtype=np.float32)
+    return ((values - np.float32(lower)) / np.float32(upper - lower)).astype(np.float32)
+
+
+def _recent_selection_penalty(candidates: list[CandidateTrajectory], history: list[str]) -> np.ndarray:
+    if not history:
+        return np.zeros((len(candidates),), dtype=np.float32)
+    recent = history[-8:]
+    values: list[float] = []
+    for candidate in candidates:
+        count = sum(1 for item in recent if item == candidate.id)
+        last_penalty = 0.22 if recent and recent[-1] == candidate.id else 0.0
+        values.append(last_penalty + 0.035 * count)
+    return np.asarray(values, dtype=np.float32)
+
+
 def _selected_candidate_index(candidates: list[CandidateTrajectory], selected_candidate_id: str) -> int:
     for index, candidate in enumerate(candidates):
         if candidate.id == selected_candidate_id:
@@ -403,6 +500,16 @@ def _score_dict_for_candidate(decision: TrajectoryDecision, candidate_id: str) -
         if score.candidate_id == candidate_id:
             return score.to_dict()
     raise ValueError(f"candidate score missing for selected candidate: {candidate_id}")
+
+
+def _score_dict_from_records(records: list[JsonDict], candidate_id: str) -> JsonDict:
+    for record in records:
+        record_id = str(record.get("id", record.get("trajectory_id", "")))
+        if record_id != candidate_id:
+            continue
+        score = record.get("trajectory_score")
+        return dict(score) if isinstance(score, dict) else {}
+    return {}
 
 
 def _coverage_update(before: JsonDict, after: JsonDict) -> JsonDict:

@@ -18,16 +18,19 @@ Implemented:
   geometry, plus fake backends for tests;
 - geometry-to-BEV and SpatialTrainPack builders;
 - SpatialMemoryNet v0/v1 with explicit local BEV memory;
+- online-style `Brain.step(...)` for SpatialMemoryNetV1 replay ticks, owning
+  persistent memory, coverage memory, pose estimate, and recent action history;
 - fixed candidate trajectories, transparent scorer, learned scorer, future
-  motion action labels, and closed-loop replay reports.
+  motion action labels, and closed-loop replay reports;
 - Future BEV Rollout v1 pack builder, dataset, model, train/eval CLIs, and
-  replay-only runtime candidate scoring option.
+  replay-only runtime candidate scoring option;
+- scene-level runtime memory artifacts with fused scene BEV, current local BEV,
+  pose trace, uncertainty/seen maps, selected trajectory overlays, and predicted
+  future overlays.
 
 Not implemented:
 
 - real robot runtime process;
-- online `Brain.step(...)` deployment interface that owns memory across live
-  sensor ticks;
 - synchronized owned RGB/IR/IMU/wheel/command logs;
 - hardware controller, watchdog, recovery, docking, or physical safety gate;
 - robust dynamic-risk labels;
@@ -75,7 +78,82 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Goal25: real public OpenLORIS route-heldout replay-as-live milestone.
+Goal26: real public OpenLORIS scene-level `Brain.step(...)` runtime milestone.
+
+## Goal26 Result
+
+Objective: connect the existing OpenLORIS ingestion, deterministic replay,
+SpatialMemoryNetV1 memory, odom-based online pose estimate, physical BEV
+geometry, FutureBEV candidate prediction, guided candidate selection, bounded
+`cmd_vel` proposals, latency/leakage/collapse reports, and scene-level memory
+visuals into one real-data replay-as-live path.
+
+Command:
+
+```text
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal26_scene_runtime_brain_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 96 --runtime-feature-source direct_rgbd --max-spatial-folds 2 --future-rollout-selection-mode guided_transparent
+```
+
+Artifacts:
+
+```text
+runs/goal26_scene_runtime_brain_milestone/milestone_report.json
+runs/goal26_scene_runtime_brain_milestone/runtime/heldout_corridor1_1_direct_rgbd/runtime_report.json
+runs/goal26_scene_runtime_brain_milestone/runtime/heldout_corridor1_1_direct_rgbd/scene_memory/corridor1_1_scene_memory.npz
+runs/goal26_scene_runtime_brain_milestone/runtime/heldout_corridor1_1_direct_rgbd/scene_memory/corridor1_1_scene_memory.ppm
+runs/goal26_scene_runtime_brain_milestone/train/spatial_v1_except_corridor1_1/checkpoint.pt
+runs/goal26_scene_runtime_brain_milestone/train/future_bev_rollout_except_corridor1_1/checkpoint.pt
+```
+
+Key metrics: route count `3`, heldout `corridor1-1`, runtime API steps `96`,
+current/fused BEV IoU proxy `0.18949444219026537 / 0.7033406457730702`, future
+unknown IoU proxy `0.9318639982272857`, selected action entropy `1.0`, dominant
+action fraction `0.5`, unsafe selected rate `0.0`, bounded cmd_vel proposals
+`96`, p50/p95 step latency `53.9916 / 58.851275 ms`, teacher runtime dependency
+`false`, future/ground-truth runtime dependency `false`, route-pose leakage
+fraction `0.0`, raw PWM `false`, control safe `false`.
+
+Scene-memory metrics: observed cell ratio `0.15047021943573669`; unknown
+reduction vs current `-0.31632888317108154` (regressed, not a win); pose metric
+is `scene_pose_trace_vs_pose_source_relative_trace_eval_only` using
+`runtime_odometry_proxy`, not independent ground truth.
+
+Files changed:
+
+```text
+homebrain/brain/future_bev_rollout_v1.py
+homebrain/brain/modeld.py
+homebrain/policies/runtime_decision.py
+homebrain/runtime/replay_openloris_brain.py
+homebrain/tools/run_openloris_route_heldout_milestone.py
+tests/test_goal20a_closed_loop_replay.py
+CURRENT_STATUS.md
+BLOCKERS.md
+```
+
+Verification so far:
+
+```text
+python -m py_compile homebrain\brain\modeld.py homebrain\policies\runtime_decision.py homebrain\brain\future_bev_rollout_v1.py homebrain\runtime\replay_openloris_brain.py homebrain\tools\run_openloris_route_heldout_milestone.py
+python -m pytest tests\test_goal20a_closed_loop_replay.py tests\test_goal12a_spatial_memory_v1.py tests\test_future_bev_rollout_v1.py -q
+git diff --check
+python -m pytest -q
+```
+
+Pass/fail: focused tests passed with `22 passed`; full pytest passed with
+`128 passed in 197.64s`; `git diff --check` passed with only Git line-ending
+warnings on Windows.
+
+Risks: action diversity is produced by a transparent/FutureBEV guided selector
+with a temporal diversity prior because raw FutureBEV argmin was previously
+collapsed. Traversability/free-space labels remain weak. Scene memory is useful
+as an artifact and API proof, but not yet home-scale, independent-SLAM-grade, or
+control-safe.
+
+Recommended next step: improve the direct RGB-D student quality and BEV
+observed-cell density, then replace the hand-weighted temporal diversity prior
+with a learned non-collapsed scorer trained/evaluated route-heldout on more
+real routes.
 
 ## Goal25 Result
 
