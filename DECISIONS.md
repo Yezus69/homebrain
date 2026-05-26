@@ -103,3 +103,16 @@ The project needs real physical prediction and learned action choice, not a
 metric workaround.
 
 Status: active.
+
+## D011 - Scene memory must be in the control path
+
+Decision: Whole-scene memory only counts for the robot-brain milestone if it is
+updated online and consumed by future rollout or trajectory scoring. A saved
+scene map, contact sheet, or post-hoc visualization is useful debug evidence
+but cannot satisfy the scene-level brain requirement by itself.
+
+Reason: The robot needs physical understanding to traverse. A map artifact that
+does not affect pose, future prediction, or action choice is not a deployable
+robot brain.
+
+Status: active.

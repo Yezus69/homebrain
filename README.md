@@ -111,8 +111,35 @@ to improve, not as completion:
 The next Codex run must build the user-requested scene-level robot-brain
 milestone, not another connector milestone.
 
-Goal27 must produce a learned real-data runtime system that satisfies the
-original hard constraints:
+Goal27 must produce one connected learned real-data runtime system, not a set of
+separate reports. The system must replay real routes as live sensor ticks and
+maintain a persistent `SceneState` or equivalent world model that is updated and
+used every tick.
+
+The required vertical slice is:
+
+```text
+real public robot route
+  -> replay-as-live sensor tick
+  -> Brain.step(...)
+  -> pose estimate inside persistent scene memory
+  -> local + scene BEV physical geometry
+  -> future state rollout for candidate trajectories
+  -> learned trajectory score / bounded cmd_vel proposal
+  -> route-level metrics + visual proof
+```
+
+The accepted runtime must answer and save evidence for all five questions:
+
+```text
+Where does the robot think it is in the remembered scene?
+What physical floor geometry does it believe is free/occupied/unknown/risky?
+What parts of the scene has it already seen or covered?
+What does it predict will happen over the next few states for each candidate?
+Which bounded trajectory/cmd_vel does it choose, and why?
+```
+
+Goal27 must satisfy the original hard constraints:
 
 - real public robot or robot-mounted data only for milestone metrics;
 - no classical SLAM stack as the core brain;
@@ -131,12 +158,19 @@ original hard constraints:
   temporal-diversity penalties, randomization, or hand-authored alternation;
 - accepted pose/localization metrics must say whether they are independent
   ground truth, odometry proxy, learned pose, or leakage ablation.
+- the scene map must be used by trajectory scoring or future rollout; saving a
+  map that the policy ignores is not enough.
 
 Goal27 does not pass unless the main report shows all of these:
 
 ```text
 real_public_data_only=true
 runtime_api_step_count>0
+scene_memory_used_for_policy=true
+scene_memory_artifact_exists=true
+scene_pose_trace_artifact_exists=true
+physical_geometry_visual_exists=true
+future_state_visual_exists=true
 teacher_runtime_dependency=false
 future_or_groundtruth_runtime_dependency=false
 route_pose_leakage_ablation_fraction=0.0
@@ -155,6 +189,19 @@ latency_step_p95_ms<=100.0
 
 If any of those fail, Codex must keep iterating or mark the run blocked with the
 exact artifact proving why. It must not call the run accepted.
+
+Do not accept:
+
+- a command that only stages data, trains a model, or writes offline reports;
+- a runtime that creates scene memory but does not use it for decisions;
+- pose numbers that are only odometry-vs-odometry while presented as
+  localization;
+- future prediction that only predicts unknown and has zero free/occupied
+  signal;
+- action diversity from hand-written penalties instead of learned policy
+  outputs;
+- a visual artifact that does not show scene geometry, pose trace, selected
+  path, and future-state prediction.
 
 ## What To Build Next
 

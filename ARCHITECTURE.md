@@ -39,6 +39,27 @@ New broad work should connect into this path. A model class, CLI, dataset, or
 report that cannot be used by replay-as-live runtime needs a clear reason to
 exist.
 
+## Required Scene Brain
+
+The next accepted system must expose a runtime scene/world state, not only
+per-frame artifacts. Use a name that fits the codebase, but the runtime object
+must carry this information across ticks:
+
+```text
+SceneState
+  pose_estimate_in_scene
+  local_bev
+  scene_bev / fused_memory_map
+  uncertainty_unknown_map
+  seen_or_coverage_map
+  future_state_predictions_by_candidate
+  selected_trajectory_or_cmd_vel
+```
+
+`SceneState` must be updated inside `Brain.step(...)` or the equivalent online
+runtime API and must influence future rollout or trajectory scoring. A saved
+scene map that the decision code never consumes is only a debug artifact.
+
 ## Runtime processes
 
 Current software-only processes:
@@ -246,6 +267,7 @@ Prefer work that:
 - makes scene memory measurably useful:
   `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and nonzero
   future free/occupied metrics when labels exist;
+- makes scene memory part of the decision path, not just a report artifact;
 - adds watchdog, stop, recovery, uncertainty, or fallback behavior in replay
   with measurable artifacts.
 

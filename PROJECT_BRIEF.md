@@ -91,6 +91,19 @@ future free/occupied prediction was zero, and pose was odometry-proxy only.
 A learned scene-level robot-brain milestone on multiple route-heldout public
 robot routes.
 
+This is not just "run modeld." The milestone must create a connected scene
+brain:
+
+```text
+real public robot route
+  -> replay-as-live sensor tick
+  -> online memory update
+  -> robot pose estimate in the remembered scene
+  -> physical scene geometry for traversal
+  -> future-state prediction for candidate trajectories
+  -> learned trajectory choice / bounded cmd_vel proposal
+```
+
 The milestone is complete only when:
 
 - replay uses real robot or robot-mounted public data only;
@@ -108,10 +121,14 @@ The milestone is complete only when:
 - scene memory improves measured physical geometry:
   `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and
   nonzero free/occupied future metrics when labels exist;
+- scene memory is used by trajectory scoring or future rollout, not just saved
+  after the fact;
 - direct RGB-D/RGB-IR runtime is a trained student path, not only a patch-stat
   adapter into a DINO-trained model;
 - pose/localization metrics identify whether they are learned, odometry proxy,
   independent ground-truth eval, or leakage ablation;
+- visual artifacts show real physical geometry, pose trace, selected candidate
+  trajectory, and next-state prediction;
 - p50/p95 latency, unsafe selections, stop/recovery reasons, and leakage flags
   are written to JSON;
 - tests pass and `CURRENT_STATUS.md` records the exact artifact path.

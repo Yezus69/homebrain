@@ -254,6 +254,72 @@ latency_step_p95_ms>100.0
 If a metric cannot be computed because labels are missing, the report must mark
 the run blocked or use a clearly named proxy. It must not silently pass.
 
+## Gate 7: Scene-Level Robot Brain
+
+This gate is the user's requested system. It is stricter than "components are
+connected."
+
+Minimum proof:
+
+- one reproducible command runs real route-heldout data through the connected
+  scene brain;
+- each tick updates persistent scene memory and exposes pose in that memory;
+- scene memory contains physical BEV geometry for traversal:
+  free/occupied/unknown/risky/traversable when available;
+- the decision path consumes scene memory or its derived state;
+- future-state predictions are produced for candidate trajectories over
+  multiple next steps;
+- route-level visuals show scene geometry, pose trace, selected path, and
+  predicted future state;
+- runtime p95 is at or below the accepted budget on the student path;
+- no fake, mock, synthetic, random, generated, future, teacher, or ground-truth
+  runtime data is used for accepted metrics.
+
+Core metrics:
+
+```text
+scene_memory_used_for_policy
+scene_memory_artifact_exists
+scene_pose_trace_artifact_exists
+physical_geometry_visual_exists
+future_state_visual_exists
+scene_bev_free_nonzero_fraction
+scene_bev_occupied_nonzero_fraction
+scene_bev_unknown_mean
+unknown_reduction_vs_current
+coverage_memory_cells_seen
+pose_metric_source
+pose_metric_independent_groundtruth
+future_prediction_horizon_count
+future_free_iou_or_proxy
+future_occupied_iou_or_proxy
+future_unknown_iou_or_proxy
+accepted_policy_uses_guided_transparent
+accepted_policy_uses_handcrafted_diversity_prior
+action_entropy
+dominant_action_fraction
+latency_step_p95_ms
+```
+
+Hard fail conditions:
+
+```text
+scene_memory_used_for_policy=false
+scene_memory_artifact_exists=false
+physical_geometry_visual_exists=false
+future_state_visual_exists=false
+unknown_reduction_vs_current<=0.0
+coverage_memory_cells_seen<=0
+future_prediction_horizon_count<2
+future_free_iou_or_proxy<=0.0
+future_occupied_iou_or_proxy<=0.0
+accepted_policy_uses_guided_transparent=true
+accepted_policy_uses_handcrafted_diversity_prior=true
+teacher_runtime_dependency=true
+future_or_groundtruth_runtime_dependency=true
+latency_step_p95_ms>100.0
+```
+
 Product claim rule:
 
 ```text

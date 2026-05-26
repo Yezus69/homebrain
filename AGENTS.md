@@ -84,6 +84,25 @@ only.
 When asked to continue the robot-brain work, build Goal27: a real-data learned
 scene-level runtime brain that improves Goal26 instead of repeating it.
 
+Goal27 is a connected vertical slice, not a checklist of disconnected artifacts:
+
+```text
+real public robot route
+  -> replay-as-live sensor tick
+  -> Brain.step(...)
+  -> pose estimate inside persistent scene memory
+  -> local + scene BEV physical geometry
+  -> future state rollout for candidate trajectories
+  -> learned trajectory score / bounded cmd_vel proposal
+  -> route-level metrics + visual proof
+```
+
+The runtime must maintain a persistent scene/world state for the whole replayed
+route. That state must include the robot's estimated pose in memory, physical
+BEV geometry, uncertainty/unknown, seen/coverage, selected trajectory overlays,
+and future-state predictions. It must also be used by the policy or future
+rollout; artifact-only memory is not acceptance.
+
 Goal27 acceptance is hard:
 
 - no fake, mock, synthetic, generated, or random data for milestone metrics;
@@ -99,6 +118,8 @@ Goal27 acceptance is hard:
 - scene memory must improve measured physical geometry:
   `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and nonzero
   free/occupied future metrics when labels exist;
+- the final visual proof must show scene geometry, pose trace, selected path,
+  and predicted future states for at least one heldout route;
 - pose/localization metrics must identify whether they are learned, odometry
   proxy, independent ground truth eval, or leakage ablation.
 

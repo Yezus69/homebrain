@@ -163,6 +163,22 @@ RGB/IR student path, improve measured scene memory and physical BEV geometry,
 predict nonzero future free/occupied/unknown state for candidate actions, and
 select bounded trajectories with learned non-collapsed scoring.
 
+The required runtime shape is:
+
+```text
+real public robot route
+  -> replay-as-live sensor tick
+  -> Brain.step(...)
+  -> persistent scene memory with pose estimate
+  -> physical BEV geometry for traversal
+  -> next-state prediction for candidate trajectories
+  -> learned trajectory choice / bounded cmd_vel proposal
+```
+
+The scene memory must be part of the decision path. A scene-memory NPZ or visual
+written after replay is not enough if the policy/future rollout did not consume
+it.
+
 Goal27 must not count these as acceptance:
 
 ```text
@@ -179,6 +195,9 @@ Minimum accepted report flags/metrics:
 ```text
 accepted_policy_uses_guided_transparent=false
 accepted_policy_uses_handcrafted_diversity_prior=false
+scene_memory_used_for_policy=true
+physical_geometry_visual_exists=true
+future_state_visual_exists=true
 teacher_runtime_dependency=false
 future_or_groundtruth_runtime_dependency=false
 route_pose_leakage_ablation_fraction=0.0
@@ -186,6 +205,7 @@ action_entropy>0.0
 dominant_action_fraction<1.0
 unknown_reduction_vs_current>0.0
 coverage_memory_cells_seen>0
+future_prediction_horizon_count>=2
 future_free_iou_or_proxy>0.0
 future_occupied_iou_or_proxy>0.0
 latency_step_p95_ms<=100.0
