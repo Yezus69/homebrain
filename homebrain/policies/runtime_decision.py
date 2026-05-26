@@ -126,6 +126,8 @@ def decide_trajectory(
     learned_logits: np.ndarray | None = None
     learned_features: np.ndarray | None = None
     future_rollout_arrays: dict[str, np.ndarray] = {}
+    future_scores: dict[str, np.ndarray | list[str] | str] | None = None
+    future_selected_candidate_id: str | None = None
     if future_rollout_scorer is not None:
         future_scores = score_local_bev_with_future_rollout(
             model=future_rollout_scorer.model,  # type: ignore[arg-type]
@@ -136,22 +138,14 @@ def decide_trajectory(
         )
         _validate_future_candidate_ids(candidates, future_scores)
         lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
-        selected_index_raw, guided_scores = _select_future_rollout_candidate(
+        future_selected_index, guided_scores = _select_future_rollout_candidate(
             candidates=candidates,
             future_scores=future_scores,
             transparent_decision=transparent_decision,
             selection_mode=future_rollout_selection_mode,
             selection_history=selection_history,
         )
-        selected_candidate_id = candidates[selected_index_raw].id
-        candidate_records = _future_rollout_candidate_score_records(
-            candidates=candidates,
-            future_scores=future_scores,
-            selected_candidate_id=selected_candidate_id,
-        )
-        _attach_transparent_scores(candidate_records, transparent_decision)
-        scorer_name = FUTURE_BEV_ROLLOUT_V1_SOURCE
-        scorer_mode = "future_rollout"
+        future_selected_candidate_id = candidates[future_selected_index].id
         future_rollout_arrays = {
             "future_rollout_candidate_collision": np.asarray(future_scores["candidate_collision"], dtype=np.float32),
             "future_rollout_candidate_future_collision": np.asarray(
@@ -177,15 +171,7 @@ def decide_trajectory(
             ),
             "future_rollout_horizons_s": np.asarray(future_scores["future_horizons_s"], dtype=np.float32),
         }
-    elif learned_scorer is None:
-        selected_candidate_id = transparent_decision.selected_candidate_id
-        candidate_records = _transparent_candidate_score_records(
-            candidates=candidates,
-            decision=transparent_decision,
-        )
-        scorer_name = TRANSPARENT_TRAJECTORY_SCORER_SOURCE
-        scorer_mode = "transparent"
-    else:
+    if learned_scorer is not None:
         learned_logits, selected_candidate_id, learned_features = score_local_bev_with_model(
             model=learned_scorer.model,  # type: ignore[arg-type]
             bev=bev,
@@ -202,8 +188,33 @@ def decide_trajectory(
             selected_candidate_id=selected_candidate_id,
         )
         _attach_transparent_scores(candidate_records, transparent_decision)
+        if future_scores is not None and future_selected_candidate_id is not None:
+            _attach_future_rollout_scores(
+                candidate_records,
+                candidates=candidates,
+                future_scores=future_scores,
+                future_selected_candidate_id=future_selected_candidate_id,
+            )
         scorer_name = TRAJECTORY_SCORER_V0_SOURCE
         scorer_mode = "learned"
+    elif future_scores is not None and future_selected_candidate_id is not None:
+        selected_candidate_id = future_selected_candidate_id
+        candidate_records = _future_rollout_candidate_score_records(
+            candidates=candidates,
+            future_scores=future_scores,
+            selected_candidate_id=selected_candidate_id,
+        )
+        _attach_transparent_scores(candidate_records, transparent_decision)
+        scorer_name = FUTURE_BEV_ROLLOUT_V1_SOURCE
+        scorer_mode = "future_rollout"
+    else:
+        selected_candidate_id = transparent_decision.selected_candidate_id
+        candidate_records = _transparent_candidate_score_records(
+            candidates=candidates,
+            decision=transparent_decision,
+        )
+        scorer_name = TRANSPARENT_TRAJECTORY_SCORER_SOURCE
+        scorer_mode = "transparent"
 
     selected_index = _selected_candidate_index(candidates, selected_candidate_id)
     cmd_vel_proposal = _bounded_cmd_vel_proposal(candidates[selected_index])
@@ -212,6 +223,12 @@ def decide_trajectory(
     selected_metrics = _score_dict_for_candidate(transparent_decision, selected_candidate_id)
     selected_record_score = _score_dict_from_records(candidate_records, selected_candidate_id)
     selected_metrics.update(selected_record_score)
+    selected_future_score = _nested_score_dict_from_records(
+        candidate_records,
+        selected_candidate_id,
+        "future_rollout_trajectory_score",
+    )
+    selected_metrics.update(selected_future_score)
     artifact_arrays: dict[str, np.ndarray] = {
         "trajectory_selected_index": np.asarray([selected_index], dtype=np.int64),
         "trajectory_transparent_total_scores": np.asarray(
@@ -291,7 +308,12 @@ def decide_trajectory(
                 "future_rollout_raw_argmin_candidate_id": candidates[
                     int(np.argmin(future_rollout_arrays["future_rollout_candidate_lower_is_better_score"]))
                 ].id,
-                "temporal_diversity_prior_enabled": future_rollout_selection_mode != "argmin",
+                "future_rollout_candidate_selected_for_prediction": future_selected_candidate_id,
+                "future_rollout_policy_selection_role": "prediction_context"
+                if learned_scorer is not None
+                else "runtime_selector",
+                "temporal_diversity_prior_enabled": future_rollout_selection_mode != "argmin"
+                and learned_scorer is None,
                 "future_rollout_replay_only": True,
                 "future_rollout_control_safe": False,
             }
@@ -358,6 +380,29 @@ def _attach_transparent_scores(records: list[JsonDict], decision: TrajectoryDeci
             "control_safe": False,
             "product_training_approved": False,
         }
+
+
+def _attach_future_rollout_scores(
+    records: list[JsonDict],
+    *,
+    candidates: list[CandidateTrajectory],
+    future_scores: dict[str, np.ndarray | list[str] | str],
+    future_selected_candidate_id: str,
+) -> None:
+    future_records = _future_rollout_candidate_score_records(
+        candidates=candidates,
+        future_scores=future_scores,
+        selected_candidate_id=future_selected_candidate_id,
+    )
+    by_id = {
+        str(record.get("id", record.get("trajectory_id", ""))): record.get("trajectory_score")
+        for record in future_records
+    }
+    for record in records:
+        candidate_id = str(record.get("id", record.get("trajectory_id", "")))
+        score = by_id.get(candidate_id)
+        if isinstance(score, dict):
+            record["future_rollout_trajectory_score"] = dict(score)
 
 
 def _future_rollout_candidate_score_records(
@@ -508,6 +553,16 @@ def _score_dict_from_records(records: list[JsonDict], candidate_id: str) -> Json
         if record_id != candidate_id:
             continue
         score = record.get("trajectory_score")
+        return dict(score) if isinstance(score, dict) else {}
+    return {}
+
+
+def _nested_score_dict_from_records(records: list[JsonDict], candidate_id: str, field: str) -> JsonDict:
+    for record in records:
+        record_id = str(record.get("id", record.get("trajectory_id", "")))
+        if record_id != candidate_id:
+            continue
+        score = record.get(field)
         return dict(score) if isinstance(score, dict) else {}
     return {}
 

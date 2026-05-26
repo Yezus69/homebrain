@@ -159,8 +159,14 @@ def run_openloris_runtime_replay(
         {
             "scene_memory": scene_memory,
             "scene_memory_artifact": scene_memory.get("scene_memory_npz"),
+            "scene_pose_trace_artifact": scene_memory.get("scene_pose_trace_artifact"),
             "scene_memory_visual": scene_memory.get("scene_memory_visual"),
             "current_local_bev_artifact": scene_memory.get("current_local_bev_artifact"),
+            "scene_memory_used_for_policy": str(report.get("policy_bev_source")) == "memory",
+            "scene_bev_free_nonzero_fraction": scene_memory.get("scene_bev_free_nonzero_fraction"),
+            "scene_bev_occupied_nonzero_fraction": scene_memory.get("scene_bev_occupied_nonzero_fraction"),
+            "coverage_memory_cells_seen": scene_memory.get("coverage_memory_cells_seen"),
+            "future_prediction_horizon_count": scene_memory.get("future_prediction_horizon_count"),
             "observed_cell_ratio": scene_memory.get("observed_cell_ratio"),
             "scene_unknown_mean": scene_memory.get("scene_unknown_mean"),
             "current_unknown_mean": scene_memory.get("current_unknown_mean"),
@@ -226,6 +232,7 @@ def write_runtime_scene_memory_artifacts(
         "risky": np.zeros((grid_h, grid_w), dtype=np.float32),
         "uncertainty": np.zeros((grid_h, grid_w), dtype=np.float32),
         "seen": np.zeros((grid_h, grid_w), dtype=np.float32),
+        "future_free": np.zeros((grid_h, grid_w), dtype=np.float32),
         "future_unknown": np.zeros((grid_h, grid_w), dtype=np.float32),
         "future_occupied": np.zeros((grid_h, grid_w), dtype=np.float32),
     }
@@ -236,6 +243,7 @@ def write_runtime_scene_memory_artifacts(
 
     last_future = None
     last_current = None
+    last_pose = None
     for record in records:
         output_event = record["event"]
         pose = record["pose"]
@@ -258,11 +266,13 @@ def write_runtime_scene_memory_artifacts(
         future = record.get("future_bev")
         if future is not None:
             latest = np.asarray(future[-1], dtype=np.float32)
+            np.add.at(sums["future_free"], indices, latest[0][valid])
             np.add.at(sums["future_unknown"], indices, latest[2][valid])
             np.add.at(sums["future_occupied"], indices, latest[1][valid])
             np.add.at(future_counts, indices, 1.0)
             last_future = future
         last_current = record["current_stack"]
+        last_pose = pose
         _add_selected_overlay(
             selected_overlay,
             output_event,
@@ -283,19 +293,34 @@ def write_runtime_scene_memory_artifacts(
     scene = {
         key: (value / denom).astype(np.float32)
         for key, value in sums.items()
-        if key not in {"future_unknown", "future_occupied"}
+        if key not in {"future_free", "future_unknown", "future_occupied"}
     }
     scene["seen"] = np.clip(scene["seen"], 0.0, 1.0)
     future_denom = np.maximum(future_counts, np.float32(1.0))
+    future_free = (sums["future_free"] / future_denom).astype(np.float32)
     future_unknown = (sums["future_unknown"] / future_denom).astype(np.float32)
     future_occupied = (sums["future_occupied"] / future_denom).astype(np.float32)
-    current_unknown_mean = float(np.mean(last_current[2])) if last_current is not None else 0.0
     observed_cell_ratio = float(np.count_nonzero(counts > 0.0) / max(counts.size, 1))
     scene_unknown_values = scene["unknown"][counts > 0.0]
     scene_unknown_mean = float(np.mean(scene_unknown_values)) if scene_unknown_values.size else 0.0
+    current_only_unknown = np.ones((grid_h, grid_w), dtype=np.float32)
+    if last_current is not None and last_pose is not None:
+        grid_rows, grid_cols = _local_to_scene_indices(
+            local_shape=(height, width),
+            pose=last_pose,
+            meters_per_cell=meters_per_cell,
+            x_min=x_min,
+            y_min=y_min,
+            scene_shape=(grid_h, grid_w),
+        )
+        valid = (grid_rows >= 0) & (grid_rows < grid_h) & (grid_cols >= 0) & (grid_cols < grid_w)
+        current_only_unknown[grid_rows[valid], grid_cols[valid]] = last_current[2][valid]
+    current_unknown_values = current_only_unknown[counts > 0.0]
+    current_unknown_mean = float(np.mean(current_unknown_values)) if current_unknown_values.size else 0.0
     pose_metrics = _pose_metrics(route_events, outputs)
     safe_name = _safe_id(str(name))
     npz_path = output / f"{safe_name}_scene_memory.npz"
+    pose_trace_path = output / f"{safe_name}_pose_trace.npz"
     arrays = {
         "scene_bev_free_prob": scene["free"].astype(np.float32),
         "scene_bev_occupied_prob": scene["occupied"].astype(np.float32),
@@ -307,6 +332,7 @@ def write_runtime_scene_memory_artifacts(
         "current_local_bev": last_current.astype(np.float32) if last_current is not None else np.zeros((5, height, width), dtype=np.float32),
         "robot_pose_trace": poses.astype(np.float32),
         "selected_candidate_trajectory_overlay": np.clip(selected_overlay, 0.0, 1.0).astype(np.float32),
+        "predicted_future_free_overlay": future_free.astype(np.float32),
         "predicted_future_unknown_overlay": future_unknown.astype(np.float32),
         "predicted_future_occupied_overlay": future_occupied.astype(np.float32),
         "predicted_future_bev": last_future.astype(np.float32)
@@ -317,9 +343,19 @@ def write_runtime_scene_memory_artifacts(
         "meters_per_cell": np.asarray([meters_per_cell], dtype=np.float32),
     }
     write_deterministic_npz(npz_path, arrays)
+    write_deterministic_npz(
+        pose_trace_path,
+        {
+            "robot_pose_trace": poses.astype(np.float32),
+            "pose_trace_overlay": np.clip(pose_overlay, 0.0, 1.0).astype(np.float32),
+            "scene_grid_origin_xy_m": np.asarray([x_min, y_min], dtype=np.float32),
+            "meters_per_cell": np.asarray([meters_per_cell], dtype=np.float32),
+        },
+    )
     visual = _scene_memory_contact_sheet(
         scene=scene,
         current=last_current,
+        future_free=future_free,
         future_unknown=future_unknown,
         future_occupied=future_occupied,
         selected_overlay=np.clip(selected_overlay, 0.0, 1.0),
@@ -332,6 +368,7 @@ def write_runtime_scene_memory_artifacts(
         "route": route.as_posix(),
         "modeld_log": modeld.as_posix(),
         "scene_memory_npz": npz_path.as_posix(),
+        "scene_pose_trace_artifact": pose_trace_path.as_posix(),
         "scene_memory_visual": ppm_path.as_posix(),
         "current_local_bev_artifact": outputs[-1].local_bev_ref,
         "step_count": len(records),
@@ -340,11 +377,17 @@ def write_runtime_scene_memory_artifacts(
         "scene_grid_shape": [grid_h, grid_w],
         "pose_trace_count": int(poses.shape[0]),
         "observed_cell_ratio": observed_cell_ratio,
+        "scene_bev_free_nonzero_fraction": float(np.count_nonzero(scene["free"] > 0.05) / max(scene["free"].size, 1)),
+        "scene_bev_occupied_nonzero_fraction": float(
+            np.count_nonzero(scene["occupied"] > 0.05) / max(scene["occupied"].size, 1)
+        ),
         "current_unknown_mean": current_unknown_mean,
         "scene_unknown_mean": scene_unknown_mean,
         "unknown_reduction_vs_current": float(current_unknown_mean - scene_unknown_mean),
+        "coverage_memory_cells_seen": int(np.count_nonzero(scene["seen"] > 0.0)),
         "selected_candidate_overlay_nonzero_count": int(np.count_nonzero(selected_overlay > 0.0)),
         "predicted_future_overlay_available": bool(last_future is not None),
+        "future_prediction_horizon_count": int(last_future.shape[0]) if last_future is not None else 0,
         "frame_count_with_future_prediction": int(np.count_nonzero(future_counts > 0.0)),
         "frame_count_with_scene_memory": len(records),
         "teacher_runtime_dependency": any(
@@ -673,6 +716,7 @@ def _scene_memory_contact_sheet(
     *,
     scene: dict[str, np.ndarray],
     current: np.ndarray | None,
+    future_free: np.ndarray,
     future_unknown: np.ndarray,
     future_occupied: np.ndarray,
     selected_overlay: np.ndarray,
@@ -700,7 +744,7 @@ def _scene_memory_contact_sheet(
             size=(256, 256),
         )
     future_rgb = _bev_rgb(
-        free=np.zeros_like(future_unknown, dtype=np.float32),
+        free=future_free,
         occupied=future_occupied,
         unknown=future_unknown,
         risky=future_occupied,

@@ -24,6 +24,8 @@ Implemented:
   motion action labels, and closed-loop replay reports;
 - Future BEV Rollout v1 pack builder, dataset, model, train/eval CLIs, and
   replay-only runtime candidate scoring option;
+- deterministic direct RGB-D student feature artifacts and a direct RGB-D
+  runtime path that does not require DINO at the control tick;
 - scene-level runtime memory artifacts with fused scene BEV, current local BEV,
   pose trace, uncertainty/seen maps, selected trajectory overlays, and predicted
   future overlays.
@@ -36,7 +38,7 @@ Not implemented:
 - robust dynamic-risk labels;
 - strong free-space traversability labels;
 - global home-scale coverage memory;
-- non-collapsed route-heldout runtime policy across multiple real routes;
+- robust non-collapsed route-heldout runtime policy across many real routes;
 - a policy good enough to drive a real cleaning robot.
 
 ## Current Policy
@@ -78,7 +80,79 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Goal26: real public OpenLORIS scene-level `Brain.step(...)` runtime milestone.
+Goal27 / Gate 7: real public OpenLORIS scene-level robot-brain vertical slice.
+
+## Goal27 Result
+
+Objective: improve Goal26 into a learned scene-level vertical slice using real
+OpenLORIS robot data, direct RGB-D student features, online `Brain.step(...)`,
+persistent scene memory with pose, learned FutureBEV candidate scoring, bounded
+`cmd_vel` proposals, route metrics, and scene/future visual proof.
+
+Command:
+
+```text
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal27_scene_robot_brain_gate7_final --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 40 --future-steps 40 --trajectory-steps 120 --runtime-max-frames 96 --student-feature-source direct_rgbd --runtime-feature-source direct_rgbd --runtime-policy-source future_rollout --max-spatial-folds 2 --future-rollout-selection-mode argmin --skip-direct-rgbd-runtime-slice --skip-dino-features
+```
+
+Artifacts:
+
+```text
+runs/goal27_scene_robot_brain_gate7_final/milestone_report.json
+runs/goal27_scene_robot_brain_gate7_final/runtime/heldout_corridor1_1_direct_rgbd/runtime_report.json
+runs/goal27_scene_robot_brain_gate7_final/runtime/heldout_corridor1_1_direct_rgbd/scene_memory/corridor1_1_scene_memory.npz
+runs/goal27_scene_robot_brain_gate7_final/runtime/heldout_corridor1_1_direct_rgbd/scene_memory/corridor1_1_scene_memory.ppm
+runs/goal27_scene_robot_brain_gate7_final/runtime/heldout_corridor1_1_direct_rgbd/scene_memory/corridor1_1_pose_trace.npz
+```
+
+Key metrics: `accepted_goal27_gate7=true`, runtime API steps `96`, learned
+runtime selector `future_rollout`, action entropy `1.0308662510933242`,
+dominant action fraction `0.6145833333333334`, p95 step latency
+`86.229475 ms`, scene memory used for policy `true`, unknown reduction vs
+current `0.8880981989204884`, coverage cells seen `1150`, future horizon count
+`3`, future free/occupied IoU proxies `0.051054653624353685 /
+0.04175194433074089`, teacher runtime dependency `false`,
+future/ground-truth runtime dependency `false`, route-pose leakage fraction
+`0.0`, raw PWM `false`, control safe `false`.
+
+Important caveat: the v5 behavior-cloning trajectory-label pack for the
+training routes was degenerate (`stop=44/44`). Gate7 therefore uses learned
+FutureBEV argmin candidate scoring as the accepted learned runtime policy, not
+the behavior-cloning trajectory scorer. This is replay-only proof, not a
+control-safe robot brain.
+
+Files changed:
+
+```text
+homebrain/brain/direct_rgbd_features.py
+homebrain/brain/modeld.py
+homebrain/eval/closed_loop_replay_report.py
+homebrain/policies/runtime_decision.py
+homebrain/runtime/replay_openloris_brain.py
+homebrain/tools/run_openloris_route_heldout_milestone.py
+homebrain/train/spatial_dataset.py
+homebrain/train/train_future_bev_rollout_v1.py
+tests/test_direct_rgbd_features.py
+CURRENT_STATUS.md
+BLOCKERS.md
+```
+
+Verification:
+
+```text
+python -m py_compile homebrain\brain\direct_rgbd_features.py homebrain\brain\modeld.py homebrain\tools\run_openloris_route_heldout_milestone.py
+python -m pytest tests\test_direct_rgbd_features.py tests\test_goal20a_closed_loop_replay.py tests\test_future_bev_rollout_v1.py -q
+git diff --check
+python -m pytest -q
+```
+
+Pass/fail: focused tests passed with `12 passed`; full pytest passed with
+`129 passed in 199.37s`; `git diff --check` passed with only Git line-ending
+warnings on Windows.
+
+Recommended next step: fix the degenerate behavior-cloning action labels and
+prove the learned policy remains non-collapsed across more real heldout routes,
+not just the corridor heldout slice.
 
 ## Goal26 Result
 
@@ -157,59 +231,23 @@ real routes.
 
 ## Active Next Goal
 
-Goal27 must implement the original scene-level robot-brain request, not repeat
-Goal26 plumbing. A successful run must train/evaluate a real direct RGB-D or
-RGB/IR student path, improve measured scene memory and physical BEV geometry,
-predict nonzero future free/occupied/unknown state for candidate actions, and
-select bounded trajectories with learned non-collapsed scoring.
+Goal28 should turn the Goal27 single-route Gate7 proof into a more credible
+robot-brain learning loop instead of widening demo plumbing.
 
-The required runtime shape is:
+Priority repairs:
 
 ```text
-real public robot route
-  -> replay-as-live sensor tick
-  -> Brain.step(...)
-  -> persistent scene memory with pose estimate
-  -> physical BEV geometry for traversal
-  -> next-state prediction for candidate trajectories
-  -> learned trajectory choice / bounded cmd_vel proposal
+stage more real public robot routes
+  -> train direct RGB-D / RGB-IR student on broader route-heldout splits
+  -> fix degenerate behavior-cloning trajectory labels
+  -> improve physical free/traversable labels and dynamic-risk evidence
+  -> evaluate FutureBEV policy quality beyond action entropy
+  -> keep runtime teacher-free, leakage-free, bounded, and replay-only
 ```
 
-The scene memory must be part of the decision path. A scene-memory NPZ or visual
-written after replay is not enough if the policy/future rollout did not consume
-it.
-
-Goal27 must not count these as acceptance:
-
-```text
-guided_transparent
-temporal diversity prior
-hand-weighted action alternation
-patch-stat direct RGB-D adapter only
-odometry-vs-odometry pose metric as independent localization
-scene-memory artifact existence without unknown reduction
-```
-
-Minimum accepted report flags/metrics:
-
-```text
-accepted_policy_uses_guided_transparent=false
-accepted_policy_uses_handcrafted_diversity_prior=false
-scene_memory_used_for_policy=true
-physical_geometry_visual_exists=true
-future_state_visual_exists=true
-teacher_runtime_dependency=false
-future_or_groundtruth_runtime_dependency=false
-route_pose_leakage_ablation_fraction=0.0
-action_entropy>0.0
-dominant_action_fraction<1.0
-unknown_reduction_vs_current>0.0
-coverage_memory_cells_seen>0
-future_prediction_horizon_count>=2
-future_free_iou_or_proxy>0.0
-future_occupied_iou_or_proxy>0.0
-latency_step_p95_ms<=100.0
-```
+Do not regress the Goal27 hard gates: no `guided_transparent`, no temporal
+diversity prior, no runtime teacher dependency, no route-pose leakage, no raw
+PWM, and `control_safe=false` until a real safety stack exists.
 
 ## Goal25 Result
 

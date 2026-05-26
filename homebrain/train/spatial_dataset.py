@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from homebrain.data.spatial_dataset import SPATIAL_MANIFEST_FILE, load_example_npz, read_json
+from homebrain.brain.direct_rgbd_features import DIRECT_RGBD_FEATURE_TEACHER_NAME
 from homebrain.messages.schema import FrameEvent, JsonDict
 from homebrain.teachers.artifacts import file_sha256, frame_key, load_array, load_teacher_manifest
 
@@ -40,10 +41,16 @@ class DINOFeatureStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.manifest = load_teacher_manifest(self.root)
-        if self.manifest.get("teacher_name") != "dino":
-            raise ValueError(f"expected DINO teacher artifacts, got {self.manifest.get('teacher_name')!r}")
-        if self.manifest.get("mock") is True and self.manifest.get("real_perception") is not False:
+        teacher_name = self.manifest.get("teacher_name")
+        if teacher_name not in {"dino", DIRECT_RGBD_FEATURE_TEACHER_NAME}:
+            raise ValueError(f"expected patch/cls feature artifacts, got {teacher_name!r}")
+        if teacher_name == "dino" and self.manifest.get("mock") is True and self.manifest.get("real_perception") is not False:
             raise ValueError("mock DINO artifacts must be marked real_perception=false")
+        if teacher_name == DIRECT_RGBD_FEATURE_TEACHER_NAME:
+            if self.manifest.get("mock") is not False or self.manifest.get("synthetic") is not False:
+                raise ValueError("direct RGB-D feature artifacts must not be mock or synthetic")
+            if self.manifest.get("real_perception") is not True:
+                raise ValueError("direct RGB-D feature artifacts must be marked real_perception=true")
         self.records: dict[str, FeatureRecord] = {}
         for frame_record in self.manifest.get("frames", []):
             if not isinstance(frame_record, dict):

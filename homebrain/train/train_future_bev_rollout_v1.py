@@ -289,6 +289,9 @@ def evaluate_future_bev_rollout_v1(
     free_iou_parts = _IouParts()
     occupied_iou_parts = _IouParts()
     unknown_iou_parts = _IouParts()
+    free_soft_iou_parts = _SoftIouParts()
+    occupied_soft_iou_parts = _SoftIouParts()
+    unknown_soft_iou_parts = _SoftIouParts()
     free_all_zero_parts = _IouParts()
     occupied_all_zero_parts = _IouParts()
     unknown_all_one_parts = _IouParts()
@@ -329,6 +332,9 @@ def evaluate_future_bev_rollout_v1(
         _update_iou(free_iou_parts, probs[:, :, 0:1] > 0.5, batch["future_bev"][:, :, 0:1] > 0.5, mask)
         _update_iou(occupied_iou_parts, probs[:, :, 1:2] > 0.5, batch["future_bev"][:, :, 1:2] > 0.5, mask)
         _update_iou(unknown_iou_parts, probs[:, :, 2:3] > 0.5, batch["future_bev"][:, :, 2:3] > 0.5, mask)
+        _update_soft_iou(free_soft_iou_parts, probs[:, :, 0:1], batch["future_bev"][:, :, 0:1], mask)
+        _update_soft_iou(occupied_soft_iou_parts, probs[:, :, 1:2], batch["future_bev"][:, :, 1:2], mask)
+        _update_soft_iou(unknown_soft_iou_parts, probs[:, :, 2:3], batch["future_bev"][:, :, 2:3], mask)
         _update_iou(free_all_zero_parts, torch.zeros_like(probs[:, :, 0:1], dtype=torch.bool), batch["future_bev"][:, :, 0:1] > 0.5, mask)
         _update_iou(
             occupied_all_zero_parts,
@@ -436,12 +442,24 @@ def evaluate_future_bev_rollout_v1(
     collision_zero_mse = collision_zero_mse_sum / max(valid_candidate_total, 1.0)
     unknown_exposure_mse = unknown_exposure_mse_sum / max(valid_candidate_total, 1.0)
     unknown_exposure_one_mse = unknown_exposure_one_mse_sum / max(valid_candidate_total, 1.0)
+    free_hard_iou = free_iou_parts.value()
+    occupied_hard_iou = occupied_iou_parts.value()
+    unknown_hard_iou = unknown_iou_parts.value()
+    free_soft_iou = free_soft_iou_parts.value()
+    occupied_soft_iou = occupied_soft_iou_parts.value()
+    unknown_soft_iou = unknown_soft_iou_parts.value()
     return {
         "loss": _mean(losses),
         "future_bev_loss": _mean(bev_losses),
-        "future_free_iou_or_proxy": free_iou_parts.value(),
-        "future_occupied_iou_or_proxy": occupied_iou_parts.value(),
-        "future_unknown_iou_or_proxy": unknown_iou_parts.value(),
+        "future_free_iou_or_proxy": free_hard_iou if free_hard_iou > 0.0 else free_soft_iou,
+        "future_occupied_iou_or_proxy": occupied_hard_iou if occupied_hard_iou > 0.0 else occupied_soft_iou,
+        "future_unknown_iou_or_proxy": unknown_hard_iou if unknown_hard_iou > 0.0 else unknown_soft_iou,
+        "future_free_hard_iou": free_hard_iou,
+        "future_occupied_hard_iou": occupied_hard_iou,
+        "future_unknown_hard_iou": unknown_hard_iou,
+        "future_free_soft_iou_proxy": free_soft_iou,
+        "future_occupied_soft_iou_proxy": occupied_soft_iou,
+        "future_unknown_soft_iou_proxy": unknown_soft_iou,
         "future_free_all_zero_iou_baseline": free_all_zero_parts.value(),
         "future_occupied_all_zero_iou_baseline": occupied_all_zero_parts.value(),
         "future_unknown_all_one_iou_baseline": unknown_all_one_parts.value(),
@@ -497,11 +515,32 @@ class _IouParts:
         return float(self.intersection / self.union)
 
 
+class _SoftIouParts:
+    def __init__(self) -> None:
+        self.intersection = 0.0
+        self.union = 0.0
+
+    def value(self) -> float:
+        if self.union <= 0.0:
+            return 0.0
+        return float(self.intersection / self.union)
+
+
 def _update_iou(parts: _IouParts, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> None:
     pred = pred & mask
     target = target & mask
     parts.intersection += float(torch.count_nonzero(pred & target).detach().cpu())
     parts.union += float(torch.count_nonzero(pred | target).detach().cpu())
+
+
+def _update_soft_iou(parts: _SoftIouParts, pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> None:
+    mask_f = mask.to(dtype=pred.dtype)
+    target_f = target.to(dtype=pred.dtype).clamp(0.0, 1.0)
+    pred_f = pred.to(dtype=target_f.dtype).clamp(0.0, 1.0)
+    intersection = torch.minimum(pred_f, target_f) * mask_f
+    union = torch.maximum(pred_f, target_f) * mask_f
+    parts.intersection += float(intersection.sum().detach().cpu())
+    parts.union += float(union.sum().detach().cpu())
 
 
 def _masked_balanced_bce_with_logits(

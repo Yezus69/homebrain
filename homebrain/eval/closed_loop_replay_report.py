@@ -67,6 +67,22 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         for event in decisions
         if isinstance(event.debug, dict) and event.debug.get("policy_bev_source") is not None
     ]
+    scorer_modes = [
+        str(event.debug.get("trajectory_scorer_mode"))
+        for event in decisions
+        if isinstance(event.debug, dict) and event.debug.get("trajectory_scorer_mode") is not None
+    ]
+    future_rollout_selection_roles = [
+        str(event.debug.get("future_rollout_policy_selection_role"))
+        for event in decisions
+        if isinstance(event.debug, dict) and event.debug.get("future_rollout_policy_selection_role") is not None
+    ]
+    temporal_diversity_prior_values = [
+        1.0 if bool(event.debug.get("temporal_diversity_prior_enabled")) else 0.0
+        for event in decisions
+        if isinstance(event.debug, dict)
+        and isinstance(event.debug.get("temporal_diversity_prior_enabled"), bool)
+    ]
     coverage_records = [
         event.debug.get("coverage_memory")
         for event in decisions
@@ -117,6 +133,13 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         "route_pose_leakage_ablation_fraction": _mean([value for value in route_pose_leakage_values if value is not None]),
         "policy_bev_source": _single_or_mixed(policy_sources),
         "policy_bev_source_distribution": dict(sorted(Counter(policy_sources).items())),
+        "trajectory_scorer_mode": _single_or_mixed(scorer_modes),
+        "trajectory_scorer_mode_distribution": dict(sorted(Counter(scorer_modes).items())),
+        "future_rollout_policy_selection_role": _single_or_mixed(future_rollout_selection_roles),
+        "future_rollout_policy_selection_role_distribution": dict(
+            sorted(Counter(future_rollout_selection_roles).items())
+        ),
+        "temporal_diversity_prior_enabled_fraction": _mean(temporal_diversity_prior_values),
         "cmd_vel_non_null_count": int(cmd_vel_non_null_count),
         "cmd_vel_proposal_count": len(cmd_vel_proposals),
         "cmd_vel_proposal_nonzero_count": sum(1 for item in cmd_vel_proposals if _proposal_nonzero(item)),
@@ -247,6 +270,9 @@ def _selected_score(event: BrainOutputEvent) -> JsonDict:
         score = candidate.get("trajectory_score")
         if isinstance(score, dict):
             result.update(dict(score))
+        future_score = candidate.get("future_rollout_trajectory_score")
+        if isinstance(future_score, dict):
+            result.update(dict(future_score))
         return result
     return result
 

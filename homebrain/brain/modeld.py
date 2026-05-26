@@ -10,8 +10,13 @@ from typing import Any, Iterable
 import numpy as np
 import torch
 
-from homebrain.datasets.openloris_scene import OPENLORIS_DEPTH_SCALE, OPENLORIS_ROUTE_ASSOCIATIONS_FILE
-from homebrain.datasets.tum_rgbd import read_depth_png_m
+from homebrain.brain.direct_rgbd_features import (
+    depth_valid_observation_mask,
+    load_depth_for_frame,
+    load_depth_refs,
+    load_rgb_image,
+    rgbd_patch_features,
+)
 from homebrain.data.spatial_dataset import read_json
 from homebrain.brain.spatial_memory_v0 import SPATIAL_MEMORY_V0_SOURCE, load_checkpoint
 from homebrain.brain.spatial_memory_v1 import (
@@ -46,6 +51,28 @@ class RoutePoseDelta:
     source: str
 
 
+@dataclass(frozen=True)
+class SceneState:
+    pose_estimate: tuple[float, float, float]
+    local_bev_ref: str | None
+    selected_trajectory_id: str | None
+    policy_bev_source: str
+    future_prediction_horizon_count: int
+    step_index: int
+
+    def to_debug(self) -> dict[str, Any]:
+        return {
+            "schema_version": "homebrain.runtime.scene_state.v0",
+            "pose_estimate_in_scene": _pose_estimate_dict(self.pose_estimate),
+            "local_bev_ref": self.local_bev_ref,
+            "selected_trajectory_id": self.selected_trajectory_id,
+            "policy_bev_source": self.policy_bev_source,
+            "future_prediction_horizon_count": int(self.future_prediction_horizon_count),
+            "updated_online_inside_brain_step": True,
+            "step_index": int(self.step_index),
+        }
+
+
 class DirectRGBDFeatureStore:
     """Runtime-only first slice: derive model input tensors directly from current RGB-D.
 
@@ -61,12 +88,14 @@ class DirectRGBDFeatureStore:
         self.log_dir = Path(log_dir)
         self.feature_dim = int(feature_dim)
         self.patch_shape = patch_shape
-        self.depth_by_key = self._load_depth_refs()
+        self.depth_by_key = load_depth_refs(self.log_dir)
+        self._last_depth_key: tuple[str, str, int] | None = None
+        self._last_depth: np.ndarray | None = None
 
     def load_for_frame(self, frame: FrameEvent) -> tuple[np.ndarray, np.ndarray]:
-        rgb = _load_runtime_rgb(self.log_dir / frame.data_ref)
+        rgb = load_rgb_image(self.log_dir / frame.data_ref)
         depth = self._load_depth(frame)
-        patch_features = _rgbd_patch_features(
+        patch_features = rgbd_patch_features(
             rgb=rgb,
             depth_m=depth,
             feature_dim=self.feature_dim,
@@ -75,38 +104,17 @@ class DirectRGBDFeatureStore:
         cls_feature = patch_features.mean(axis=(0, 1)).astype(np.float32)
         return patch_features, cls_feature
 
-    def _load_depth_refs(self) -> dict[tuple[str, str, int], str]:
-        associations_path = self.log_dir / OPENLORIS_ROUTE_ASSOCIATIONS_FILE
-        if not associations_path.exists():
-            return {}
-        associations = read_json(associations_path)
-        frames = associations.get("frames")
-        if not isinstance(frames, list):
-            return {}
-        refs: dict[tuple[str, str, int], str] = {}
-        for record in frames:
-            if not isinstance(record, dict):
-                continue
-            depth_ref = record.get("depth_ref")
-            if not isinstance(depth_ref, str):
-                continue
-            sequence_id = str(record.get("sequence_id", ""))
-            camera_id = str(record.get("camera_id", ""))
-            frame_id = int(record.get("frame_id", -1))
-            refs[(sequence_id, camera_id, frame_id)] = depth_ref
-        return refs
-
     def _load_depth(self, frame: FrameEvent) -> np.ndarray | None:
-        depth_ref = self.depth_by_key.get((frame.sequence_id, frame.camera_id, int(frame.frame_id)))
-        if depth_ref is None:
-            return None
-        depth_path = self.log_dir / depth_ref
-        if not depth_path.exists():
-            return None
-        try:
-            return read_depth_png_m(depth_path, scale=OPENLORIS_DEPTH_SCALE)
-        except Exception:  # noqa: BLE001 - runtime should keep moving with RGB-only direct features.
-            return None
+        key = (frame.sequence_id, frame.camera_id, int(frame.frame_id))
+        if self._last_depth_key == key:
+            return self._last_depth
+        depth = load_depth_for_frame(self.log_dir, frame, self.depth_by_key)
+        self._last_depth_key = key
+        self._last_depth = depth
+        return depth
+
+    def load_observation_mask_for_frame(self, frame: FrameEvent, *, bev_shape: tuple[int, int]) -> np.ndarray | None:
+        return depth_valid_observation_mask(self._load_depth(frame), bev_shape=bev_shape)
 
 
 class Brain:
@@ -158,6 +166,7 @@ class Brain:
         self.pose_estimate = (0.0, 0.0, 0.0)
         self.step_count = 0
         self.selection_history: list[str] = []
+        self.scene_state: SceneState | None = None
 
     def should_reset(self, frame: FrameEvent) -> bool:
         key = (frame.sequence_id, frame.camera_id)
@@ -179,6 +188,7 @@ class Brain:
             self.previous_predicted_pose_delta = None
             self.pose_estimate = (0.0, 0.0, 0.0)
             self.selection_history = []
+            self.scene_state = None
             self.trajectory_coverage = CoverageMemory(
                 self.model.config.bev_shape,
                 meters_per_cell=self.meters_per_cell,
@@ -219,11 +229,22 @@ class Brain:
         if output.selected_trajectory_id is not None:
             self.selection_history.append(str(output.selected_trajectory_id))
             self.selection_history = self.selection_history[-24:]
+        future_horizon_count = _future_horizon_count_from_artifact(artifact, self.output_root)
+        self.scene_state = SceneState(
+            pose_estimate=self.pose_estimate,
+            local_bev_ref=output.local_bev_ref,
+            selected_trajectory_id=output.selected_trajectory_id,
+            policy_bev_source=self.policy_bev_source,
+            future_prediction_horizon_count=future_horizon_count,
+            step_index=self.step_count - 1,
+        )
         output.debug.update(
             {
                 "runtime_api": "Brain.step",
                 "runtime_api_step_index": self.step_count - 1,
                 "runtime_api_owns_persistent_memory": True,
+                "scene_state": self.scene_state.to_debug(),
+                "scene_memory_used_for_policy": self.policy_bev_source == "memory",
                 "scene_pose_estimate": _pose_estimate_dict(self.pose_estimate),
                 "pose_estimate_source": pose_warp_source,
                 "teacher_runtime_dependency": self.runtime_feature_source == "dino",
@@ -395,8 +416,6 @@ def spatial_model_outputs(
 ) -> tuple[list[BrainOutputEvent], list[str]]:
     if runtime_feature_source not in RUNTIME_FEATURE_SOURCES:
         raise ValueError(f"runtime_feature_source must be one of {RUNTIME_FEATURE_SOURCES}")
-    if trajectory_scorer_checkpoint is not None and future_rollout_checkpoint is not None:
-        raise ValueError("use either --trajectory-scorer-checkpoint or --future-rollout-checkpoint, not both")
     if _checkpoint_model_name(checkpoint) == "SpatialMemoryNetV1":
         return _spatial_v1_model_outputs(
             events,
@@ -747,6 +766,14 @@ def _spatial_v1_output_for_frame(
     sensor_mask = torch.zeros((1, sensor_context_dim), dtype=torch.float32, device=device)
     pose_to_current = pose_delta_to_current.view(1, 3).to(device) if pose_delta_to_current is not None else None
     pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if pose_delta_to_current is not None else None
+    runtime_observation_mask: torch.Tensor | None = None
+    runtime_observation_mask_source = "model_predicted_current_bev_confidence"
+    load_observation = getattr(feature_store, "load_observation_mask_for_frame", None)
+    if callable(load_observation):
+        observation = load_observation(frame, bev_shape=tuple(model.config.bev_shape))
+        if observation is not None:
+            runtime_observation_mask = torch.from_numpy(observation[None, None, ...].astype(np.float32)).to(device)
+            runtime_observation_mask_source = "current_depth_validity_mask"
     model.eval()
     model_started = time.perf_counter()
     _sync_device(device)
@@ -758,6 +785,7 @@ def _spatial_v1_output_for_frame(
             memory_state=state,
             pose_delta_to_current=pose_to_current,
             pose_delta_to_current_mask=pose_mask,
+            observation_mask=runtime_observation_mask,
             force_reset=torch.tensor([reset_memory], dtype=torch.bool, device=device),
         )
     _sync_device(device)
@@ -895,6 +923,7 @@ def _spatial_v1_output_for_frame(
                 "update_mask_coverage": update_mask_coverage,
                 "memory_overwrite_fraction": memory_overwrite_fraction,
                 "observation_mask_source": observation_mask_source,
+                "runtime_observation_mask_source": runtime_observation_mask_source,
                 "missing_pose_behavior": str(getattr(model.config, "missing_pose_behavior", "unknown")),
                 "representation_pretraining_only": True,
                 "control_safe": False,
@@ -1025,6 +1054,20 @@ def _pose_estimate_dict(pose: tuple[float, float, float]) -> dict[str, float]:
         "y_m": round(float(pose[1]), 6),
         "yaw_rad": round(float(pose[2]), 6),
     }
+
+
+def _future_horizon_count_from_artifact(relative_artifact: str, output_root: Path) -> int:
+    path = output_root / relative_artifact
+    if not path.exists():
+        return 0
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if "future_rollout_future_bev_prob" not in data:
+                return 0
+            future = np.asarray(data["future_rollout_future_bev_prob"])
+            return int(future.shape[0]) if future.ndim >= 1 else 0
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def _load_runtime_rgb(path: Path) -> np.ndarray:
