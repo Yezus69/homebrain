@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from homebrain.data.pack_spatial_dataset import pack_spatial_dataset
+from homebrain.datasets.openloris_scene import load_calibration
 from homebrain.datasets.openloris_to_route import openloris_to_route
 from homebrain.datasets.tum_rgbd_to_route import tum_rgbd_to_route
 from homebrain.geometry.rgbd_truth_to_bev import rgbd_truth_to_bev
@@ -125,6 +126,48 @@ def test_robot_rgbd_to_bev_refuses_missing_extrinsics_without_review(tmp_path: P
     assert manifest["robot_frame_truth"] is False
     assert manifest["not_robot_frame_truth"] is True
     assert manifest["control_safe"] is False
+
+
+def test_openloris_trans_matrix_chain_imports_measured_camera_to_base(tmp_path: Path) -> None:
+    source = tmp_path / "openloris" / "market1-1_3"
+    route = tmp_path / "route"
+    _write_openloris_fixture(source, frame_count=2, include_extrinsics=False)
+    (source / "trans_matrix.yaml").write_text(
+        """%YAML:1.0
+trans_matrix:
+   -
+      parent_frame: base_link
+      child_frame: laser
+      matrix: !!opencv-matrix
+         rows: 4
+         cols: 4
+         dt: d
+         data: [ 1., 0., 0., 0.2, 0., 1., 0., 0.0, 0., 0., 1., 0.1, 0., 0., 0., 1. ]
+   -
+      parent_frame: laser
+      child_frame: d400_color_optical_frame
+      matrix: !!opencv-matrix
+         rows: 4
+         cols: 4
+         dt: d
+         data: [ 0., 0., 1., 0.3, -1., 0., 0., 0.0, 0., -1., 0., 0.4, 0., 0., 0., 1. ]
+""",
+        encoding="utf-8",
+    )
+
+    calibration = load_calibration(source, camera_id="d400_color")
+    assert calibration["camera_to_base_source"]["transform_chain"] == [
+        "base_link",
+        "laser",
+        "d400_color_optical_frame",
+    ]
+    assert calibration["camera_to_base"][0][3] == pytest.approx(0.5)
+
+    openloris_to_route(source_dir=source, out_dir=route, max_frames=2)
+    associations = json.loads((route / "openloris_scene_associations.json").read_text(encoding="utf-8"))
+    assert associations["camera_to_base_source"]["source"] == "trans_matrix.yaml"
+    assert associations["camera_to_base_source"]["transform_chain"][-1] == "d400_color_optical_frame"
+    assert associations["robot_frame_truth"] is True
 
 
 def test_robot_rgbd_to_bev_refuses_tum_without_camera_to_base(tmp_path: Path) -> None:

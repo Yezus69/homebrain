@@ -17,7 +17,7 @@ from homebrain.brain.direct_rgbd_features import (
     has_direct_rgbd_feature_artifacts,
     write_direct_rgbd_feature_artifacts,
 )
-from homebrain.brain.modeld import RUNTIME_FEATURE_SOURCES, V1_POSE_WARP_SOURCES
+from homebrain.brain.modeld import RUNTIME_FEATURE_SOURCES, V1_POLICY_BEV_SOURCES, V1_POSE_WARP_SOURCES
 from homebrain.data.pack_spatial_dataset import pack_spatial_dataset
 from homebrain.data.qa_spatial_dataset import qa_spatial_dataset, write_qa_metrics
 from homebrain.data.spatial_dataset import read_json, write_json
@@ -67,6 +67,7 @@ def run_openloris_route_heldout_milestone(
     out_dir: str | Path,
     sequences: list[str],
     heldout_sequence: str | None = None,
+    runtime_heldout_sequences: list[str] | None = None,
     max_frames: int = 160,
     download_missing: bool = False,
     dino_device: str | None = None,
@@ -80,6 +81,7 @@ def run_openloris_route_heldout_milestone(
     future_max_examples: int | None = None,
     trajectory_steps: int = 160,
     trajectory_batch_size: int = 32,
+    action_label_horizon_s: float | None = None,
     runtime_max_frames: int | None = None,
     runtime_feature_source: str = "dino",
     student_feature_source: str = "dino",
@@ -88,6 +90,7 @@ def run_openloris_route_heldout_milestone(
     run_direct_rgbd_runtime_slice: bool = True,
     build_dino_features: bool = True,
     pose_warp_source: str = "odom",
+    policy_bev_source: str = "scene",
     command: str | None = None,
 ) -> dict[str, Any]:
     if len(sequences) < 3:
@@ -100,8 +103,12 @@ def run_openloris_route_heldout_milestone(
         raise ValueError("student_feature_source must be 'dino' or 'direct_rgbd'")
     if runtime_policy_source not in {"trajectory_scorer", "future_rollout", "auto"}:
         raise ValueError("runtime_policy_source must be 'trajectory_scorer', 'future_rollout', or 'auto'")
+    if action_label_horizon_s is not None and float(action_label_horizon_s) <= 0.0:
+        raise ValueError("action_label_horizon_s must be positive when supplied")
     if pose_warp_source not in V1_POSE_WARP_SOURCES:
         raise ValueError(f"pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
+    if policy_bev_source not in V1_POLICY_BEV_SOURCES:
+        raise ValueError(f"policy_bev_source must be one of {V1_POLICY_BEV_SOURCES}")
 
     root = Path(openloris_root)
     output = Path(out_dir)
@@ -135,11 +142,20 @@ def run_openloris_route_heldout_milestone(
     heldout = heldout_sequence or route_artifacts[min(1, len(route_artifacts) - 1)].sequence
     if heldout not in {artifact.sequence for artifact in route_artifacts}:
         raise ValueError(f"heldout_sequence {heldout!r} is not in staged sequences")
+    runtime_heldouts = _dedupe_sequences(runtime_heldout_sequences or [heldout])
+    if heldout not in runtime_heldouts:
+        runtime_heldouts.insert(0, heldout)
+    available_sequences = {artifact.sequence for artifact in route_artifacts}
+    missing_runtime_heldouts = [sequence for sequence in runtime_heldouts if sequence not in available_sequences]
+    if missing_runtime_heldouts:
+        raise ValueError(f"runtime heldout sequences are not staged: {missing_runtime_heldouts}")
 
     manifests_dir = output / "manifests"
     manifests_dir.mkdir(parents=True, exist_ok=True)
-    spatial_fold_count = _resolve_fold_count(max_spatial_folds, route_artifacts)
-    heldout_order = [heldout] + [artifact.sequence for artifact in route_artifacts if artifact.sequence != heldout]
+    spatial_fold_count = max(_resolve_fold_count(max_spatial_folds, route_artifacts), len(runtime_heldouts))
+    heldout_order = runtime_heldouts + [
+        artifact.sequence for artifact in route_artifacts if artifact.sequence not in set(runtime_heldouts)
+    ]
     heldout_order = heldout_order[:spatial_fold_count]
     fold_records = []
     spatial_devices = _parallel_4090_devices()
@@ -314,10 +330,13 @@ def run_openloris_route_heldout_milestone(
     build_action_label_pack_v5(
         sources=[artifact.spatial_pack_dir for artifact in train_artifacts],
         out_dir=action_pack,
+        horizon_s=action_label_horizon_s,
     )
     action_manifest = read_json(action_pack / "manifest.json")
     action_selected_distribution = _json_dict(action_manifest.get("selected_distribution"))
     trajectory_label_degenerate = len([key for key, value in action_selected_distribution.items() if int(value or 0) > 0]) <= 1
+    trajectory_label_entropy = _entropy_counts(action_selected_distribution)
+    trajectory_label_dominant_fraction = _dominant_fraction_counts(action_selected_distribution)
     trajectory_train_dir = output / "train" / f"trajectory_scorer_v1_except_{_safe_id(heldout)}"
     trajectory_metrics = train_trajectory_scorer_v1(
         action_pack=action_pack,
@@ -351,6 +370,7 @@ def run_openloris_route_heldout_milestone(
         future_rollout_checkpoint=future_train_dir / "checkpoint.pt",
         device_name=future_device,
         v1_pose_warp_source=pose_warp_source,
+        v1_policy_bev_source=policy_bev_source,
         runtime_feature_source=runtime_feature_source,
         future_rollout_selection_mode=future_rollout_selection_mode,
         command=command,
@@ -361,6 +381,134 @@ def run_openloris_route_heldout_milestone(
         out_dir=output / "contact_sheets",
         name=f"heldout_{_safe_id(heldout)}_{runtime_feature_source}",
     )
+    runtime_route_records: list[dict[str, Any]] = [
+        {
+            "heldout_sequence": heldout,
+            "route": runtime_route.as_posix(),
+            "runtime_report": (runtime_out / "runtime_report.json").as_posix(),
+            "scene": heldout_artifact.scene,
+            "report": runtime_report,
+            "future_eval_metrics": future_eval_metrics,
+            "future_checkpoint": (future_train_dir / "checkpoint.pt").as_posix(),
+            "spatial_checkpoint": primary_fold["checkpoint"],
+            "contact_sheet": contact_sheet.as_posix(),
+        }
+    ]
+
+    for extra_heldout in [sequence for sequence in runtime_heldouts if sequence != heldout]:
+        extra_fold = next(record for record in fold_records if record["heldout_sequence"] == extra_heldout)
+        extra_heldout_artifact = next(artifact for artifact in route_artifacts if artifact.sequence == extra_heldout)
+        extra_train_artifacts = [artifact for artifact in route_artifacts if artifact.sequence != extra_heldout]
+        extra_future_train_pack = output / "future" / f"future_pack_train_except_{_safe_id(extra_heldout)}"
+        extra_future_heldout_pack = output / "future" / f"future_pack_heldout_{_safe_id(extra_heldout)}"
+        build_future_bev_rollout_pack(
+            sources=[artifact.spatial_pack_dir for artifact in extra_train_artifacts],
+            feature_dirs=[_feature_dir_for_artifact(artifact, student_feature_source) for artifact in extra_train_artifacts],
+            out_dir=extra_future_train_pack,
+            max_examples=future_max_examples,
+            sampling_strategy="route_balanced",
+            fail_on_degenerate_labels=True,
+            reject_degenerate_groups=True,
+        )
+        build_future_bev_rollout_pack(
+            sources=[extra_heldout_artifact.spatial_pack_dir],
+            feature_dirs=[_feature_dir_for_artifact(extra_heldout_artifact, student_feature_source)],
+            out_dir=extra_future_heldout_pack,
+            max_examples=future_max_examples,
+            sampling_strategy="route_balanced",
+            fail_on_degenerate_labels=True,
+            reject_degenerate_groups=True,
+        )
+        extra_future_train_dir = output / "train" / f"future_bev_rollout_except_{_safe_id(extra_heldout)}"
+        train_future_bev_rollout_v1(
+            rollout_pack=extra_future_train_pack,
+            out_dir=extra_future_train_dir,
+            max_steps=future_steps,
+            batch_size=future_batch_size,
+            device_name=future_device,
+            command=_command_text(
+                [
+                    sys.executable,
+                    "-m",
+                    "homebrain.train.train_future_bev_rollout_v1",
+                    "--rollout-pack",
+                    extra_future_train_pack.as_posix(),
+                    "--out",
+                    extra_future_train_dir.as_posix(),
+                    "--max-steps",
+                    str(future_steps),
+                    "--batch-size",
+                    str(future_batch_size),
+                    "--device",
+                    future_device,
+                ]
+            ),
+        )
+        extra_future_eval_path = output / "eval" / f"future_bev_rollout_heldout_{_safe_id(extra_heldout)}.json"
+        extra_future_eval_metrics = eval_future_bev_rollout_v1(
+            checkpoint=extra_future_train_dir / "checkpoint.pt",
+            rollout_pack=extra_future_heldout_pack,
+            split=None,
+            out_path=extra_future_eval_path,
+            batch_size=future_batch_size,
+            device_name=future_device,
+            command=_command_text(
+                [
+                    sys.executable,
+                    "-m",
+                    "homebrain.eval.eval_future_bev_rollout_v1",
+                    "--checkpoint",
+                    (extra_future_train_dir / "checkpoint.pt").as_posix(),
+                    "--rollout-pack",
+                    extra_future_heldout_pack.as_posix(),
+                    "--split",
+                    "all",
+                    "--out",
+                    extra_future_eval_path.as_posix(),
+                    "--device",
+                    future_device,
+                ]
+            ),
+        )
+        extra_runtime_route = (
+            extra_heldout_artifact.route_dir
+            if runtime_feature_source == "dino"
+            else _runtime_route_slice(extra_heldout_artifact, output, runtime_max_frames)
+        )
+        extra_runtime_out = output / "runtime" / f"heldout_{_safe_id(extra_heldout)}_{runtime_feature_source}"
+        extra_runtime_report = run_openloris_runtime_replay(
+            log_dir=extra_runtime_route,
+            out_dir=extra_runtime_out,
+            checkpoint=Path(str(extra_fold["checkpoint"])),
+            feature_dir=extra_heldout_artifact.dino_dir if runtime_feature_source == "dino" else None,
+            trajectory_scorer_checkpoint=None,
+            future_rollout_checkpoint=extra_future_train_dir / "checkpoint.pt",
+            device_name=future_device,
+            v1_pose_warp_source=pose_warp_source,
+            v1_policy_bev_source=policy_bev_source,
+            runtime_feature_source=runtime_feature_source,
+            future_rollout_selection_mode=future_rollout_selection_mode,
+            command=command,
+        )
+        extra_contact_sheet = write_runtime_failure_contact_sheet(
+            route_dir=extra_runtime_route,
+            modeld_log_dir=extra_runtime_out / "online_modeld",
+            out_dir=output / "contact_sheets",
+            name=f"heldout_{_safe_id(extra_heldout)}_{runtime_feature_source}",
+        )
+        runtime_route_records.append(
+            {
+                "heldout_sequence": extra_heldout,
+                "route": extra_runtime_route.as_posix(),
+                "runtime_report": (extra_runtime_out / "runtime_report.json").as_posix(),
+                "scene": extra_heldout_artifact.scene,
+                "report": extra_runtime_report,
+                "future_eval_metrics": extra_future_eval_metrics,
+                "future_checkpoint": (extra_future_train_dir / "checkpoint.pt").as_posix(),
+                "spatial_checkpoint": extra_fold["checkpoint"],
+                "contact_sheet": extra_contact_sheet.as_posix(),
+            }
+        )
 
     direct_runtime_record: dict[str, Any] | None = None
     if run_direct_rgbd_runtime_slice and runtime_feature_source != "direct_rgbd":
@@ -375,6 +523,7 @@ def run_openloris_route_heldout_milestone(
             future_rollout_checkpoint=future_train_dir / "checkpoint.pt",
             device_name=future_device,
             v1_pose_warp_source=pose_warp_source,
+            v1_policy_bev_source=policy_bev_source,
             runtime_feature_source="direct_rgbd",
             future_rollout_selection_mode=future_rollout_selection_mode,
             command=(
@@ -405,7 +554,8 @@ def run_openloris_route_heldout_milestone(
     )
     temporal_diversity_prior_fraction = float(runtime_report.get("temporal_diversity_prior_enabled_fraction") or 0.0)
     accepted_policy_uses_guided_transparent = bool(
-        future_rollout_selection_mode == "guided_transparent" and not runtime_learned_policy
+        future_rollout_selection_mode == "guided_transparent"
+        and resolved_runtime_policy_source == "future_rollout"
     )
     accepted_policy_uses_handcrafted_diversity_prior = temporal_diversity_prior_fraction > 0.0
     scene_memory_artifact_exists = _path_exists(runtime_report.get("scene_memory_artifact"))
@@ -414,6 +564,67 @@ def run_openloris_route_heldout_milestone(
     future_state_visual_exists = (
         _path_exists(runtime_report.get("scene_memory_visual"))
         and int(runtime_report.get("future_prediction_horizon_count") or 0) >= 2
+    )
+    runtime_reports = [record["report"] for record in runtime_route_records]
+    runtime_future_evals = [record["future_eval_metrics"] for record in runtime_route_records]
+    runtime_route_summaries = [
+        {
+            "heldout_sequence": record["heldout_sequence"],
+            "scene": record.get("scene"),
+            "route": record["route"],
+            "runtime_report": record["runtime_report"],
+            "spatial_checkpoint": record["spatial_checkpoint"],
+            "future_checkpoint": record["future_checkpoint"],
+            "contact_sheet": record["contact_sheet"],
+            "decision_count": record["report"].get("decision_count"),
+            "runtime_api_step_count": record["report"].get("runtime_api_step_count"),
+            "selected_candidate_entropy": record["report"].get("selected_candidate_entropy"),
+            "selected_candidate_dominant_fraction": record["report"].get("selected_candidate_dominant_fraction"),
+            "unsafe_selected_rate": record["report"].get("unsafe_selected_rate"),
+            "unknown_reduction_vs_current": record["report"].get("unknown_reduction_vs_current"),
+            "coverage_memory_cells_seen": record["report"].get("coverage_memory_cells_seen"),
+            "latency_step_p50_ms": record["report"].get("latency_step_p50_ms"),
+            "latency_step_p95_ms": record["report"].get("latency_step_p95_ms"),
+            "scene_state_online": record["report"].get("scene_state_online"),
+            "scene_memory_used_for_policy": record["report"].get("scene_memory_used_for_policy"),
+            "scene_map_created_only_posthoc": record["report"].get("scene_map_created_only_posthoc"),
+            "scene_memory_artifact": record["report"].get("scene_memory_artifact"),
+            "scene_pose_trace_artifact": record["report"].get("scene_pose_trace_artifact"),
+            "physical_geometry_visual": record["report"].get("scene_memory_visual"),
+            "future_state_visual": record["report"].get("scene_memory_visual"),
+            "future_prediction_horizon_count": record["report"].get("future_prediction_horizon_count"),
+            "future_free_iou_or_proxy": record["future_eval_metrics"].get("future_free_iou_or_proxy"),
+            "future_occupied_iou_or_proxy": record["future_eval_metrics"].get("future_occupied_iou_or_proxy"),
+            "future_unknown_iou_or_proxy": record["future_eval_metrics"].get("future_unknown_iou_or_proxy"),
+            "teacher_runtime_dependency": record["report"].get("teacher_runtime_dependency"),
+            "future_or_groundtruth_runtime_dependency": record["report"].get("future_or_groundtruth_runtime_dependency"),
+            "route_pose_leakage_ablation_fraction": record["report"].get("route_pose_leakage_ablation_fraction"),
+            "raw_pwm_emitted": record["report"].get("raw_pwm_emitted"),
+            "cmd_vel_proposal_count": record["report"].get("cmd_vel_proposal_count"),
+            "pose_metric_source": record["report"].get("pose_metric_source"),
+            "pose_metric_independent_groundtruth": record["report"].get("pose_metric_independent_groundtruth"),
+            "pose_ate_rmse_m_or_proxy": record["report"].get("pose_ate_rmse_m_or_proxy"),
+            "pose_rpe_translation_rmse_m_or_proxy": record["report"].get("pose_rpe_translation_rmse_m_or_proxy"),
+        }
+        for record in runtime_route_records
+    ]
+    aggregate_pose_sources = sorted(
+        {
+            str(report.get("pose_metric_source"))
+            for report in runtime_reports
+            if report.get("pose_metric_source") is not None
+        }
+    )
+    aggregate_pose_source = aggregate_pose_sources[0] if len(aggregate_pose_sources) == 1 else "mixed"
+    runtime_scenes = sorted(
+        {
+            str(record.get("scene"))
+            for record in runtime_route_summaries
+            if record.get("scene") is not None
+        }
+    )
+    independent_pose_route_count = sum(
+        1 for record in runtime_route_summaries if record.get("pose_metric_independent_groundtruth") is True
     )
 
     summary = {
@@ -425,9 +636,15 @@ def run_openloris_route_heldout_milestone(
         "scenes": scenes,
         "routes": [_route_record(artifact) for artifact in route_artifacts],
         "heldout_sequence": heldout,
+        "heldout_sequences": [record["heldout_sequence"] for record in runtime_route_records],
+        "runtime_routes_evaluated": len(runtime_route_records),
+        "runtime_scenes_evaluated": len(runtime_scenes),
+        "runtime_scene_names": runtime_scenes,
+        "runtime_route_reports": runtime_route_summaries,
         "max_frames_per_route": max_frames,
         "student_feature_source": student_feature_source,
         "runtime_feature_source": runtime_feature_source,
+        "runtime_policy_bev_source": policy_bev_source,
         "runtime_policy_source_requested": runtime_policy_source,
         "runtime_policy_source_resolved": resolved_runtime_policy_source,
         "real_public_data_only": True,
@@ -475,6 +692,13 @@ def run_openloris_route_heldout_milestone(
             "used_as_runtime_selector": resolved_runtime_policy_source == "trajectory_scorer",
             "label_distribution": action_selected_distribution,
             "label_degenerate": trajectory_label_degenerate,
+            "label_action_entropy": trajectory_label_entropy,
+            "label_dominant_action_fraction": trajectory_label_dominant_fraction,
+            "label_horizon_s": (
+                float(action_label_horizon_s)
+                if action_label_horizon_s is not None
+                else action_manifest.get("bc_labeling", {}).get("horizon_s")
+            ),
             "train_top1_action_agreement": trajectory_metrics.get("train_top1_action_agreement"),
             "val_top1_action_agreement": trajectory_metrics.get("val_top1_action_agreement"),
             "val_rank_correlation_or_proxy": trajectory_metrics.get("val_rank_correlation_or_proxy"),
@@ -546,56 +770,100 @@ def run_openloris_route_heldout_milestone(
         "raw_pwm_emitted": False,
     }
     accepted_runtime = summary["runtime_replay"]
+    route_report_records = runtime_route_summaries
+    scene_memory_artifacts_exist_all = all(_path_exists(record.get("scene_memory_artifact")) for record in route_report_records)
+    scene_pose_trace_artifacts_exist_all = all(
+        _path_exists(record.get("scene_pose_trace_artifact")) for record in route_report_records
+    )
+    physical_geometry_visuals_exist_all = all(
+        _path_exists(record.get("physical_geometry_visual")) for record in route_report_records
+    )
+    future_state_visuals_exist_all = all(
+        _path_exists(record.get("future_state_visual"))
+        and int(record.get("future_prediction_horizon_count") or 0) >= 2
+        for record in route_report_records
+    )
+    runtime_modes = sorted(
+        {
+            str(report.get("trajectory_scorer_mode"))
+            for report in runtime_reports
+            if report.get("trajectory_scorer_mode") is not None
+        }
+    )
+    aggregate_runtime_mode = runtime_modes[0] if len(runtime_modes) == 1 else "mixed"
     summary.update(
         {
-            "runtime_api_step_count": accepted_runtime.get("runtime_api_step_count"),
-            "current_bev_iou_or_proxy": primary_fold.get("current_bev_iou_or_proxy"),
-            "fused_memory_bev_iou_or_proxy": primary_fold.get("fused_memory_bev_iou_or_proxy"),
-            "scene_memory_used_for_policy": accepted_runtime.get("scene_memory_used_for_policy"),
-            "scene_memory_artifact_exists": scene_memory_artifact_exists,
-            "scene_pose_trace_artifact_exists": scene_pose_trace_artifact_exists,
-            "physical_geometry_visual_exists": physical_geometry_visual_exists,
-            "future_state_visual_exists": future_state_visual_exists,
-            "unknown_reduction_vs_current": accepted_runtime.get("unknown_reduction_vs_current"),
-            "coverage_memory_cells_seen": accepted_runtime.get("coverage_memory_cells_seen"),
-            "future_prediction_horizon_count": accepted_runtime.get("future_prediction_horizon_count"),
-            "future_free_iou_or_proxy": future_eval_metrics.get("future_free_iou_or_proxy"),
-            "future_occupied_iou_or_proxy": future_eval_metrics.get("future_occupied_iou_or_proxy"),
+            "runtime_api_step_count": int(_sum_metric(route_report_records, "runtime_api_step_count")),
+            "scene_state_online": _all_true(route_report_records, "scene_state_online"),
+            "scene_map_created_only_posthoc": not _all_false(route_report_records, "scene_map_created_only_posthoc"),
+            "current_bev_iou_or_proxy": _min_metric(fold_records, "current_bev_iou_or_proxy"),
+            "fused_memory_bev_iou_or_proxy": _min_metric(fold_records, "fused_memory_bev_iou_or_proxy"),
+            "fused_scene_bev_iou_or_proxy": _min_metric(fold_records, "fused_memory_bev_iou_or_proxy"),
+            "scene_memory_used_for_policy": _all_true(route_report_records, "scene_memory_used_for_policy"),
+            "scene_memory_artifact_exists": scene_memory_artifacts_exist_all,
+            "scene_pose_trace_artifact_exists": scene_pose_trace_artifacts_exist_all,
+            "physical_geometry_visual_exists": physical_geometry_visuals_exist_all,
+            "future_state_visual_exists": future_state_visuals_exist_all,
+            "unknown_reduction_vs_current": _min_metric(route_report_records, "unknown_reduction_vs_current"),
+            "coverage_memory_cells_seen": int(_sum_metric(route_report_records, "coverage_memory_cells_seen")),
+            "future_prediction_horizon_count": int(_min_metric(route_report_records, "future_prediction_horizon_count")),
+            "future_free_iou_or_proxy": _min_metric(runtime_future_evals, "future_free_iou_or_proxy"),
+            "future_occupied_iou_or_proxy": _min_metric(runtime_future_evals, "future_occupied_iou_or_proxy"),
             "pose_metric_proxy": runtime_report.get("pose_metric_proxy"),
-            "pose_metric_source": runtime_report.get("pose_metric_source"),
-            "pose_ate_rmse_m_or_proxy": runtime_report.get("pose_ate_rmse_m_or_proxy"),
-            "pose_rpe_translation_rmse_m_or_proxy": runtime_report.get("pose_rpe_translation_rmse_m_or_proxy"),
-            "pose_warp_valid_fraction": runtime_report.get("pose_warp_valid_fraction"),
-            "future_prediction_metric_proxy": future_eval_metrics.get("future_unknown_iou_or_proxy"),
-            "future_unknown_iou_or_proxy": future_eval_metrics.get("future_unknown_iou_or_proxy"),
-            "action_entropy": accepted_runtime.get("selected_candidate_entropy"),
-            "dominant_action_fraction": accepted_runtime.get("selected_candidate_dominant_fraction"),
-            "unsafe_selected_rate": runtime_report.get("unsafe_selected_rate"),
-            "cmd_vel_proposal_count": accepted_runtime.get("cmd_vel_proposal_count"),
-            "latency_step_p50_ms": accepted_runtime.get("latency_step_p50_ms"),
-            "latency_step_p95_ms": accepted_runtime.get("latency_step_p95_ms"),
-            "teacher_runtime_dependency": accepted_runtime.get("teacher_runtime_dependency"),
-            "future_or_groundtruth_runtime_dependency": accepted_runtime.get("future_or_groundtruth_runtime_dependency"),
-            "route_pose_leakage_ablation_fraction": runtime_report.get("route_pose_leakage_ablation_fraction"),
+            "pose_metric_source": aggregate_pose_source,
+            "pose_metric_sources_by_route": {
+                str(record["heldout_sequence"]): record.get("pose_metric_source")
+                for record in route_report_records
+            },
+            "pose_metric_independent_groundtruth_route_count": int(independent_pose_route_count),
+            "pose_metric_independent_groundtruth": all(
+                record.get("pose_metric_independent_groundtruth") is True for record in route_report_records
+            ),
+            "pose_ate_rmse_m_or_proxy": _max_metric(route_report_records, "pose_ate_rmse_m_or_proxy"),
+            "pose_rpe_translation_rmse_m_or_proxy": _max_metric(route_report_records, "pose_rpe_translation_rmse_m_or_proxy"),
+            "pose_warp_valid_fraction": _min_metric(runtime_reports, "pose_warp_valid_fraction"),
+            "future_prediction_metric_proxy": _min_metric(runtime_future_evals, "future_unknown_iou_or_proxy"),
+            "future_unknown_iou_or_proxy": _min_metric(runtime_future_evals, "future_unknown_iou_or_proxy"),
+            "action_entropy": _min_metric(route_report_records, "selected_candidate_entropy"),
+            "dominant_action_fraction": _max_metric(route_report_records, "selected_candidate_dominant_fraction"),
+            "unsafe_selected_rate": _max_metric(route_report_records, "unsafe_selected_rate"),
+            "cmd_vel_proposal_count": int(_sum_metric(route_report_records, "cmd_vel_proposal_count")),
+            "latency_step_p50_ms": _max_metric(route_report_records, "latency_step_p50_ms"),
+            "latency_step_p95_ms": _max_metric(route_report_records, "latency_step_p95_ms"),
+            "teacher_runtime_dependency": not _all_false(route_report_records, "teacher_runtime_dependency"),
+            "future_or_groundtruth_runtime_dependency": not _all_false(
+                route_report_records, "future_or_groundtruth_runtime_dependency"
+            ),
+            "route_pose_leakage_ablation_fraction": _max_metric(
+                route_report_records, "route_pose_leakage_ablation_fraction"
+            ),
+            "raw_pwm_emitted": not _all_false(route_report_records, "raw_pwm_emitted"),
             "future_rollout_selection_mode": future_rollout_selection_mode,
             "runtime_policy_source_requested": runtime_policy_source,
             "runtime_policy_source_resolved": resolved_runtime_policy_source,
             "accepted_policy_uses_guided_transparent": accepted_policy_uses_guided_transparent,
             "accepted_policy_uses_handcrafted_diversity_prior": accepted_policy_uses_handcrafted_diversity_prior,
-            "trajectory_scorer_mode": runtime_report.get("trajectory_scorer_mode"),
+            "trajectory_scorer_mode": aggregate_runtime_mode,
             "trajectory_scorer_mode_distribution": runtime_report.get("trajectory_scorer_mode_distribution"),
             "future_rollout_policy_selection_role": runtime_report.get("future_rollout_policy_selection_role"),
             "temporal_diversity_prior_enabled_fraction": temporal_diversity_prior_fraction,
+            "trajectory_label_degenerate": bool(trajectory_label_degenerate),
+            "trajectory_label_action_entropy": float(trajectory_label_entropy),
+            "trajectory_label_dominant_action_fraction": float(trajectory_label_dominant_fraction),
+            "action_label_horizon_s": float(action_label_horizon_s) if action_label_horizon_s is not None else None,
         }
     )
     gate7_checks = {
         "real_public_data_only": summary.get("real_public_data_only") is True,
+        "runtime_routes_evaluated_ge_2": int(summary.get("runtime_routes_evaluated") or 0) >= 2,
         "runtime_api_step_count_gt_0": int(summary.get("runtime_api_step_count") or 0) > 0,
+        "scene_state_online": summary.get("scene_state_online") is True,
         "scene_memory_used_for_policy": summary.get("scene_memory_used_for_policy") is True,
-        "scene_memory_artifact_exists": scene_memory_artifact_exists,
-        "scene_pose_trace_artifact_exists": scene_pose_trace_artifact_exists,
-        "physical_geometry_visual_exists": physical_geometry_visual_exists,
-        "future_state_visual_exists": future_state_visual_exists,
+        "scene_map_created_only_posthoc_false": summary.get("scene_map_created_only_posthoc") is False,
+        "scene_memory_artifact_exists": scene_memory_artifacts_exist_all,
+        "scene_pose_trace_artifact_exists": scene_pose_trace_artifacts_exist_all,
+        "physical_geometry_visual_exists": physical_geometry_visuals_exist_all,
+        "future_state_visual_exists": future_state_visuals_exist_all,
         "teacher_runtime_dependency_false": summary.get("teacher_runtime_dependency") is False,
         "future_or_groundtruth_runtime_dependency_false": summary.get("future_or_groundtruth_runtime_dependency") is False,
         "route_pose_leakage_ablation_fraction_eq_0": float(summary.get("route_pose_leakage_ablation_fraction") or 0.0)
@@ -611,6 +879,8 @@ def run_openloris_route_heldout_milestone(
         "action_entropy_gt_0": float(summary.get("action_entropy") or 0.0) > 0.0,
         "dominant_action_fraction_lt_1": float(summary.get("dominant_action_fraction") or 1.0) < 1.0,
         "learned_policy_runtime_selector": summary.get("trajectory_scorer_mode") in {"learned", "future_rollout"},
+        "unsafe_selected_rate_eq_0": summary.get("unsafe_selected_rate") is not None
+        and float(summary.get("unsafe_selected_rate")) == 0.0,
         "unknown_reduction_vs_current_gt_0": float(summary.get("unknown_reduction_vs_current") or 0.0) > 0.0,
         "coverage_memory_cells_seen_gt_0": int(summary.get("coverage_memory_cells_seen") or 0) > 0,
         "future_prediction_horizon_count_ge_2": int(summary.get("future_prediction_horizon_count") or 0) >= 2,
@@ -618,13 +888,33 @@ def run_openloris_route_heldout_milestone(
         "future_occupied_iou_or_proxy_gt_0": float(summary.get("future_occupied_iou_or_proxy") or 0.0) > 0.0,
         "latency_step_p95_ms_le_100": float(summary.get("latency_step_p95_ms") or 1.0e9) <= 100.0,
     }
+    caveat_repair_checks = {
+        **gate7_checks,
+        "pose_metric_source_learned_visual_memory": summary.get("pose_metric_source") == "learned_visual_memory",
+        "pose_metric_has_independent_groundtruth_route": int(
+            summary.get("pose_metric_independent_groundtruth_route_count") or 0
+        )
+        > 0,
+        "trajectory_bc_labels_non_degenerate": summary.get("trajectory_label_degenerate") is False,
+        "trajectory_bc_label_entropy_gt_0": float(summary.get("trajectory_label_action_entropy") or 0.0) > 0.0,
+        "runtime_routes_evaluated_ge_3": int(summary.get("runtime_routes_evaluated") or 0) >= 3,
+        "runtime_scenes_evaluated_ge_3": int(summary.get("runtime_scenes_evaluated") or 0) >= 3,
+    }
     summary["acceptance"].update(gate7_checks)
+    summary["acceptance"]["caveat_repair_checks"] = caveat_repair_checks
     summary["acceptance"]["non_collapsed_action_distribution"] = (
         bool(gate7_checks["action_entropy_gt_0"]) and bool(gate7_checks["dominant_action_fraction_lt_1"])
     )
     summary["acceptance"]["accepted_goal27_gate7"] = all(bool(value) for value in gate7_checks.values())
     summary["accepted_goal27_gate7"] = bool(summary["acceptance"]["accepted_goal27_gate7"])
+    summary["acceptance"]["accepted_goal28_scene_brain"] = all(bool(value) for value in gate7_checks.values())
+    summary["accepted_goal28_scene_brain"] = bool(summary["acceptance"]["accepted_goal28_scene_brain"])
+    summary["acceptance"]["accepted_goal28_caveat_repair"] = all(
+        bool(value) for value in caveat_repair_checks.values()
+    )
+    summary["accepted_goal28_caveat_repair"] = bool(summary["acceptance"]["accepted_goal28_caveat_repair"])
     summary["hard_gate_failures"] = [key for key, value in gate7_checks.items() if not bool(value)]
+    summary["caveat_repair_failures"] = [key for key, value in caveat_repair_checks.items() if not bool(value)]
     summary_path = output / "milestone_report.json"
     write_json(summary_path, summary, pretty=True)
     _write_markdown_report(output / "milestone_report.md", summary)
@@ -1102,6 +1392,58 @@ def _distribution_has(value: Any, key: str) -> bool:
     return isinstance(value, dict) and int(value.get(key, 0) or 0) > 0
 
 
+def _metric_values(records: list[dict[str, Any]], key: str) -> list[float]:
+    values: list[float] = []
+    for record in records:
+        value = record.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and np.isfinite(float(value)):
+            values.append(float(value))
+    return values
+
+
+def _min_metric(records: list[dict[str, Any]], key: str, default: float = 0.0) -> float:
+    values = _metric_values(records, key)
+    return float(min(values)) if values else float(default)
+
+
+def _max_metric(records: list[dict[str, Any]], key: str, default: float = 0.0) -> float:
+    values = _metric_values(records, key)
+    return float(max(values)) if values else float(default)
+
+
+def _sum_metric(records: list[dict[str, Any]], key: str) -> float:
+    return float(sum(_metric_values(records, key)))
+
+
+def _all_true(records: list[dict[str, Any]], key: str) -> bool:
+    return bool(records) and all(record.get(key) is True for record in records)
+
+
+def _all_false(records: list[dict[str, Any]], key: str) -> bool:
+    return bool(records) and all(record.get(key) is False for record in records)
+
+
+def _entropy_counts(counts: dict[str, Any]) -> float:
+    total = sum(int(value or 0) for value in counts.values())
+    if total <= 0:
+        return 0.0
+    entropy = 0.0
+    for value in counts.values():
+        count = int(value or 0)
+        if count <= 0:
+            continue
+        probability = count / float(total)
+        entropy -= probability * math.log2(probability)
+    return float(entropy)
+
+
+def _dominant_fraction_counts(counts: dict[str, Any]) -> float:
+    total = sum(int(value or 0) for value in counts.values())
+    if total <= 0:
+        return 0.0
+    return float(max((int(value or 0) for value in counts.values()), default=0) / float(total))
+
+
 def _json_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
@@ -1139,6 +1481,17 @@ def _parse_sequences(value: str) -> list[str]:
     return sequences
 
 
+def _dedupe_sequences(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        result.append(value)
+        seen.add(value)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -1150,6 +1503,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--sequences", type=_parse_sequences, default=list(DEFAULT_SEQUENCES))
     parser.add_argument("--heldout-sequence", default=None)
+    parser.add_argument(
+        "--runtime-heldout-sequences",
+        type=_parse_sequences,
+        default=None,
+        help="Comma-separated heldout routes to replay through the runtime; Goal28 requires at least two.",
+    )
     parser.add_argument("--max-frames", type=int, default=160)
     parser.add_argument("--download-missing", action="store_true")
     parser.add_argument("--dino-device", default=None)
@@ -1163,12 +1522,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--future-max-examples", type=int, default=None)
     parser.add_argument("--trajectory-steps", type=int, default=160)
     parser.add_argument("--trajectory-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--action-label-horizon-s",
+        type=float,
+        default=None,
+        help="Future-motion horizon for behavior-cloning action labels; defaults to candidate max duration.",
+    )
     parser.add_argument("--runtime-max-frames", type=int, default=None)
     parser.add_argument("--runtime-feature-source", choices=RUNTIME_FEATURE_SOURCES, default="dino")
     parser.add_argument("--student-feature-source", choices=("dino", "direct_rgbd"), default="dino")
     parser.add_argument(
         "--future-rollout-selection-mode",
-        choices=("argmin", "guided_transparent"),
+        choices=("argmin", "safe_argmin", "guided_transparent"),
         default="guided_transparent",
     )
     parser.add_argument(
@@ -1179,6 +1544,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-direct-rgbd-runtime-slice", action="store_true")
     parser.add_argument("--skip-dino-features", action="store_true")
     parser.add_argument("--pose-warp-source", choices=V1_POSE_WARP_SOURCES, default="odom")
+    parser.add_argument("--v1-policy-bev-source", choices=V1_POLICY_BEV_SOURCES, default="scene")
     args = parser.parse_args(argv)
     command = "python -m homebrain.tools.run_openloris_route_heldout_milestone " + " ".join(sys.argv[1:])
     summary = run_openloris_route_heldout_milestone(
@@ -1186,6 +1552,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir=args.out,
         sequences=args.sequences,
         heldout_sequence=args.heldout_sequence,
+        runtime_heldout_sequences=args.runtime_heldout_sequences,
         max_frames=args.max_frames,
         download_missing=args.download_missing,
         dino_device=args.dino_device,
@@ -1199,6 +1566,7 @@ def main(argv: list[str] | None = None) -> int:
         future_max_examples=args.future_max_examples,
         trajectory_steps=args.trajectory_steps,
         trajectory_batch_size=args.trajectory_batch_size,
+        action_label_horizon_s=args.action_label_horizon_s,
         runtime_max_frames=args.runtime_max_frames,
         runtime_feature_source=args.runtime_feature_source,
         student_feature_source=args.student_feature_source,
@@ -1207,6 +1575,7 @@ def main(argv: list[str] | None = None) -> int:
         run_direct_rgbd_runtime_slice=not args.skip_direct_rgbd_runtime_slice,
         build_dino_features=not args.skip_dino_features,
         pose_warp_source=args.pose_warp_source,
+        policy_bev_source=args.v1_policy_bev_source,
         command=command,
     )
     print(

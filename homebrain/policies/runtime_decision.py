@@ -162,7 +162,15 @@ def decide_trajectory(
             ),
             "future_rollout_candidate_new_area_gain": np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32),
             "future_rollout_candidate_progress": np.asarray(future_scores["candidate_progress"], dtype=np.float32),
-            "future_rollout_candidate_lower_is_better_score": lower_score,
+        "future_rollout_candidate_lower_is_better_score": lower_score,
+            "future_rollout_candidate_learned_safe_mask": _learned_safe_mask(future_scores).astype(np.float32),
+            "future_rollout_candidate_scene_safe_mask": np.asarray(
+                [
+                    1.0 if candidate.id == "stop" or not score.risky else 0.0
+                    for candidate, score in zip(candidates, transparent_decision.scores)
+                ],
+                dtype=np.float32,
+            ),
             "future_rollout_guided_total_scores": guided_scores.astype(np.float32),
             "future_rollout_future_bev_prob": np.asarray(future_scores["future_bev_prob"], dtype=np.float32),
             "future_rollout_future_uncertainty_grid": np.asarray(
@@ -312,7 +320,10 @@ def decide_trajectory(
                 "future_rollout_policy_selection_role": "prediction_context"
                 if learned_scorer is not None
                 else "runtime_selector",
+                "future_rollout_learned_safety_gate": future_rollout_selection_mode == "safe_argmin",
+                "future_rollout_scene_geometry_safety_gate": future_rollout_selection_mode == "safe_argmin",
                 "temporal_diversity_prior_enabled": future_rollout_selection_mode != "argmin"
+                and future_rollout_selection_mode != "safe_argmin"
                 and learned_scorer is None,
                 "future_rollout_replay_only": True,
                 "future_rollout_control_safe": False,
@@ -473,8 +484,24 @@ def _select_future_rollout_candidate(
     lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
     if selection_mode == "argmin":
         return int(np.argmin(lower_score)), lower_score.copy()
+    if selection_mode == "safe_argmin":
+        learned_safe = _learned_safe_mask(future_scores)
+        scene_safe = np.asarray(
+            [candidate.id == "stop" or not score.risky for candidate, score in zip(candidates, transparent_decision.scores)],
+            dtype=np.bool_,
+        )
+        learned_safe = learned_safe & scene_safe
+        gated = lower_score.copy()
+        gated[~learned_safe] = gated[~learned_safe] + np.float32(1000.0)
+        if np.any(learned_safe):
+            return int(np.argmin(gated)), gated
+        stop_index = next((index for index, candidate in enumerate(candidates) if candidate.id == "stop"), None)
+        if stop_index is not None:
+            gated[stop_index] = np.float32(np.min(gated) - 1.0)
+            return int(stop_index), gated
+        return int(np.argmin(gated)), gated
     if selection_mode != "guided_transparent":
-        raise ValueError("future_rollout_selection_mode must be 'argmin' or 'guided_transparent'")
+        raise ValueError("future_rollout_selection_mode must be 'argmin', 'safe_argmin', or 'guided_transparent'")
 
     transparent_scores = np.asarray([score.total_score for score in transparent_decision.scores], dtype=np.float32)
     collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
@@ -519,6 +546,13 @@ def _normalise_scores(values: np.ndarray) -> np.ndarray:
     if upper - lower <= 1.0e-6:
         return np.zeros_like(values, dtype=np.float32)
     return ((values - np.float32(lower)) / np.float32(upper - lower)).astype(np.float32)
+
+
+def _learned_safe_mask(future_scores: dict[str, np.ndarray | list[str] | str]) -> np.ndarray:
+    collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
+    future_collision = np.asarray(future_scores.get("candidate_future_collision", collision), dtype=np.float32)
+    unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
+    return (collision < np.float32(0.5)) & (future_collision < np.float32(0.5)) & (unsafe_now < np.float32(0.5))
 
 
 def _recent_selection_penalty(candidates: list[CandidateTrajectory], history: list[str]) -> np.ndarray:

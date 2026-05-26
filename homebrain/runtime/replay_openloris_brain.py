@@ -162,7 +162,8 @@ def run_openloris_runtime_replay(
             "scene_pose_trace_artifact": scene_memory.get("scene_pose_trace_artifact"),
             "scene_memory_visual": scene_memory.get("scene_memory_visual"),
             "current_local_bev_artifact": scene_memory.get("current_local_bev_artifact"),
-            "scene_memory_used_for_policy": str(report.get("policy_bev_source")) == "memory",
+            "scene_memory_used_for_policy": report.get("scene_memory_used_for_policy") is True
+            or str(report.get("policy_bev_source")) == "scene",
             "scene_bev_free_nonzero_fraction": scene_memory.get("scene_bev_free_nonzero_fraction"),
             "scene_bev_occupied_nonzero_fraction": scene_memory.get("scene_bev_occupied_nonzero_fraction"),
             "coverage_memory_cells_seen": scene_memory.get("coverage_memory_cells_seen"),
@@ -176,6 +177,9 @@ def run_openloris_runtime_replay(
             "pose_metric_proxy": scene_memory.get("pose_metric_proxy"),
             "pose_metric_source": scene_memory.get("pose_metric_source"),
             "pose_metric_independent_groundtruth": scene_memory.get("pose_metric_independent_groundtruth"),
+            "scene_state_online": report.get("scene_state_online") is True
+            or scene_memory.get("scene_state_online") is True,
+            "scene_map_created_only_posthoc": scene_memory.get("scene_map_created_only_posthoc"),
         }
     )
     write_report(
@@ -200,6 +204,17 @@ def write_runtime_scene_memory_artifacts(
     route_events = read_events(route)
     model_events = read_events(modeld)
     outputs = [event for event in model_events if isinstance(event, BrainOutputEvent)]
+    online_scene_state = _online_scene_state_artifact(modeld, outputs)
+    if online_scene_state is not None:
+        return _write_online_scene_state_artifacts(
+            route=route,
+            modeld=modeld,
+            output=output,
+            name=name,
+            online_scene_state=online_scene_state,
+            route_events=route_events,
+            outputs=outputs,
+        )
     records = _scene_records(modeld, outputs)
     if not records:
         empty = output / "scene_memory_empty.npz"
@@ -390,6 +405,134 @@ def write_runtime_scene_memory_artifacts(
         "future_prediction_horizon_count": int(last_future.shape[0]) if last_future is not None else 0,
         "frame_count_with_future_prediction": int(np.count_nonzero(future_counts > 0.0)),
         "frame_count_with_scene_memory": len(records),
+        "teacher_runtime_dependency": any(
+            isinstance(event.debug, dict) and event.debug.get("teacher_runtime_dependency") is True for event in outputs
+        ),
+        "future_or_groundtruth_runtime_dependency": any(
+            isinstance(event.debug, dict)
+            and event.debug.get("future_or_groundtruth_runtime_dependency") is True
+            for event in outputs
+        ),
+        "replay_only": True,
+        "control_safe": False,
+        "raw_pwm_emitted": False,
+        **pose_metrics,
+    }
+    _write_json(output / "scene_memory_report.json", report)
+    return report
+
+
+def _online_scene_state_artifact(modeld: Path, outputs: list[BrainOutputEvent]) -> Path | None:
+    for event in reversed(outputs):
+        if not isinstance(event.debug, dict):
+            continue
+        value = event.debug.get("online_scene_state_final_artifact")
+        if not isinstance(value, str):
+            scene_state = event.debug.get("scene_state")
+            if isinstance(scene_state, dict):
+                value = scene_state.get("scene_state_final_artifact")
+        if isinstance(value, str) and value:
+            path = modeld / value
+            if path.exists():
+                return path
+    return None
+
+
+def _write_online_scene_state_artifacts(
+    *,
+    route: Path,
+    modeld: Path,
+    output: Path,
+    name: object,
+    online_scene_state: Path,
+    route_events: list[Event],
+    outputs: list[BrainOutputEvent],
+) -> dict[str, Any]:
+    safe_name = _safe_id(str(name))
+    npz_path = output / f"{safe_name}_scene_memory.npz"
+    pose_trace_path = output / f"{safe_name}_pose_trace.npz"
+    with np.load(online_scene_state, allow_pickle=False) as data:
+        arrays = {name: np.asarray(data[name]) for name in data.files}
+    write_deterministic_npz(npz_path, arrays)
+    pose_arrays = {
+        "robot_pose_trace": np.asarray(arrays.get("robot_pose_trace", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32),
+        "pose_trace_overlay": np.asarray(arrays.get("pose_trace_overlay", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+        "scene_grid_origin_xy_m": np.asarray(
+            arrays.get("scene_grid_origin_xy_m", np.zeros((2,), dtype=np.float32)),
+            dtype=np.float32,
+        ),
+        "meters_per_cell": np.asarray(arrays.get("meters_per_cell", np.asarray([0.05], dtype=np.float32)), dtype=np.float32),
+    }
+    write_deterministic_npz(pose_trace_path, pose_arrays)
+    scene = {
+        "free": np.asarray(arrays.get("scene_bev_free_prob", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+        "occupied": np.asarray(arrays.get("scene_bev_occupied_prob", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+        "unknown": np.asarray(arrays.get("scene_bev_unknown_prob", np.ones((1, 1), dtype=np.float32)), dtype=np.float32),
+        "traversable": np.asarray(arrays.get("scene_bev_traversable_prob", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+        "risky": np.asarray(arrays.get("scene_bev_risky_prob", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+        "uncertainty": np.asarray(arrays.get("uncertainty_unknown_map", np.ones((1, 1), dtype=np.float32)), dtype=np.float32),
+        "seen": np.asarray(arrays.get("coverage_seen_map", np.zeros((1, 1), dtype=np.float32)), dtype=np.float32),
+    }
+    current = np.asarray(arrays.get("current_local_bev", np.zeros((5, 1, 1), dtype=np.float32)), dtype=np.float32)
+    future_free = np.asarray(arrays.get("predicted_future_free_overlay", np.zeros_like(scene["free"])), dtype=np.float32)
+    future_occupied = np.asarray(arrays.get("predicted_future_occupied_overlay", np.zeros_like(scene["free"])), dtype=np.float32)
+    future_unknown = np.asarray(arrays.get("predicted_future_unknown_overlay", np.ones_like(scene["free"])), dtype=np.float32)
+    selected_overlay = np.asarray(
+        arrays.get("selected_candidate_trajectory_overlay", np.zeros_like(scene["free"])),
+        dtype=np.float32,
+    )
+    pose_overlay = np.asarray(arrays.get("pose_trace_overlay", np.zeros_like(scene["free"])), dtype=np.float32)
+    visual = _scene_memory_contact_sheet(
+        scene=scene,
+        current=current,
+        future_free=future_free,
+        future_unknown=future_unknown,
+        future_occupied=future_occupied,
+        selected_overlay=np.clip(selected_overlay, 0.0, 1.0),
+        pose_overlay=np.clip(pose_overlay, 0.0, 1.0),
+    )
+    ppm_path = output / f"{safe_name}_scene_memory.ppm"
+    _write_ppm(ppm_path, visual)
+    counts_seen = int(np.count_nonzero(scene["seen"] > 0.0))
+    observed_mask = scene["seen"] > 0.0
+    scene_unknown_values = scene["unknown"][observed_mask]
+    scene_unknown_mean = float(np.mean(scene_unknown_values)) if scene_unknown_values.size else 0.0
+    current_unknown_mean = 0.0
+    if current.ndim == 3 and current.shape[0] >= 3:
+        current_unknown_mean = float(np.mean(current[2]))
+    pose_trace = np.asarray(arrays.get("robot_pose_trace", np.zeros((0, 3), dtype=np.float32)), dtype=np.float32)
+    predicted_future = np.asarray(arrays.get("predicted_future_bev", np.zeros((0, 5, 1, 1), dtype=np.float32)), dtype=np.float32)
+    pose_metrics = _pose_metrics(route_events, outputs)
+    report = {
+        "schema_version": "homebrain.runtime.scene_memory.v0",
+        "route": route.as_posix(),
+        "modeld_log": modeld.as_posix(),
+        "scene_memory_npz": npz_path.as_posix(),
+        "scene_pose_trace_artifact": pose_trace_path.as_posix(),
+        "scene_memory_visual": ppm_path.as_posix(),
+        "online_scene_state_source_artifact": online_scene_state.as_posix(),
+        "current_local_bev_artifact": outputs[-1].local_bev_ref if outputs else None,
+        "step_count": int(pose_trace.shape[0]),
+        "runtime_api_step_count": int(pose_trace.shape[0]),
+        "meters_per_cell": float(np.asarray(arrays.get("meters_per_cell", [0.05])).reshape(-1)[0]),
+        "scene_grid_shape": [int(scene["free"].shape[0]), int(scene["free"].shape[1])],
+        "pose_trace_count": int(pose_trace.shape[0]),
+        "observed_cell_ratio": float(np.count_nonzero(observed_mask) / max(scene["free"].size, 1)),
+        "scene_bev_free_nonzero_fraction": float(np.count_nonzero(scene["free"] > 0.05) / max(scene["free"].size, 1)),
+        "scene_bev_occupied_nonzero_fraction": float(
+            np.count_nonzero(scene["occupied"] > 0.05) / max(scene["occupied"].size, 1)
+        ),
+        "current_unknown_mean": current_unknown_mean,
+        "scene_unknown_mean": scene_unknown_mean,
+        "unknown_reduction_vs_current": float(current_unknown_mean - scene_unknown_mean),
+        "coverage_memory_cells_seen": counts_seen,
+        "selected_candidate_overlay_nonzero_count": int(np.count_nonzero(selected_overlay > 0.0)),
+        "predicted_future_overlay_available": bool(predicted_future.shape[0] > 0),
+        "future_prediction_horizon_count": int(predicted_future.shape[0]),
+        "frame_count_with_future_prediction": int(np.count_nonzero(future_free > 0.0) + np.count_nonzero(future_occupied > 0.0)),
+        "frame_count_with_scene_memory": int(pose_trace.shape[0]),
+        "scene_state_online": True,
+        "scene_map_created_only_posthoc": False,
         "teacher_runtime_dependency": any(
             isinstance(event.debug, dict) and event.debug.get("teacher_runtime_dependency") is True for event in outputs
         ),
@@ -613,12 +756,22 @@ def _add_pose_overlay(
 
 
 def _pose_metrics(route_events: list[Event], outputs: list[BrainOutputEvent]) -> dict[str, Any]:
+    requested_sources = {
+        str(event.debug.get("pose_warp_source_requested"))
+        for event in outputs
+        if isinstance(event.debug, dict) and event.debug.get("pose_warp_source_requested") is not None
+    }
+    leakage_fraction = [
+        1.0 if bool(event.debug.get("route_pose_leakage_ablation")) else 0.0
+        for event in outputs
+        if isinstance(event.debug, dict) and isinstance(event.debug.get("route_pose_leakage_ablation"), bool)
+    ]
     pose_samples = {
         (event.sequence_id, event.timestamp_ns): event
         for event in route_events
         if isinstance(event, PoseEvent)
     }
-    pose_sample_kind = "groundtruth_pose"
+    pose_eval_reference = "independent_groundtruth_eval"
     pose_metric_independent_groundtruth = True
     if not pose_samples:
         pose_samples = {
@@ -626,8 +779,14 @@ def _pose_metrics(route_events: list[Event], outputs: list[BrainOutputEvent]) ->
             for event in route_events
             if isinstance(event, OdomEvent)
         }
-        pose_sample_kind = "runtime_odometry_proxy"
+        pose_eval_reference = "odometry_proxy"
         pose_metric_independent_groundtruth = False
+    if leakage_fraction and float(np.mean(leakage_fraction)) > 0.0:
+        pose_metric_source = "leakage_ablation"
+    elif "predicted_pose" in requested_sources or "odom_plus_visual_correction" in requested_sources:
+        pose_metric_source = "learned_visual_memory"
+    else:
+        pose_metric_source = "odometry_proxy"
     matched_estimates: list[tuple[float, float, float]] = []
     matched_truth: list[tuple[float, float, float]] = []
     for event in outputs:
@@ -658,7 +817,8 @@ def _pose_metrics(route_events: list[Event], outputs: list[BrainOutputEvent]) ->
             "pose_ate_rmse_m_or_proxy": 0.0,
             "pose_rpe_translation_rmse_m_or_proxy": 0.0,
             "pose_label_match_count": len(matched_estimates),
-            "pose_metric_source": pose_sample_kind,
+            "pose_metric_source": pose_metric_source,
+            "pose_metric_eval_reference": pose_eval_reference,
             "pose_metric_independent_groundtruth": pose_metric_independent_groundtruth,
         }
     est = np.asarray(matched_estimates, dtype=np.float32)
@@ -672,7 +832,8 @@ def _pose_metrics(route_events: list[Event], outputs: list[BrainOutputEvent]) ->
     return {
         "pose_metric_available": True,
         "pose_metric_proxy": "scene_pose_trace_vs_pose_source_relative_trace_eval_only",
-        "pose_metric_source": pose_sample_kind,
+        "pose_metric_source": pose_metric_source,
+        "pose_metric_eval_reference": pose_eval_reference,
         "pose_metric_independent_groundtruth": pose_metric_independent_groundtruth,
         "pose_ate_rmse_m_or_proxy": float(np.sqrt(np.mean(ate**2))),
         "pose_rpe_translation_rmse_m_or_proxy": float(np.sqrt(np.mean(rpe**2))),
@@ -883,7 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("odom", "odom_or_route_pose", "route_pose", "route_pose_ablation", "predicted_pose", "none"),
         default="odom",
     )
-    parser.add_argument("--v1-policy-bev-source", choices=("current", "memory"), default="memory")
+    parser.add_argument("--v1-policy-bev-source", choices=("current", "memory", "scene"), default="memory")
     parser.add_argument(
         "--runtime-feature-source",
         choices=("dino", "direct_rgbd"),
@@ -892,7 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--future-rollout-selection-mode",
-        choices=("argmin", "guided_transparent"),
+        choices=("argmin", "safe_argmin", "guided_transparent"),
         default="guided_transparent",
     )
     parser.add_argument(

@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--v1-policy-bev-source",
-        choices=("current", "memory"),
+        choices=("current", "memory", "scene"),
         default="memory",
         help="BEV source used for SpatialMemoryNet v1 replay-only trajectory decisions.",
     )

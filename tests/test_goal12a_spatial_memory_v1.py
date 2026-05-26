@@ -17,7 +17,7 @@ from homebrain.brain.spatial_memory_v1 import (
 )
 from homebrain.brain.spatial_memory_v0 import SpatialMemoryNetConfig, SpatialMemoryNetV0, save_checkpoint as save_v0_checkpoint
 from homebrain.data.pack_spatial_dataset import pack_spatial_dataset
-from homebrain.messages.schema import BrainOutputEvent, FrameEvent, PoseEvent
+from homebrain.messages.schema import BrainOutputEvent, FrameEvent, OdomEvent, PoseEvent
 from homebrain.replay.replayd import replay_log
 from homebrain.replay.segment_log import read_events, write_segment
 from homebrain.teachers.dino_teacher import run_dino_teacher
@@ -321,6 +321,38 @@ def test_route_pose_warp_source_selection_and_safety_flags(tmp_path: Path) -> No
     assert outputs[1].debug["control_safe"] is False
 
 
+def test_odom_plus_visual_correction_is_online_non_leaking_pose_source(tmp_path: Path) -> None:
+    route = tmp_path / "odom_visual"
+    features = tmp_path / "dino_fake"
+    out = tmp_path / "modeld"
+    checkpoint = tmp_path / "v1.pt"
+    _write_route_with_pose(route)
+    run_dino_teacher(route, features, backend_name="fake")
+    model = SpatialMemoryNetV1(SpatialMemoryNetV1Config(feature_dim=32, bev_shape=(4, 4), hidden_channels=16, sensor_dim=5))
+    save_checkpoint(checkpoint, model, metadata={"control_safe": False}, metrics={})
+
+    write_spatial_model_outputs(
+        route,
+        out,
+        checkpoint=checkpoint,
+        feature_dir=features,
+        device_name="cpu",
+        v1_pose_warp_source="odom_plus_visual_correction",
+    )
+
+    outputs = [event for event in read_events(out) if isinstance(event, BrainOutputEvent)]
+    assert outputs[1].debug["pose_warp_source_requested"] == "odom_plus_visual_correction"
+    assert outputs[1].debug["pose_warp_source"] in {
+        "route_odom_visual_correction_missing",
+        "route_odom_plus_predicted_pose_correction",
+    }
+    assert outputs[1].debug["pose_warp_valid"] is True
+    assert outputs[1].debug["predicted_pose_warp_ablation"] is False
+    assert outputs[1].debug["route_pose_leakage_ablation"] is False
+    assert outputs[1].debug["future_or_groundtruth_runtime_dependency"] is False
+    assert outputs[1].debug["control_safe"] is False
+
+
 def test_goal12b_report_gates() -> None:
     disabled = {
         "baseline_comparison": {
@@ -409,9 +441,18 @@ def _write_route_with_pose(route: Path) -> None:
             child_frame_id="base_link",
             pose_kind="base_pose",
         )
+        odom = OdomEvent(
+            timestamp_ns=timestamp_ns,
+            sequence_id="sequence_pose",
+            source="test_odom",
+            position_m=(index * 0.1, 0.0, 0.0),
+            orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+            linear_velocity_mps=(0.1, 0.0, 0.0),
+            angular_velocity_radps=(0.0, 0.0, 0.0),
+        )
         target = route / frame.data_ref
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(b"P6\n1 1\n255\n\x00\x00\x00")
-        events.extend([frame, pose])
+        events.extend([frame, pose, odom])
         artifacts.append(frame.data_ref)
     write_segment(route, events, segment_id=route.name, artifact_files=artifacts)

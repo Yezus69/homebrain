@@ -26,9 +26,9 @@ Implemented:
   replay-only runtime candidate scoring option;
 - deterministic direct RGB-D student feature artifacts and a direct RGB-D
   runtime path that does not require DINO at the control tick;
-- scene-level runtime memory artifacts with fused scene BEV, current local BEV,
-  pose trace, uncertainty/seen maps, selected trajectory overlays, and predicted
-  future overlays.
+- online `SceneState` inside `Brain.step(...)` with fused scene BEV, current
+  local BEV, scene-context policy BEV, pose trace, uncertainty/seen maps,
+  selected trajectory overlays, and predicted future overlays.
 
 Not implemented:
 
@@ -80,7 +80,83 @@ cmd_vel_non_null_count = 0
 
 ## Last Completed Goal
 
-Goal27 / Gate 7: real public OpenLORIS scene-level robot-brain vertical slice.
+Goal28 caveat repair now passes on three heldout public OpenLORIS scenes. This
+does not make HomeBrain production-deployable: no hardware loop, owned
+synchronized logs, controller, watchdog, dynamic-risk proof, or physical safety
+gate exists yet.
+
+## Goal28 Caveat Repair Status
+
+Objective: repair the user-rejected Goal28 caveats before calling the robot
+brain achieved: add learned visual/memory pose correction, fix degenerate
+behavior-cloning labels, and broaden runtime route coverage beyond
+corridor/office.
+
+Command:
+
+```text
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal28_caveat_repair_three_scene_market_v1 --sequences cafe1-1_2,corridor1-1,office1-1_7,market1-1_3 --heldout-sequence corridor1-1 --runtime-heldout-sequences corridor1-1,office1-1_7,market1-1_3 --max-frames 96 --spatial-steps 40 --future-steps 40 --trajectory-steps 80 --runtime-max-frames 96 --student-feature-source direct_rgbd --runtime-feature-source direct_rgbd --runtime-policy-source future_rollout --future-rollout-selection-mode safe_argmin --v1-policy-bev-source scene --pose-warp-source odom_plus_visual_correction --action-label-horizon-s 0.4 --max-spatial-folds 2 --skip-direct-rgbd-runtime-slice --skip-dino-features
+```
+
+Artifacts:
+
+```text
+runs/goal28_caveat_repair_three_scene_market_v1/milestone_report.json
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_corridor1_1_direct_rgbd/runtime_report.json
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_office1_1_7_direct_rgbd/runtime_report.json
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_market1_1_3_direct_rgbd/runtime_report.json
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_corridor1_1_direct_rgbd/online_modeld/brain_outputs/scene_state_online/scene_state_final.npz
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_office1_1_7_direct_rgbd/online_modeld/brain_outputs/scene_state_online/scene_state_final.npz
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_market1_1_3_direct_rgbd/online_modeld/brain_outputs/scene_state_online/scene_state_final.npz
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_market1_1_3_direct_rgbd/scene_memory/market1_1_3_pose_trace.npz
+runs/goal28_caveat_repair_three_scene_market_v1/runtime/heldout_market1_1_3_direct_rgbd/scene_memory/market1_1_3_scene_memory.ppm
+runs/goal28_caveat_repair_three_scene_market_v1/contact_sheets/heldout_market1_1_3_direct_rgbd_failure_contact_sheet.ppm
+```
+
+Key metrics: `accepted_goal28_scene_brain=true`,
+`accepted_goal28_caveat_repair=true`, hard gate failures `[]`,
+caveat-repair failures `[]`, runtime routes/scenes `3/3`
+(`corridor1-1`, `office1-1_7`, `market1-1_3`), and runtime scene names
+`corridor`, `office`, `market`. Repaired caveats:
+`pose_metric_source=learned_visual_memory`, independent pose reference exists
+for two runtime routes, BC labels are non-degenerate with entropy
+`1.0681221536385543` and distribution `stop=45, straight_medium=5,
+straight_short=102`, unsafe selected motion rate `0.0`, aggregate action
+entropy `0.20062232431271465`, dominant action fraction `0.96875`, p95 step
+latency `75.86815 ms`, future free/occupied/unknown IoU proxies
+`0.02340155100512294 / 0.0424341656433347 / 0.8425674077578051`, unknown
+reduction vs current `0.8108127191662788`, coverage memory cells seen `4748`,
+teacher runtime dependency `false`, future/ground-truth runtime dependency
+`false`, route pose leakage fraction `0.0`, raw PWM `false`, control safe
+`false`.
+
+Market route note: `market1-1_3` required staging the official
+OpenLORIS package and fixing `trans_matrix.yaml` parsing to compose the
+measured `base_link -> laser -> d400_color_optical_frame` transform chain.
+`cafe1-1_2` remains a rejected runtime-heldout candidate for this repair:
+`runs/goal28_caveat_repair_three_route_probe` fails because all cafe FutureBEV
+examples are rejected as degenerate.
+
+Verification:
+
+```text
+python -m py_compile homebrain\brain\modeld.py homebrain\runtime\replay_openloris_brain.py homebrain\tools\run_openloris_route_heldout_milestone.py
+python -m pytest tests\test_goal12a_spatial_memory_v1.py::test_odom_plus_visual_correction_is_online_non_leaking_pose_source tests\test_goal12a_spatial_memory_v1.py::test_route_pose_warp_source_selection_and_safety_flags -q
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal28_caveat_repair_odom_visual_v2 --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --runtime-heldout-sequences corridor1-1,office1-1_7 --max-frames 96 --spatial-steps 40 --future-steps 40 --trajectory-steps 80 --runtime-max-frames 96 --student-feature-source direct_rgbd --runtime-feature-source direct_rgbd --runtime-policy-source future_rollout --future-rollout-selection-mode safe_argmin --v1-policy-bev-source scene --pose-warp-source odom_plus_visual_correction --action-label-horizon-s 0.4 --max-spatial-folds 2 --skip-direct-rgbd-runtime-slice --skip-dino-features
+python -m homebrain.datasets.setup_openloris_scene --out data\public\openloris_scene --sequence market1-1_3 --download --max-download-gb 45 --allow-large-download
+python -m homebrain.datasets.setup_openloris_scene --out data\public\openloris_scene --sequence market1-1_3 --package-file data\public\openloris_scene\_downloads\market1-1_3-package.tar --max-download-gb 45 --allow-large-download
+python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal28_caveat_repair_three_scene_market_v1 --sequences cafe1-1_2,corridor1-1,office1-1_7,market1-1_3 --heldout-sequence corridor1-1 --runtime-heldout-sequences corridor1-1,office1-1_7,market1-1_3 --max-frames 96 --spatial-steps 40 --future-steps 40 --trajectory-steps 80 --runtime-max-frames 96 --student-feature-source direct_rgbd --runtime-feature-source direct_rgbd --runtime-policy-source future_rollout --future-rollout-selection-mode safe_argmin --v1-policy-bev-source scene --pose-warp-source odom_plus_visual_correction --action-label-horizon-s 0.4 --max-spatial-folds 2 --skip-direct-rgbd-runtime-slice --skip-dino-features
+python -m pytest tests\test_goal10a_robot_frame_bridge.py::test_openloris_trans_matrix_chain_imports_measured_camera_to_base tests\test_goal12a_spatial_memory_v1.py::test_odom_plus_visual_correction_is_online_non_leaking_pose_source tests\test_goal20a_closed_loop_replay.py -q
+python -m pytest tests\test_goal10a_robot_frame_bridge.py tests\test_goal12a_spatial_memory_v1.py tests\test_goal20a_closed_loop_replay.py tests\test_future_bev_rollout_v1.py tests\test_goal14_behavior_cloning_labels.py -q
+git diff --check
+python -m pytest -q
+```
+
+Pass/fail: focused transform/runtime tests passed with `6 passed`; broader
+focused tests passed with `32 passed`; full pytest passed with `131 passed`;
+`git diff --check` passed with line-ending conversion warnings only. The
+three-scene repair milestone passes both the original Goal28 hard gates and the
+stricter caveat-repair gates.
 
 ## Goal27 Result
 
@@ -231,23 +307,26 @@ real routes.
 
 ## Active Next Goal
 
-Goal28 should turn the Goal27 single-route Gate7 proof into a more credible
-robot-brain learning loop instead of widening demo plumbing.
+Goal29 should make Goal28 less narrow and less odometry-dependent instead of
+repeating the accepted corridor/office replay.
 
 Priority repairs:
 
 ```text
-stage more real public robot routes
-  -> train direct RGB-D / RGB-IR student on broader route-heldout splits
-  -> fix degenerate behavior-cloning trajectory labels
+stage more calibrated real public or owned robot routes
+  -> train/evaluate learned visual-memory pose correction
+  -> improve direct RGB-D / RGB-IR student on broader route-heldout splits
   -> improve physical free/traversable labels and dynamic-risk evidence
-  -> evaluate FutureBEV policy quality beyond action entropy
+  -> fix degenerate behavior-cloning trajectory labels or replace BC honestly
+  -> evaluate FutureBEV policy quality beyond entropy and stop recovery
   -> keep runtime teacher-free, leakage-free, bounded, and replay-only
 ```
 
-Do not regress the Goal27 hard gates: no `guided_transparent`, no temporal
-diversity prior, no runtime teacher dependency, no route-pose leakage, no raw
-PWM, and `control_safe=false` until a real safety stack exists.
+Do not regress Goal28 hard gates: online SceneState in `Brain.step(...)`,
+scene-level memory consumed by policy, no post-hoc-only scene maps, at least two
+heldout routes, no `guided_transparent`, no temporal diversity prior, no runtime
+teacher dependency, no route-pose leakage, unsafe selected motion `0.0`, no raw
+PWM, p95 <=100 ms, and `control_safe=false` until a real safety stack exists.
 
 ## Goal25 Result
 

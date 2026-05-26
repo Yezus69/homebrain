@@ -40,8 +40,16 @@ from homebrain.replay.segment_log import load_manifest, read_events, write_segme
 from homebrain.train.spatial_dataset import BEV_OUTPUT_CHANNELS, DINOFeatureStore
 
 DUMMY_MODELD_SOURCE = "modeld_dummy_v0"
-V1_POSE_WARP_SOURCES = ("odom", "odom_or_route_pose", "route_pose", "route_pose_ablation", "predicted_pose", "none")
-V1_POLICY_BEV_SOURCES = ("current", "memory")
+V1_POSE_WARP_SOURCES = (
+    "odom",
+    "odom_or_route_pose",
+    "route_pose",
+    "route_pose_ablation",
+    "predicted_pose",
+    "odom_plus_visual_correction",
+    "none",
+)
+V1_POLICY_BEV_SOURCES = ("current", "memory", "scene")
 RUNTIME_FEATURE_SOURCES = ("dino", "direct_rgbd")
 
 
@@ -51,16 +59,200 @@ class RoutePoseDelta:
     source: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class SceneState:
+    meters_per_cell: float
+    local_shape: tuple[int, int]
     pose_estimate: tuple[float, float, float]
-    local_bev_ref: str | None
-    selected_trajectory_id: str | None
-    policy_bev_source: str
-    future_prediction_horizon_count: int
-    step_index: int
+    x_min_m: float
+    y_min_m: float
+    free_sum: np.ndarray
+    occupied_sum: np.ndarray
+    unknown_sum: np.ndarray
+    traversable_sum: np.ndarray
+    risky_sum: np.ndarray
+    uncertainty_sum: np.ndarray
+    counts: np.ndarray
+    seen: np.ndarray
+    selected_overlay: np.ndarray
+    future_free_sum: np.ndarray
+    future_occupied_sum: np.ndarray
+    future_unknown_sum: np.ndarray
+    future_counts: np.ndarray
+    pose_overlay: np.ndarray
+    pose_trace: list[tuple[float, float, float]]
+    local_bev_ref: str | None = None
+    selected_trajectory_id: str | None = None
+    policy_bev_source: str = "scene"
+    future_prediction_horizon_count: int = 0
+    step_index: int = 0
+    current_local_bev: np.ndarray | None = None
+    scene_context_local_bev: np.ndarray | None = None
+    last_future_bev: np.ndarray | None = None
+    future_predictions_by_candidate: np.ndarray | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        local_shape: tuple[int, int],
+        meters_per_cell: float,
+        pose_estimate: tuple[float, float, float],
+    ) -> "SceneState":
+        height, width = local_shape
+        grid_h = max(96, int(height) * 6)
+        grid_w = max(96, int(width) * 6)
+        x_min = -float(height) * float(meters_per_cell) * 2.0
+        y_min = -float(grid_w) * float(meters_per_cell) / 2.0
+        zeros = np.zeros((grid_h, grid_w), dtype=np.float32)
+        return cls(
+            meters_per_cell=float(meters_per_cell),
+            local_shape=(int(height), int(width)),
+            pose_estimate=pose_estimate,
+            x_min_m=float(x_min),
+            y_min_m=float(y_min),
+            free_sum=zeros.copy(),
+            occupied_sum=zeros.copy(),
+            unknown_sum=zeros.copy(),
+            traversable_sum=zeros.copy(),
+            risky_sum=zeros.copy(),
+            uncertainty_sum=zeros.copy(),
+            counts=zeros.copy(),
+            seen=zeros.copy(),
+            selected_overlay=zeros.copy(),
+            future_free_sum=zeros.copy(),
+            future_occupied_sum=zeros.copy(),
+            future_unknown_sum=zeros.copy(),
+            future_counts=zeros.copy(),
+            pose_overlay=zeros.copy(),
+            pose_trace=[],
+        )
+
+    @property
+    def scene_shape(self) -> tuple[int, int]:
+        return (int(self.counts.shape[0]), int(self.counts.shape[1]))
+
+    def update_from_local(
+        self,
+        *,
+        pose_estimate: tuple[float, float, float],
+        current_bev: np.ndarray,
+        memory_bev: np.ndarray,
+        uncertainty: np.ndarray,
+    ) -> np.ndarray:
+        self.pose_estimate = pose_estimate
+        self.current_local_bev = np.asarray(current_bev, dtype=np.float32).copy()
+        rows, cols, valid = self._local_scene_indices(pose_estimate)
+        rows_valid = rows[valid]
+        cols_valid = cols[valid]
+        self._add_at(self.free_sum, rows_valid, cols_valid, memory_bev[0][valid])
+        self._add_at(self.occupied_sum, rows_valid, cols_valid, memory_bev[1][valid])
+        self._add_at(self.unknown_sum, rows_valid, cols_valid, memory_bev[2][valid])
+        self._add_at(self.traversable_sum, rows_valid, cols_valid, memory_bev[3][valid])
+        self._add_at(self.risky_sum, rows_valid, cols_valid, memory_bev[4][valid])
+        self._add_at(self.uncertainty_sum, rows_valid, cols_valid, uncertainty[valid])
+        self._add_at(self.counts, rows_valid, cols_valid, np.ones_like(rows_valid, dtype=np.float32))
+        self.seen[rows_valid, cols_valid] = np.maximum(
+            self.seen[rows_valid, cols_valid],
+            (memory_bev[2][valid] < np.float32(0.75)).astype(np.float32),
+        )
+        self._add_pose_overlay(pose_estimate)
+        self.pose_trace.append(tuple(float(value) for value in pose_estimate))
+        self.scene_context_local_bev = self.scene_context_for_pose(pose_estimate)
+        return self.scene_context_local_bev
+
+    def record_decision(
+        self,
+        *,
+        selected_trajectory_id: str | None,
+        local_bev_ref: str | None,
+        policy_bev_source: str,
+        candidates: list[Any],
+        future_arrays: dict[str, np.ndarray],
+        step_index: int,
+    ) -> None:
+        self.selected_trajectory_id = selected_trajectory_id
+        self.local_bev_ref = local_bev_ref
+        self.policy_bev_source = policy_bev_source
+        self.step_index = int(step_index)
+        selected_candidate = None
+        for candidate in candidates:
+            if str(getattr(candidate, "id", "")) == str(selected_trajectory_id):
+                selected_candidate = candidate
+                break
+        if selected_candidate is not None:
+            self._add_candidate_overlay(self.selected_overlay, selected_candidate)
+        future = future_arrays.get("future_rollout_future_bev_prob")
+        if future is not None:
+            self._record_future(np.asarray(future, dtype=np.float32), candidates)
+
+    def scene_context_for_pose(self, pose: tuple[float, float, float]) -> np.ndarray:
+        rows, cols, valid = self._local_scene_indices(pose)
+        stack = np.zeros((5, *self.local_shape), dtype=np.float32)
+        stack[2, :, :] = 1.0
+        maps = self.scene_maps()
+        for channel, key in enumerate(("free", "occupied", "unknown", "traversable", "risky")):
+            values = maps[key]
+            channel_array = stack[channel]
+            channel_array[valid] = values[rows[valid], cols[valid]]
+        return stack.astype(np.float32)
+
+    def scene_maps(self) -> dict[str, np.ndarray]:
+        denom = np.maximum(self.counts, np.float32(1.0))
+        unknown = np.where(self.counts > 0.0, self.unknown_sum / denom, np.float32(1.0)).astype(np.float32)
+        return {
+            "free": np.where(self.counts > 0.0, self.free_sum / denom, np.float32(0.0)).astype(np.float32),
+            "occupied": np.where(self.counts > 0.0, self.occupied_sum / denom, np.float32(0.0)).astype(np.float32),
+            "unknown": unknown,
+            "traversable": np.where(self.counts > 0.0, self.traversable_sum / denom, np.float32(0.0)).astype(np.float32),
+            "risky": np.where(self.counts > 0.0, self.risky_sum / denom, np.float32(0.0)).astype(np.float32),
+            "uncertainty": np.where(self.counts > 0.0, self.uncertainty_sum / denom, unknown).astype(np.float32),
+            "seen": np.clip(self.seen, 0.0, 1.0).astype(np.float32),
+        }
+
+    def write_npz(self, path: Path) -> str:
+        maps = self.scene_maps()
+        future_denom = np.maximum(self.future_counts, np.float32(1.0))
+        arrays = {
+            "scene_bev_free_prob": maps["free"],
+            "scene_bev_occupied_prob": maps["occupied"],
+            "scene_bev_unknown_prob": maps["unknown"],
+            "scene_bev_traversable_prob": maps["traversable"],
+            "scene_bev_risky_prob": maps["risky"],
+            "uncertainty_unknown_map": maps["uncertainty"],
+            "coverage_seen_map": maps["seen"],
+            "current_local_bev": self.current_local_bev
+            if self.current_local_bev is not None
+            else np.zeros((5, *self.local_shape), dtype=np.float32),
+            "scene_context_local_bev": self.scene_context_local_bev
+            if self.scene_context_local_bev is not None
+            else np.zeros((5, *self.local_shape), dtype=np.float32),
+            "robot_pose_trace": np.asarray(self.pose_trace, dtype=np.float32).reshape(-1, 3),
+            "selected_candidate_trajectory_overlay": np.clip(self.selected_overlay, 0.0, 1.0).astype(np.float32),
+            "predicted_future_free_overlay": (self.future_free_sum / future_denom).astype(np.float32),
+            "predicted_future_occupied_overlay": (self.future_occupied_sum / future_denom).astype(np.float32),
+            "predicted_future_unknown_overlay": np.where(
+                self.future_counts > 0.0,
+                self.future_unknown_sum / future_denom,
+                np.float32(1.0),
+            ).astype(np.float32),
+            "predicted_future_bev": self.last_future_bev
+            if self.last_future_bev is not None
+            else np.zeros((0, 5, *self.local_shape), dtype=np.float32),
+            "future_predictions_by_candidate": self.future_predictions_by_candidate
+            if self.future_predictions_by_candidate is not None
+            else np.zeros((0, 0, 0), dtype=np.float32),
+            "pose_trace_overlay": np.clip(self.pose_overlay, 0.0, 1.0).astype(np.float32),
+            "scene_grid_origin_xy_m": np.asarray([self.x_min_m, self.y_min_m], dtype=np.float32),
+            "meters_per_cell": np.asarray([self.meters_per_cell], dtype=np.float32),
+            "scene_state_online": np.asarray([True], dtype=np.bool_),
+            "scene_map_created_only_posthoc": np.asarray([False], dtype=np.bool_),
+        }
+        write_deterministic_npz(path, arrays)
+        return path.as_posix()
 
     def to_debug(self) -> dict[str, Any]:
+        maps = self.scene_maps()
         return {
             "schema_version": "homebrain.runtime.scene_state.v0",
             "pose_estimate_in_scene": _pose_estimate_dict(self.pose_estimate),
@@ -69,8 +261,123 @@ class SceneState:
             "policy_bev_source": self.policy_bev_source,
             "future_prediction_horizon_count": int(self.future_prediction_horizon_count),
             "updated_online_inside_brain_step": True,
+            "fused_scene_map_updated_online": True,
+            "scene_map_created_only_posthoc": False,
+            "scene_context_available_for_policy": self.scene_context_local_bev is not None,
+            "scene_memory_consumed_by_policy": self.policy_bev_source == "scene",
+            "scene_grid_shape": [int(self.scene_shape[0]), int(self.scene_shape[1])],
+            "coverage_memory_cells_seen": int(np.count_nonzero(self.seen > 0.0)),
+            "scene_bev_free_nonzero_fraction": float(np.count_nonzero(maps["free"] > 0.05) / max(maps["free"].size, 1)),
+            "scene_bev_occupied_nonzero_fraction": float(
+                np.count_nonzero(maps["occupied"] > 0.05) / max(maps["occupied"].size, 1)
+            ),
             "step_index": int(self.step_index),
         }
+
+    def _record_future(self, future: np.ndarray, candidates: list[Any]) -> None:
+        if future.ndim != 4 or future.shape[1] < 3:
+            return
+        self.last_future_bev = future.astype(np.float32)
+        self.future_prediction_horizon_count = int(future.shape[0])
+        latest = future[-1]
+        rows, cols, valid = self._local_scene_indices(self.pose_estimate)
+        rows_valid = rows[valid]
+        cols_valid = cols[valid]
+        self._add_at(self.future_free_sum, rows_valid, cols_valid, latest[0][valid])
+        self._add_at(self.future_occupied_sum, rows_valid, cols_valid, latest[1][valid])
+        self._add_at(self.future_unknown_sum, rows_valid, cols_valid, latest[2][valid])
+        self._add_at(self.future_counts, rows_valid, cols_valid, np.ones_like(rows_valid, dtype=np.float32))
+        summaries = np.zeros((len(candidates), future.shape[0], min(5, future.shape[1])), dtype=np.float32)
+        for candidate_index, candidate in enumerate(candidates):
+            cells = getattr(candidate, "footprint_cells", ())
+            if not cells:
+                continue
+            cell_rows = np.asarray([cell[0] for cell in cells], dtype=np.int64)
+            cell_cols = np.asarray([cell[1] for cell in cells], dtype=np.int64)
+            in_bounds = (
+                (cell_rows >= 0)
+                & (cell_cols >= 0)
+                & (cell_rows < future.shape[2])
+                & (cell_cols < future.shape[3])
+            )
+            if not np.any(in_bounds):
+                continue
+            cell_rows = cell_rows[in_bounds]
+            cell_cols = cell_cols[in_bounds]
+            summaries[candidate_index] = np.mean(future[:, : summaries.shape[2], cell_rows, cell_cols], axis=2)
+        self.future_predictions_by_candidate = summaries.astype(np.float32)
+
+    def _local_scene_indices(self, pose: tuple[float, float, float]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        rows, cols = _local_to_scene_indices_runtime(
+            local_shape=self.local_shape,
+            pose=pose,
+            meters_per_cell=self.meters_per_cell,
+            x_min=self.x_min_m,
+            y_min=self.y_min_m,
+        )
+        self._ensure_indices(rows, cols)
+        rows, cols = _local_to_scene_indices_runtime(
+            local_shape=self.local_shape,
+            pose=pose,
+            meters_per_cell=self.meters_per_cell,
+            x_min=self.x_min_m,
+            y_min=self.y_min_m,
+        )
+        valid = (rows >= 0) & (cols >= 0) & (rows < self.scene_shape[0]) & (cols < self.scene_shape[1])
+        return rows, cols, valid
+
+    def _ensure_indices(self, rows: np.ndarray, cols: np.ndarray) -> None:
+        pad_top = max(0, int(-np.min(rows)) + 16)
+        pad_left = max(0, int(-np.min(cols)) + 16)
+        pad_bottom = max(0, int(np.max(rows) - self.scene_shape[0] + 1) + 16)
+        pad_right = max(0, int(np.max(cols) - self.scene_shape[1] + 1) + 16)
+        if not any((pad_top, pad_bottom, pad_left, pad_right)):
+            return
+        pads = ((pad_top, pad_bottom), (pad_left, pad_right))
+        for name in (
+            "free_sum",
+            "occupied_sum",
+            "unknown_sum",
+            "traversable_sum",
+            "risky_sum",
+            "uncertainty_sum",
+            "counts",
+            "seen",
+            "selected_overlay",
+            "future_free_sum",
+            "future_occupied_sum",
+            "future_unknown_sum",
+            "future_counts",
+            "pose_overlay",
+        ):
+            setattr(self, name, np.pad(getattr(self, name), pads, mode="constant"))
+        self.x_min_m -= float(pad_top) * self.meters_per_cell
+        self.y_min_m -= float(pad_left) * self.meters_per_cell
+
+    def _add_candidate_overlay(self, overlay: np.ndarray, candidate: Any) -> None:
+        rows, cols, valid = self._local_scene_indices(self.pose_estimate)
+        for row, col in getattr(candidate, "footprint_cells", ()):
+            if row < 0 or col < 0 or row >= self.local_shape[0] or col >= self.local_shape[1]:
+                continue
+            if bool(valid[row, col]):
+                overlay[int(rows[row, col]), int(cols[row, col])] = 1.0
+
+    def _add_pose_overlay(self, pose: tuple[float, float, float]) -> None:
+        row = int(round((float(pose[0]) - self.x_min_m) / self.meters_per_cell))
+        col = int(round((float(pose[1]) - self.y_min_m) / self.meters_per_cell))
+        self._ensure_indices(np.asarray([[row]], dtype=np.int64), np.asarray([[col]], dtype=np.int64))
+        row = int(round((float(pose[0]) - self.x_min_m) / self.meters_per_cell))
+        col = int(round((float(pose[1]) - self.y_min_m) / self.meters_per_cell))
+        for dr in range(-1, 2):
+            for dc in range(-1, 2):
+                rr = row + dr
+                cc = col + dc
+                if 0 <= rr < self.pose_overlay.shape[0] and 0 <= cc < self.pose_overlay.shape[1]:
+                    self.pose_overlay[rr, cc] = 1.0
+
+    @staticmethod
+    def _add_at(target: np.ndarray, rows: np.ndarray, cols: np.ndarray, values: np.ndarray) -> None:
+        np.add.at(target, (rows, cols), np.asarray(values, dtype=np.float32))
 
 
 class DirectRGBDFeatureStore:
@@ -196,7 +503,7 @@ class Brain:
         else:
             self.pose_estimate = _integrate_pose_estimate(self.pose_estimate, pose_delta_to_current)
 
-        output, artifact, state, predicted_pose_delta = _spatial_v1_output_for_frame(
+        output, artifact, state, predicted_pose_delta, scene_state = _spatial_v1_output_for_frame(
             model=self.model,
             frame=frame,
             feature_store=self.feature_store,
@@ -221,30 +528,28 @@ class Brain:
             device=self.device,
             future_rollout_selection_mode=self.future_rollout_selection_mode,
             selection_history=list(self.selection_history),
+            scene_state=self.scene_state,
+            pose_estimate=self.pose_estimate,
+            step_index=self.step_count,
+            meters_per_cell=self.meters_per_cell,
         )
         self.state = state
+        self.scene_state = scene_state
         self.previous_predicted_pose_delta = predicted_pose_delta
         self.previous_sequence_camera = (frame.sequence_id, frame.camera_id)
         self.step_count += 1
         if output.selected_trajectory_id is not None:
             self.selection_history.append(str(output.selected_trajectory_id))
             self.selection_history = self.selection_history[-24:]
-        future_horizon_count = _future_horizon_count_from_artifact(artifact, self.output_root)
-        self.scene_state = SceneState(
-            pose_estimate=self.pose_estimate,
-            local_bev_ref=output.local_bev_ref,
-            selected_trajectory_id=output.selected_trajectory_id,
-            policy_bev_source=self.policy_bev_source,
-            future_prediction_horizon_count=future_horizon_count,
-            step_index=self.step_count - 1,
-        )
         output.debug.update(
             {
                 "runtime_api": "Brain.step",
                 "runtime_api_step_index": self.step_count - 1,
                 "runtime_api_owns_persistent_memory": True,
-                "scene_state": self.scene_state.to_debug(),
-                "scene_memory_used_for_policy": self.policy_bev_source == "memory",
+                "scene_state": self.scene_state.to_debug() if self.scene_state is not None else None,
+                "scene_state_online": self.scene_state is not None,
+                "scene_memory_used_for_policy": self.policy_bev_source == "scene",
+                "scene_map_created_only_posthoc": False,
                 "scene_pose_estimate": _pose_estimate_dict(self.pose_estimate),
                 "pose_estimate_source": pose_warp_source,
                 "teacher_runtime_dependency": self.runtime_feature_source == "dino",
@@ -575,12 +880,30 @@ def _spatial_v1_model_outputs(
         selected_pose_delta: torch.Tensor | None = None
         selected_pose_source = pose_warp_source
         route_pose_available = False
-        measured_pose_sources = {"odom", "odom_or_route_pose", "route_pose", "route_pose_ablation"}
+        measured_pose_sources = {
+            "odom",
+            "odom_or_route_pose",
+            "route_pose",
+            "route_pose_ablation",
+            "odom_plus_visual_correction",
+        }
         if not reset and pose_warp_source in measured_pose_sources:
             route_delta = route_pose_deltas.get(event_identity(frame))
             if route_delta is not None:
-                selected_pose_delta = torch.tensor(route_delta.delta, dtype=torch.float32)
-                selected_pose_source = route_delta.source
+                route_tensor = torch.tensor(route_delta.delta, dtype=torch.float32)
+                if pose_warp_source == "odom_plus_visual_correction":
+                    selected_pose_delta = _odom_plus_visual_pose_correction(
+                        route_tensor,
+                        brain.previous_predicted_pose_delta,
+                    )
+                    selected_pose_source = (
+                        "route_odom_plus_predicted_pose_correction"
+                        if brain.previous_predicted_pose_delta is not None
+                        else "route_odom_visual_correction_missing"
+                    )
+                else:
+                    selected_pose_delta = route_tensor
+                    selected_pose_source = route_delta.source
                 route_pose_available = True
             else:
                 selected_pose_source = f"{pose_warp_source}_missing"
@@ -604,6 +927,15 @@ def _spatial_v1_model_outputs(
         )
         brain_outputs.append(output)
         artifact_files.append(artifact)
+    if brain.scene_state is not None:
+        final_relative = "brain_outputs/scene_state_online/scene_state_final.npz"
+        final_path = output_root / final_relative
+        brain.scene_state.write_npz(final_path)
+        artifact_files.append(final_relative)
+        if brain_outputs:
+            brain_outputs[-1].debug["online_scene_state_final_artifact"] = final_relative
+            if isinstance(brain_outputs[-1].debug.get("scene_state"), dict):
+                brain_outputs[-1].debug["scene_state"]["scene_state_final_artifact"] = final_relative
     return brain_outputs, artifact_files
 
 
@@ -751,7 +1083,11 @@ def _spatial_v1_output_for_frame(
     device: torch.device,
     future_rollout_selection_mode: str = "guided_transparent",
     selection_history: list[str] | None = None,
-) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor]:
+    scene_state: SceneState | None = None,
+    pose_estimate: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    step_index: int = 0,
+    meters_per_cell: float = 0.05,
+) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor, SceneState]:
     total_started = time.perf_counter()
     feature_started = time.perf_counter()
     patch_features, _cls_feature = feature_store.load_for_frame(frame)
@@ -834,7 +1170,45 @@ def _spatial_v1_output_for_frame(
         "update_mask_coverage": np.asarray([update_mask_coverage], dtype=np.float32),
         "memory_overwrite_fraction": np.asarray([memory_overwrite_fraction], dtype=np.float32),
     }
-    policy_probabilities = memory_probabilities if policy_bev_source == "memory" else current_probabilities
+    current_stack = np.stack(
+        [
+            current_probabilities[0],
+            current_probabilities[1],
+            current_probabilities[2],
+            current_probabilities[3],
+            current_probabilities[4],
+        ],
+        axis=0,
+    ).astype(np.float32)
+    memory_stack = np.stack(
+        [
+            memory_probabilities[0],
+            memory_probabilities[1],
+            memory_probabilities[2],
+            memory_probabilities[3],
+            memory_probabilities[4],
+        ],
+        axis=0,
+    ).astype(np.float32)
+    if scene_state is None:
+        scene_state = SceneState.create(
+            local_shape=tuple(memory_probabilities.shape[1:]),
+            meters_per_cell=meters_per_cell,
+            pose_estimate=pose_estimate,
+        )
+    scene_context_stack = scene_state.update_from_local(
+        pose_estimate=pose_estimate,
+        current_bev=current_stack,
+        memory_bev=memory_stack,
+        uncertainty=uncertainty_grid,
+    )
+    policy_probabilities = (
+        scene_context_stack
+        if policy_bev_source == "scene"
+        else memory_probabilities
+        if policy_bev_source == "memory"
+        else current_probabilities
+    )
     local_bev = LocalBev(
         free=policy_probabilities[0].astype(np.float32),
         occupied=policy_probabilities[1].astype(np.float32),
@@ -866,9 +1240,28 @@ def _spatial_v1_output_for_frame(
         future_rollout_selection_mode=future_rollout_selection_mode,
         selection_history=selection_history,
     )
+    scene_state.record_decision(
+        selected_trajectory_id=decision.selected_candidate_id,
+        local_bev_ref=relative_artifact,
+        policy_bev_source=policy_bev_source,
+        candidates=trajectory_candidates,
+        future_arrays=decision.artifact_arrays,
+        step_index=step_index,
+    )
     _sync_device(device)
     decision_latency_ms = _elapsed_ms(decision_started)
     arrays.update(decision.artifact_arrays)
+    arrays.update(
+        {
+            "scene_context_bev_free_prob": scene_context_stack[0].astype(np.float32),
+            "scene_context_bev_occupied_prob": scene_context_stack[1].astype(np.float32),
+            "scene_context_bev_unknown_prob": scene_context_stack[2].astype(np.float32),
+            "scene_context_bev_traversable_prob": scene_context_stack[3].astype(np.float32),
+            "scene_context_bev_risky_prob": scene_context_stack[4].astype(np.float32),
+            "scene_state_online": np.asarray([True], dtype=np.bool_),
+            "scene_map_created_only_posthoc": np.asarray([False], dtype=np.bool_),
+        }
+    )
     artifact_started = time.perf_counter()
     write_deterministic_npz(artifact_path, arrays)
     artifact_write_latency_ms = _elapsed_ms(artifact_started)
@@ -910,6 +1303,8 @@ def _spatial_v1_output_for_frame(
                 "camera_id": frame.camera_id,
                 "output_channels": list(BEV_OUTPUT_CHANNELS),
                 "local_bev_shape": list(memory_probabilities.shape[1:]),
+                "scene_state_online": True,
+                "scene_map_created_only_posthoc": False,
                 "memory_used": memory_used,
                 "pose_warp_used": pose_warp_used,
                 "pose_warp_valid": pose_warp_valid,
@@ -939,6 +1334,7 @@ def _spatial_v1_output_for_frame(
         relative_artifact,
         next_state,
         next_pose_delta,
+        scene_state,
     )
 
 
@@ -972,10 +1368,35 @@ def _route_pose_deltas(
     return deltas
 
 
+def _odom_plus_visual_pose_correction(
+    odom_delta: torch.Tensor,
+    predicted_delta: torch.Tensor | None,
+    *,
+    blend_alpha: float = 0.03,
+    max_xy_correction_m: float = 0.010,
+    max_yaw_correction_rad: float = 0.015,
+) -> torch.Tensor:
+    if predicted_delta is None:
+        return odom_delta
+    odom = odom_delta.detach().to(dtype=torch.float32).view(3)
+    predicted = predicted_delta.detach().to(device=odom.device, dtype=torch.float32).view(-1)
+    if predicted.numel() < 3 or not torch.isfinite(predicted[:3]).all():
+        return odom
+    correction = predicted[:3] - odom
+    clipped = torch.stack(
+        (
+            torch.clamp(correction[0], -max_xy_correction_m, max_xy_correction_m),
+            torch.clamp(correction[1], -max_xy_correction_m, max_xy_correction_m),
+            torch.clamp(correction[2], -max_yaw_correction_rad, max_yaw_correction_rad),
+        )
+    )
+    return odom + float(blend_alpha) * clipped
+
+
 def _route_pose_samples(events: Iterable[Event], *, pose_warp_source: str) -> dict[tuple[str, int], dict[str, object]]:
     if pose_warp_source == "none" or pose_warp_source == "predicted_pose":
         return {}
-    use_odom = pose_warp_source in {"odom", "odom_or_route_pose"}
+    use_odom = pose_warp_source in {"odom", "odom_or_route_pose", "odom_plus_visual_correction"}
     use_route_pose = pose_warp_source in {"odom_or_route_pose", "route_pose", "route_pose_ablation"}
     samples: dict[tuple[str, int], dict[str, object]] = {}
     event_list = list(events)
@@ -1046,6 +1467,26 @@ def _integrate_pose_estimate(
     y_m += sin(yaw_rad) * dx + cos(yaw_rad) * dy
     yaw_rad = _wrap_angle(yaw_rad + dyaw)
     return (float(x_m), float(y_m), float(yaw_rad))
+
+
+def _local_to_scene_indices_runtime(
+    *,
+    local_shape: tuple[int, int],
+    pose: tuple[float, float, float],
+    meters_per_cell: float,
+    x_min: float,
+    y_min: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    height, width = local_shape
+    rows, cols = np.indices((height, width), dtype=np.float32)
+    forward = (np.float32(height - 1) - rows + np.float32(0.5)) * np.float32(meters_per_cell)
+    left = (cols - np.float32(width) / np.float32(2.0) + np.float32(0.5)) * np.float32(meters_per_cell)
+    x_m, y_m, yaw = pose
+    world_x = np.float32(x_m) + np.float32(cos(yaw)) * forward - np.float32(sin(yaw)) * left
+    world_y = np.float32(y_m) + np.float32(sin(yaw)) * forward + np.float32(cos(yaw)) * left
+    grid_rows = np.rint((world_x - np.float32(x_min)) / np.float32(meters_per_cell)).astype(np.int64)
+    grid_cols = np.rint((world_y - np.float32(y_min)) / np.float32(meters_per_cell)).astype(np.int64)
+    return grid_rows, grid_cols
 
 
 def _pose_estimate_dict(pose: tuple[float, float, float]) -> dict[str, float]:
@@ -1220,9 +1661,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--future-rollout-selection-mode",
-        choices=("argmin", "guided_transparent"),
+        choices=("argmin", "safe_argmin", "guided_transparent"),
         default="guided_transparent",
-        help="Select from raw FutureBEV argmin or a safety/coverage-guided FutureBEV score.",
+        help="Select from raw FutureBEV argmin, learned-safety-gated argmin, or a safety/coverage-guided baseline.",
     )
     parser.add_argument("--device", default=None, help="Optional torch device for checkpoint inference.")
     args = parser.parse_args(argv)

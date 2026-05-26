@@ -83,6 +83,25 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         if isinstance(event.debug, dict)
         and isinstance(event.debug.get("temporal_diversity_prior_enabled"), bool)
     ]
+    scene_state_online_values = [
+        1.0
+        if _scene_state_flag(event, "updated_online_inside_brain_step")
+        or _debug_flag(event, "scene_state_online")
+        else 0.0
+        for event in outputs
+        if isinstance(event.debug, dict)
+        and (event.debug.get("scene_state") is not None or event.debug.get("scene_state_online") is not None)
+    ]
+    scene_memory_policy_values = [
+        1.0 if _scene_state_flag(event, "scene_memory_consumed_by_policy") else 0.0
+        for event in decisions
+        if isinstance(event.debug, dict) and isinstance(event.debug.get("scene_state"), dict)
+    ]
+    posthoc_scene_map_values = [
+        1.0 if _scene_state_flag(event, "scene_map_created_only_posthoc") else 0.0
+        for event in outputs
+        if isinstance(event.debug, dict) and isinstance(event.debug.get("scene_state"), dict)
+    ]
     coverage_records = [
         event.debug.get("coverage_memory")
         for event in decisions
@@ -140,6 +159,11 @@ def _summarize_events(events: list[Event]) -> JsonDict:
             sorted(Counter(future_rollout_selection_roles).items())
         ),
         "temporal_diversity_prior_enabled_fraction": _mean(temporal_diversity_prior_values),
+        "scene_state_online": _all_fraction(scene_state_online_values),
+        "scene_memory_used_for_policy": _any_fraction(scene_memory_policy_values),
+        "scene_map_created_only_posthoc": bool(_mean(posthoc_scene_map_values) == 1.0)
+        if posthoc_scene_map_values
+        else None,
         "cmd_vel_non_null_count": int(cmd_vel_non_null_count),
         "cmd_vel_proposal_count": len(cmd_vel_proposals),
         "cmd_vel_proposal_nonzero_count": sum(1 for item in cmd_vel_proposals if _proposal_nonzero(item)),
@@ -315,10 +339,23 @@ def _route_pose_leakage_value(event: BrainOutputEvent) -> float | None:
     return None
 
 
+def _scene_state_flag(event: BrainOutputEvent, key: str) -> bool:
+    if not isinstance(event.debug, dict):
+        return False
+    scene_state = event.debug.get("scene_state")
+    if isinstance(scene_state, dict) and isinstance(scene_state.get(key), bool):
+        return bool(scene_state[key])
+    value = event.debug.get(key)
+    return bool(value) if isinstance(value, bool) else False
+
+
 def _unsafe_selected_value(event: BrainOutputEvent) -> float | None:
     score = _selected_score(event)
     if not score:
         return None
+    selected_id = str(event.selected_trajectory_id) if event.selected_trajectory_id is not None else ""
+    if selected_id == "stop":
+        return 0.0
     risky = score.get("risky")
     if isinstance(risky, bool):
         return 1.0 if risky else 0.0
@@ -347,6 +384,18 @@ def _event_or_candidate_flag(event: BrainOutputEvent, key: str) -> bool:
 
 def _debug_flag(event: BrainOutputEvent, key: str) -> bool:
     return bool(event.debug.get(key)) if isinstance(event.debug, dict) else False
+
+
+def _all_fraction(values: list[float]) -> bool | None:
+    if not values:
+        return None
+    return bool(all(float(value) >= 1.0 for value in values))
+
+
+def _any_fraction(values: list[float]) -> bool | None:
+    if not values:
+        return None
+    return bool(any(float(value) >= 1.0 for value in values))
 
 
 def _answers(metrics: JsonDict) -> JsonDict:

@@ -466,7 +466,7 @@ def extract_package(archive_path: str | Path, out_dir: str | Path, sequence: str
     target = openloris_sequence_dir(root, sequence)
     if target.exists():
         shutil.rmtree(target)
-    shutil.copytree(discovered, target)
+    shutil.move(discovered.as_posix(), target.as_posix())
     shutil.rmtree(extract_root.parent)
     return target
 
@@ -559,6 +559,7 @@ def _parse_camera_to_base_from_trans_matrix_yaml(
         return None
     text = path.read_text(encoding="utf-8", errors="replace")
     child_aliases = _camera_frame_aliases(camera_id)
+    transforms: dict[tuple[str, str], list[list[float]]] = {}
     entries = re.finditer(
         r"parent_frame:\s*([^\n\r]+).*?child_frame:\s*([^\n\r]+).*?data:\s*\[([^\]]+)\]",
         text,
@@ -567,8 +568,6 @@ def _parse_camera_to_base_from_trans_matrix_yaml(
     for match in entries:
         parent = match.group(1).strip().strip("'\"")
         child = match.group(2).strip().strip("'\"")
-        if parent != "base_link" or child not in child_aliases:
-            continue
         values = _float_list(match.group(3))
         if len(values) != 16:
             continue
@@ -578,15 +577,54 @@ def _parse_camera_to_base_from_trans_matrix_yaml(
         ]
         if not _valid_matrix(matrix):
             continue
-        return (
-            matrix,
-            {
-                **OPENLORIS_TRANS_MATRIX_SOURCE,
-                "path": path.as_posix(),
-                "parent_frame": parent,
-                "child_frame": child,
-            },
-        )
+        transforms[(parent, child)] = matrix
+        if parent == "base_link" and child in child_aliases:
+            return (
+                matrix,
+                {
+                    **OPENLORIS_TRANS_MATRIX_SOURCE,
+                    "path": path.as_posix(),
+                    "parent_frame": parent,
+                    "child_frame": child,
+                },
+            )
+    chained = _compose_transform_chain(transforms, start="base_link", targets=child_aliases)
+    if chained is None:
+        return None
+    matrix, chain = chained
+    return (
+        matrix,
+        {
+            **OPENLORIS_TRANS_MATRIX_SOURCE,
+            "path": path.as_posix(),
+            "parent_frame": "base_link",
+            "child_frame": chain[-1],
+            "transform_chain": chain,
+        },
+    )
+
+
+def _compose_transform_chain(
+    transforms: dict[tuple[str, str], list[list[float]]],
+    *,
+    start: str,
+    targets: set[str],
+    max_depth: int = 4,
+) -> tuple[list[list[float]], list[str]] | None:
+    frontier: list[tuple[str, np.ndarray, list[str]]] = [(start, np.eye(4, dtype=np.float64), [start])]
+    visited = {start}
+    while frontier:
+        frame, matrix, chain = frontier.pop(0)
+        if frame in targets:
+            return ([[float(value) for value in row] for row in matrix.tolist()], chain)
+        if len(chain) > max_depth:
+            continue
+        for (parent, child), edge in sorted(transforms.items()):
+            if parent != frame or child in visited:
+                continue
+            visited.add(child)
+            edge_matrix = np.asarray(edge, dtype=np.float64)
+            frontier.append((child, matrix @ edge_matrix, [*chain, child]))
     return None
 
 
@@ -720,6 +758,7 @@ def _safe_extract_zip(archive: zipfile.ZipFile, out_dir: Path) -> None:
 def _extract_nested_7z_archives(root: Path) -> None:
     for archive in sorted(root.rglob("*.7z")):
         _extract_7z_archive(archive, archive.with_suffix(""))
+        archive.unlink(missing_ok=True)
 
 
 def _extract_7z_archive(archive: Path, out_dir: Path) -> None:
