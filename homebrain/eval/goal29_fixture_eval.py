@@ -18,7 +18,14 @@ from homebrain.train.goal29_fixtures import GOAL29_FIXTURE_NAMES, write_goal29_f
 from homebrain.train.spatial_v0_common import batch_to_device
 from homebrain.train.train_future_bev_rollout_v1 import _candidate_lower_score, _model_forward, train_future_bev_rollout_v1
 
-GOAL29_REPORT_SCHEMA_VERSION = "homebrain.goal29_fixture_report.v0"
+"""Deterministic Goal29a fixture probe.
+
+This remains separate from the route-heldout FutureBEV eval because it builds a
+tiny synthetic failure-mode pack and exercises report semantics that must never
+be confused with the public-route robot-brain baseline.
+"""
+
+GOAL29_REPORT_SCHEMA_VERSION = "homebrain.goal29a_fixture_probe_report.v0"
 GOAL29_SAFETY = {
     "replay_only": True,
     "not_executed": True,
@@ -31,7 +38,7 @@ GOAL29_SAFETY = {
 def run_goal29_fixture_eval(
     *,
     out_dir: str | Path,
-    max_steps: int = 40,
+    max_steps: int = 80,
     hidden_channels: int = 16,
     device_name: str = "cpu",
     command: str | None = None,
@@ -78,20 +85,28 @@ def run_goal29_fixture_eval(
         )
     )
     hard_failures = _hard_failures(eval_metrics, train_metrics, learned_selection)
-    accepted = bool((gate_e_improved or gate_f_improved) and not hard_failures and _safety_ok(eval_metrics, train_metrics))
+    accepted_fixture_probe = bool(
+        (gate_e_improved or gate_f_improved)
+        and not hard_failures
+        and _safety_ok(eval_metrics, train_metrics)
+    )
     report: dict[str, Any] = {
         "schema_version": GOAL29_REPORT_SCHEMA_VERSION,
-        "accepted": accepted,
-        "goal": "Goal29",
+        "accepted": False,
+        "accepted_fixture_probe": accepted_fixture_probe,
+        "accepted_robot_brain_milestone": False,
+        "accepted_goal29_route_heldout": False,
+        "accepted_goal29_robot_brain": False,
+        "goal": "Goal29a fixture probe",
         "gates_improved": [
             gate
             for gate, passed in (
                 ("Gate E", gate_e_improved),
                 ("Gate F", gate_f_improved),
-                ("Gate H", True),
             )
             if passed
         ],
+        "gates_exercised": ["Gate E", "Gate F", "Gate H"],
         "routes": [],
         "fixtures": list(GOAL29_FIXTURE_NAMES),
         "baselines": [
@@ -133,7 +148,11 @@ def run_goal29_fixture_eval(
         ],
         "tests": [],
         "hard_failures": hard_failures,
-        "caveats": ["route-heldout evidence unavailable in deterministic fixture eval; no real hardware validation"],
+        "caveats": [
+            "fixture probe only; route-heldout evidence unavailable in deterministic fixture eval",
+            "Gate H exercised only; no replay log demonstrates watchdog/stop/recovery metric improvement",
+            "no real hardware validation",
+        ],
         "safety": dict(GOAL29_SAFETY),
         "command": command,
     }
@@ -289,7 +308,7 @@ def _delta(left: Any, right: Any) -> float | None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic Goal29 FutureBEV fixture eval.")
     parser.add_argument("--out", required=True)
-    parser.add_argument("--max-steps", type=int, default=40)
+    parser.add_argument("--max-steps", type=int, default=80)
     parser.add_argument("--hidden-channels", type=int, default=16)
     parser.add_argument("--device", default="cpu")
     args = parser.parse_args(argv)
@@ -301,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         command=" ".join(["goal29_fixture_eval", *argv]) if argv is not None else None,
     )
     print(json.dumps({"report": report}, sort_keys=True))
-    return 0 if report["accepted"] else 2
+    return 0 if report["accepted_fixture_probe"] else 2
 
 
 if __name__ == "__main__":

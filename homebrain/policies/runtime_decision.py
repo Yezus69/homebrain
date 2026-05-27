@@ -108,6 +108,9 @@ def decide_trajectory(
     future_rollout_scorer: RuntimeFutureRolloutScorer | None = None,
     patch_features: np.ndarray | None = None,
     sensor_mask: np.ndarray | None = None,
+    memory_bev: np.ndarray | None = None,
+    bev_history: np.ndarray | None = None,
+    uncertainty_map: np.ndarray | None = None,
     policy_bev_source: str,
     sensor_age_s: float | None = None,
     coverage_memory_reset: bool = False,
@@ -143,6 +146,9 @@ def decide_trajectory(
             patch_features=patch_features,
             sensor_mask=sensor_mask,
             device=future_rollout_scorer.device,
+            memory_bev=memory_bev,
+            bev_history=bev_history,
+            uncertainty_map=uncertainty_map,
         )
         _validate_future_candidate_ids(candidates, future_scores)
         lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
@@ -359,6 +365,14 @@ def decide_trajectory(
                 "future_rollout_policy_selection_role": "prediction_context"
                 if learned_scorer is not None
                 else "runtime_selector",
+                "future_rollout_runtime_context": {
+                    "memory_bev_available": memory_bev is not None,
+                    "bev_history_available": bev_history is not None,
+                    "uncertainty_map_available": uncertainty_map is not None,
+                    "memory_bev_shape": _shape_list(memory_bev),
+                    "bev_history_shape": _shape_list(bev_history),
+                    "uncertainty_map_shape": _shape_list(uncertainty_map),
+                },
                 "future_rollout_learned_safety_gate": future_rollout_selection_mode == "safe_argmin",
                 "future_rollout_scene_geometry_safety_gate": future_rollout_selection_mode == "safe_argmin",
                 "temporal_diversity_prior_enabled": future_rollout_selection_mode != "argmin"
@@ -888,3 +902,9 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _shape_list(value: np.ndarray | None) -> list[int] | None:
+    if value is None:
+        return None
+    return [int(item) for item in np.asarray(value).shape]

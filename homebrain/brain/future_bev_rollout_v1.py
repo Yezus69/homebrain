@@ -351,6 +351,9 @@ def score_local_bev_with_future_rollout(
     patch_features: np.ndarray | None,
     sensor_mask: np.ndarray | None,
     device: torch.device,
+    memory_bev: np.ndarray | None = None,
+    bev_history: np.ndarray | None = None,
+    uncertainty_map: np.ndarray | None = None,
 ) -> dict[str, np.ndarray | list[str] | str]:
     model.eval()
     current = torch.from_numpy(current_bev_from_local_bev(bev)[None, ...]).to(device)
@@ -362,8 +365,24 @@ def score_local_bev_with_future_rollout(
         if sensor_array.shape[1] != model.config.sensor_dim:
             sensor_array = np.zeros((1, model.config.sensor_dim), dtype=np.float32)
         sensor = torch.from_numpy(sensor_array).to(device)
+    memory_tensor = _optional_batched_bev_tensor(memory_bev, current=current, device=device)
+    history_tensor = _optional_history_tensor(
+        bev_history,
+        current=current,
+        history_steps=int(model.config.history_steps),
+        device=device,
+    )
+    uncertainty_tensor = _optional_uncertainty_tensor(uncertainty_map, current=current, device=device)
     with torch.no_grad():
-        outputs = model(current, features, feature_mask, sensor)
+        outputs = model(
+            current,
+            features,
+            feature_mask,
+            sensor,
+            memory_bev=memory_tensor,
+            bev_history=history_tensor,
+            uncertainty_map=uncertainty_tensor,
+        )
     future_bev = torch.sigmoid(outputs["future_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
     future_risk_grid = outputs["future_risk_prob"][0, :, 0].detach().cpu().numpy().astype(np.float32)
     future_uncertainty = outputs["uncertainty_grid"][0, :, 0].detach().cpu().numpy().astype(np.float32)
@@ -400,6 +419,66 @@ def score_local_bev_with_future_rollout(
             "- 2.4*new_area_gain - 2*progress + 0.8*stop"
         ),
     }
+
+
+def _optional_batched_bev_tensor(
+    value: np.ndarray | None,
+    *,
+    current: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    expected = tuple(int(size) for size in current.shape[1:])
+    if array.shape == expected:
+        array = array[None, ...]
+    elif array.shape != tuple(int(size) for size in current.shape):
+        return None
+    return torch.from_numpy(np.clip(array, 0.0, 1.0).astype(np.float32).copy()).to(device)
+
+
+def _optional_history_tensor(
+    value: np.ndarray | None,
+    *,
+    current: torch.Tensor,
+    history_steps: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    expected_step_shape = tuple(int(size) for size in current.shape[1:])
+    if array.ndim == 4 and array.shape[1:] == expected_step_shape:
+        array = array[None, ...]
+    elif array.ndim != 5 or array.shape[0] != current.shape[0] or array.shape[2:] != expected_step_shape:
+        return None
+    steps = max(1, int(history_steps))
+    if array.shape[1] > steps:
+        array = array[:, -steps:]
+    elif array.shape[1] < steps:
+        pad = np.repeat(array[:, :1], steps - array.shape[1], axis=1)
+        array = np.concatenate([pad, array], axis=1)
+    return torch.from_numpy(np.clip(array, 0.0, 1.0).astype(np.float32).copy()).to(device)
+
+
+def _optional_uncertainty_tensor(
+    value: np.ndarray | None,
+    *,
+    current: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float32)
+    expected_hw = tuple(int(size) for size in current.shape[-2:])
+    if array.shape == expected_hw:
+        array = array[None, None, ...]
+    elif array.shape == (1, *expected_hw):
+        array = array[None, ...]
+    elif array.shape != (int(current.shape[0]), 1, *expected_hw):
+        return None
+    return torch.from_numpy(np.clip(array, 0.0, 1.0).astype(np.float32).copy()).to(device)
 
 
 def checkpoint_payload(

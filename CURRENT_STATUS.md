@@ -28,18 +28,30 @@ It does not control real hardware.
 Latest accepted baseline:
 
 ```text
-Goal29 action-conditioned fixture slice
+Goal28 caveat repair
 ```
 
-Accepted evidence:
+Goal28 remains the latest accepted route-heldout public-data robot-brain baseline. Goal29a is an accepted deterministic fixture probe only; it is not route-heldout robot-brain evidence.
+
+Current Goal29 acceptance flags:
 
 ```text
-accepted_goal29_action_conditioned_fixture=true
+accepted_goal29a_fixture_probe=true
+accepted_goal29_route_heldout=false
+accepted_goal29_robot_brain=false
+```
+
+Goal29a fixture probe evidence:
+
+```text
+accepted_fixture_probe=true
+accepted_robot_brain_milestone=false
 fixtures=moving_obstacle_crossing_path,static_obstacle_in_known_free_space,unknown_corridor,high_uncertainty_near_footprint,future_unsafe_candidate
-gates_improved=Gate F,Gate H
-future_risk_auc_or_proxy=0.8235512979706741
-candidate_risk_ranking_accuracy=0.7371428571428572
-candidate_risk_ranking_accuracy_baseline_delta=0.13714285714285723
+gates_exercised=Gate E,Gate F,Gate H
+gates_improved=Gate F
+future_risk_auc_or_proxy=0.9514342452673716
+candidate_risk_ranking_accuracy=0.7485714285714286
+candidate_risk_ranking_accuracy_baseline_delta=0.14857142857142858
 learned_selection_oracle_match_fraction=1.0
 learned_selection_unsafe_selected_rate=0.0
 dominant_action_fraction=0.6
@@ -50,13 +62,13 @@ control_safe=false
 hardware_validated=false
 ```
 
-Primary artifact:
+Local uncommitted artifact:
 
 ```text
 runs/goal29_action_conditioned_fixture_v0/goal29_report.json
 ```
 
-Goal29 is replay-only deterministic fixture evidence. It is not route-heldout success, product deployment, or hardware validation.
+Goal29a is replay-only deterministic fixture evidence. It is not route-heldout success, the latest robot-brain baseline, product deployment, or hardware validation. Gate H is exercised by conservative replay safety fields only; it is not marked improved without a replay log demonstrating watchdog/stop/recovery metrics.
 
 ## Current blockers
 
@@ -76,10 +88,10 @@ HomeBrain is still blocked by:
 Next target:
 
 ```text
-Route-heldout Goal29 hardening after the accepted deterministic fixture slice
+Route-heldout Goal29 hardening after the deterministic Goal29a fixture probe
 ```
 
-The next step should preserve the accepted Goal29 fixture path while improving at least one of:
+The next step should preserve the Goal29a fixture path while improving at least one of:
 
 - route-heldout dynamic-risk supervision,
 - traversability/free-space labels,
@@ -89,7 +101,7 @@ The next step should preserve the accepted Goal29 fixture path while improving a
 - replay watchdog/stop/recovery behavior,
 - direct runtime student quality.
 
-Do not count deterministic fixtures as route-heldout robustness. The accepted fixture report improves Gate F/H, but Gate E still needs stronger copy-forward-beating evidence on route or richer dynamic-risk labels.
+Do not count deterministic fixtures as route-heldout robustness. The Goal29a fixture report may exercise Gate H, but Gate H is not improved without watchdog/stop/recovery replay metrics, and Gate E still needs stronger copy-forward-beating evidence on route or richer dynamic-risk labels.
 
 ## Required safety status
 

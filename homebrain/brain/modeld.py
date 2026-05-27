@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import atan2, cos, sin
 from pathlib import Path
 import time
@@ -88,6 +88,7 @@ class SceneState:
     step_index: int = 0
     current_local_bev: np.ndarray | None = None
     scene_context_local_bev: np.ndarray | None = None
+    bev_history: list[np.ndarray] = field(default_factory=list)
     last_future_bev: np.ndarray | None = None
     future_predictions_by_candidate: np.ndarray | None = None
 
@@ -159,6 +160,8 @@ class SceneState:
         self._add_pose_overlay(pose_estimate)
         self.pose_trace.append(tuple(float(value) for value in pose_estimate))
         self.scene_context_local_bev = self.scene_context_for_pose(pose_estimate)
+        self.bev_history.append(self.scene_context_local_bev.astype(np.float32).copy())
+        self.bev_history = self.bev_history[-16:]
         return self.scene_context_local_bev
 
     def record_decision(
@@ -196,6 +199,15 @@ class SceneState:
             channel_array = stack[channel]
             channel_array[valid] = values[rows[valid], cols[valid]]
         return stack.astype(np.float32)
+
+    def history_for_rollout(self, history_steps: int) -> np.ndarray | None:
+        if not self.bev_history:
+            return None
+        steps = max(1, int(history_steps))
+        history = self.bev_history[-steps:]
+        if len(history) < steps:
+            history = [history[0]] * (steps - len(history)) + history
+        return np.stack(history, axis=0).astype(np.float32)
 
     def scene_maps(self) -> dict[str, np.ndarray]:
         denom = np.maximum(self.counts, np.float32(1.0))
@@ -1224,6 +1236,12 @@ def _spatial_v1_output_for_frame(
         if pose_delta_to_current is not None
         else None
     )
+    future_rollout_memory_bev = scene_context_stack if policy_bev_source == "scene" else memory_stack
+    future_rollout_history = (
+        scene_state.history_for_rollout(int(future_rollout_scorer.model.config.history_steps))
+        if future_rollout_scorer is not None
+        else None
+    )
     postprocess_latency_ms = _elapsed_ms(postprocess_started)
     decision_started = time.perf_counter()
     decision = decide_trajectory(
@@ -1235,6 +1253,9 @@ def _spatial_v1_output_for_frame(
         future_rollout_scorer=future_rollout_scorer,
         patch_features=patch_features,
         sensor_mask=sensor_mask.detach().cpu().numpy()[0],
+        memory_bev=future_rollout_memory_bev,
+        bev_history=future_rollout_history,
+        uncertainty_map=uncertainty_grid,
         policy_bev_source=policy_bev_source,
         coverage_memory_reset=reset_memory,
         future_rollout_selection_mode=future_rollout_selection_mode,

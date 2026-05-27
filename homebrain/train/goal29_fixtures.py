@@ -20,6 +20,9 @@ from homebrain.train.future_bev_rollout_dataset import (
     candidate_outcome_labels,
 )
 
+# Kept separate from the route FutureBEV pack builder on purpose: these are
+# tiny deterministic failure-mode fixtures for Goal29a report plumbing, not
+# route-heldout robot-brain evidence.
 GOAL29_FIXTURE_NAMES: tuple[str, ...] = (
     "moving_obstacle_crossing_path",
     "static_obstacle_in_known_free_space",
