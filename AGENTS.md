@@ -1,151 +1,200 @@
-# AGENTS.md - HomeBrain Repo Instructions
+# HomeBrain Codex Contract
 
-This file is repo memory for future Codex work. Keep it short.
+HomeBrain is a research-to-product software stack for a future low-speed indoor vacuum/mop robot.
 
-## Mission
+The hard problem is not scaffolding. The hard problem is a mostly-neural robot brain that can perceive, remember, predict, and choose safe useful motion in messy dynamic homes using camera/IR/IMU/wheel data.
 
-Build HomeBrain: a production-directed indoor robot brain for a future
-camera/IR/IMU/wheel-encoder floor-cleaning robot. The near-term proof is still
-software-only, but every serious change should move toward a deployable runtime:
-replay real indoor robot data as if it were live, use open-weight teachers only
-offline, train a smaller spatial-memory student, and score bounded cleaning
-trajectories well enough to justify hardware work.
+## Current north star
 
-## Read First
+Build a replay-first neural scene world model and candidate-action brain:
 
-Before coding, read:
+real robot/public route data
+-> deterministic log/replay
+-> open-weight teacher artifacts offline
+-> direct runtime student
+-> online SceneState
+-> local + scene BEV memory
+-> short-horizon future BEV/risk prediction
+-> bounded candidate trajectory scoring
+-> replay-only cmd_vel proposal
+-> hard metrics and visual proof
 
-1. `PROJECT_BRIEF.md`
-2. `ARCHITECTURE.md`
-3. `CURRENT_STATUS.md`
-4. The user's current request or issue
+Runtime decisions remain replay-only until real hardware safety exists.
 
-Read `EVALS.md`, `DECISIONS.md`, `LICENSE_AUDIT.md`, or deeper docs only when
-the task touches those areas.
+## Read policy
 
-## Default Priority
+Codex should read only this file by default.
 
-When scope is open, choose the work that most directly connects the system into
-a real robot brain:
+For implementation tasks, inspect the relevant code and tests before reading more Markdown.
 
-1. Connect existing modules end-to-end before adding new isolated modules.
-2. Prefer real robot or robot-mounted public data over mock, synthetic, or toy
-   examples. OpenLORIS-style route-heldout replay is the current baseline.
-3. Prefer online memory, BEV, trajectory scoring, and runtime APIs over
-   offline-only reports.
-4. Prefer evals that expose leakage, collapse, latency, and route generalization
-   over demo scripts.
+Read `CURRENT_STATUS.md` only for broad robot-brain, runtime, milestone, or blocker questions.
 
-## Working Rules
+Read `EVALS.md` only when changing metrics, training, policy, runtime decision behavior, or acceptance gates.
 
-- No fake success. Mock, synthetic, weak, replay-only, and POC artifacts must say so.
-- Logs, replay, evals, and deterministic artifacts come before bigger models.
-- Open-weight models and public datasets are allowed for local POC training and
-  eval when provenance is recorded. They are not automatically control-safe,
-  redistributable, or product-approved.
-- Use foundation models as offline teachers first. Runtime should trend toward a
-  smaller student model.
-- Use candidate trajectories or `cmd_vel`; never arbitrary raw PWM.
-- Prefer explicit spatial memory, BEV, coverage, uncertainty, and route
-  provenance over hidden-only state.
-- Keep modules small and directly tied to logging, replay, teachers, geometry,
-  spatial memory, trajectory scoring, eval, or later hardware integration.
-- Avoid scaffolding-only PRs. A broad change should improve a real-data gate,
-  connect two runtime pieces, or remove an active blocker.
-- Treat the Goal26 OpenLORIS route-heldout runtime milestone as the minimum real-data
-  baseline unless a newer baseline is documented.
-- Runtime code must clearly separate online inputs from labels, future frames,
-  route ground truth, teacher outputs, and other eval-only data.
-- Foundation-model teachers are for dataset creation, supervision, and audits.
-  The runtime should trend toward a teacher-free student control tick.
-- Delete stale context instead of adding more instructions.
+Read `ARCHITECTURE.md` only when changing the high-level robot-brain design or moving module boundaries.
 
-## Latest Real-Data Milestone
+Do not read old plans, deleted-doc replacements, archive docs, stale goals, stale handoff files, or historical milestone notes unless explicitly asked.
 
-Current route-heldout proof:
-`runs/goal26_scene_runtime_brain_milestone/milestone_report.json`.
+When uncertain, inspect code and tests before reading more Markdown.
 
-Reproduce with:
+## Current accepted baseline
 
-```text
-python -m homebrain.tools.run_openloris_route_heldout_milestone --out runs\goal26_scene_runtime_brain_milestone --sequences cafe1-1_2,corridor1-1,office1-1_7 --heldout-sequence corridor1-1 --max-frames 96 --spatial-steps 30 --future-steps 30 --runtime-max-frames 96 --runtime-feature-source direct_rgbd --max-spatial-folds 2 --future-rollout-selection-mode guided_transparent
-```
+The latest accepted local baseline is Goal28 caveat repair, not Goal26 or Goal27.
 
-Do not present it as control-safe. It uses real public OpenLORIS robot data,
-connects `Brain.step(...)`, emits bounded `cmd_vel` proposals only, and writes
-scene-memory artifacts. It is not the requested robot brain yet: raw FutureBEV
-selection is still collapsed, accepted action diversity uses a hand-weighted
-guided selector with temporal diversity, future free/occupied prediction is
-zero, scene unknown reduction regressed, and pose metrics are odometry-proxy
-only.
+Goal28 is still not product deployment. It is replay-only public-data evidence with online SceneState, scene-memory-conditioned FutureBEV selection, learned visual/memory pose correction, non-degenerate behavior-cloning labels, and three heldout OpenLORIS scenes.
 
-## Active Required Goal
+Remaining blockers:
+- no real robot hardware loop,
+- no synchronized owned RGB/IR/IMU/wheel/command logs,
+- no controller/watchdog/recovery/docking/safety gate,
+- weak traversability/free-space labels,
+- weak dynamic-risk supervision,
+- narrow public-route coverage,
+- no policy good enough for real hardware.
 
-When asked to continue the robot-brain work, build Goal27: a real-data learned
-scene-level runtime brain that improves Goal26 instead of repeating it.
+## What useful work means
 
-Goal27 is a connected vertical slice, not a checklist of disconnected artifacts:
+A change is useful only if it improves at least one of:
 
-```text
-real public robot route
-  -> replay-as-live sensor tick
-  -> Brain.step(...)
-  -> pose estimate inside persistent scene memory
-  -> local + scene BEV physical geometry
-  -> future state rollout for candidate trajectories
-  -> learned trajectory score / bounded cmd_vel proposal
-  -> route-level metrics + visual proof
-```
+1. real-data ingestion/calibration/provenance,
+2. open-weight teacher labels/features,
+3. direct runtime student quality,
+4. BEV/free/occupied/unknown/risk label quality,
+5. online SceneState/spatial memory,
+6. action-conditioned future BEV/risk prediction,
+7. learned candidate trajectory scoring,
+8. replay metrics/evals/visual proof,
+9. hardware-readiness safety envelope in replay only,
+10. code deletion/simplification without behavior loss.
 
-The runtime must maintain a persistent scene/world state for the whole replayed
-route. That state must include the robot's estimated pose in memory, physical
-BEV geometry, uncertainty/unknown, seen/coverage, selected trajectory overlays,
-and future-state predictions. It must also be used by the policy or future
-rollout; artifact-only memory is not acceptance.
+If a change does not improve one of those, do not do it.
 
-Goal27 acceptance is hard:
+## What not to build
 
-- no fake, mock, synthetic, generated, or random data for milestone metrics;
-- no classical SLAM/Nav2 stack as the core brain;
-- accepted runtime uses `Brain.step(...)` or equivalent online tick semantics;
-- accepted runtime does not use teacher outputs, future labels, route ground
-  truth, oracle BEV, or future frames during the control tick;
-- accepted direct RGB-D/RGB-IR path is trained/evaluated as a student, not only
-  a patch-stat adapter into a DINO-trained model;
-- accepted action diversity must come from learned scoring/FutureBEV/policy
-  outputs, not `guided_transparent`, temporal diversity priors, randomization,
-  or hand-authored alternation;
-- scene memory must improve measured physical geometry:
-  `unknown_reduction_vs_current>0`, `coverage_memory_cells_seen>0`, and nonzero
-  free/occupied future metrics when labels exist;
-- the final visual proof must show scene geometry, pose trace, selected path,
-  and predicted future states for at least one heldout route;
-- pose/localization metrics must identify whether they are learned, odometry
-  proxy, independent ground truth eval, or leakage ablation.
+Do not add:
+- generic robotics framework code,
+- placeholder daemons,
+- fake hardware APIs,
+- unconnected CLIs,
+- untrained model classes,
+- synthetic-only milestones,
+- dashboards before the underlying BEV/risk outputs work,
+- RL loops without action-conditioned data,
+- YouTube-to-fake-physics simulators,
+- hand-authored diversity tricks counted as learned policy success,
+- raw PWM control.
 
-If these gates fail, keep iterating or mark the run blocked with exact artifact
-paths. Do not call the milestone accepted.
+## Architecture rule
 
-## Completion
+Use modern ML, but do not confuse “mostly neural” with “no geometry.”
 
-For implementation tasks, leave proof:
+Allowed and expected:
+- calibration,
+- timestamps,
+- camera-to-base transforms,
+- odometry/IMU/wheel inputs,
+- BEV grids,
+- candidate trajectory footprints,
+- hard safety envelopes,
+- deterministic replay,
+- explicit provenance.
 
-- run focused tests, and full `python -m pytest -q` when feasible;
-- update `CURRENT_STATUS.md` briefly with objective, files changed, commands,
-  pass/fail result, artifacts, risks, and next recommended step;
-- update `BLOCKERS.md` only for active blockers that still need action.
-- for broad autonomous work, record the exact real-data artifact path and the
-  metric that improved or regressed.
+The neural core should be perception, memory, future prediction, uncertainty, and candidate outcome scoring.
 
-## Dependency Policy
+## Open-weight model rule
 
-Allowed by default: Python stdlib, numpy, pytest, dataclasses or pydantic-style
-validation, opencv-python when image/video IO is needed, and torch when ML work
-requires it. Avoid ROS/Nav2/Isaac/Habitat/web-scale frameworks unless the user
-explicitly asks.
+Use large open-weight models as offline teachers, not runtime dependencies.
 
-## Product Reality
+Good teacher roles:
+- depth/geometry,
+- dense visual features,
+- segmentation/masks,
+- dynamic-object hints,
+- traversability/risk weak labels,
+- navigation priors for pseudo-labels or ablations.
 
-Target homes are messy: humans, pets, cords, boxes, rugs, chair legs, dark
-rooms, reflections, moved furniture, and temporary blocked paths. Do not build
-only for clean static maps.
+Train a smaller direct runtime student. Runtime should not require DINO/MoGe/Depth/SAM-style heavy teachers every control tick.
+
+## RL/ML rule
+
+Do not start with online RL.
+
+Current priority is model-based/offline learning:
+- learn current BEV/risk,
+- learn scene memory,
+- learn short-horizon future BEV/risk under candidate motion,
+- learn candidate outcome scores,
+- evaluate route-heldout.
+
+RL can come later as offline objective/value learning over the learned world model, but only after labels, dynamics, and evals are credible.
+
+## Required validation
+
+Every nontrivial change must include:
+- focused tests,
+- deterministic artifacts or metrics,
+- comparison against a baseline when behavior changes,
+- no runtime leakage from future frames, future labels, route ground truth, oracle BEV, or teacher outputs,
+- replay safety flags unchanged:
+  replay_only=true
+  not_executed=true
+  control_safe=false
+  raw_pwm_emitted=false
+
+For model/policy work, include at least one of:
+- tiny overfit test,
+- route-heldout metric,
+- synthetic fixture for a specific failure mode,
+- visual proof artifact,
+- baseline comparison.
+
+## Code hygiene
+
+Prefer deleting or merging old paths over adding parallel versions.
+
+No new module unless:
+- an existing train/eval/runtime path uses it,
+- a test fails without it,
+- an artifact or metric proves it ran.
+
+Avoid files over 400 lines unless there is a strong reason.
+Avoid broad rewrites.
+Avoid adding config layers before behavior works.
+Every large addition should delete, simplify, or obsolete something.
+
+## Code growth budget
+
+Every PR must explain net new code.
+
+Prefer:
+- modifying existing paths over adding new ones,
+- one model path over many parallel model paths,
+- one eval command over many wrappers,
+- deleting obsolete goal-specific code after the stronger path exists.
+
+Soft limits:
+- avoid new files over 400 lines,
+- avoid functions over 80 lines,
+- avoid new packages unless the runtime/train/eval path uses them,
+- if a change adds more than 800 net lines, it should delete or consolidate something too.
+
+A new module is rejected unless:
+- an existing command calls it,
+- a test covers it,
+- a metric/artifact proves it ran,
+- it improves a listed gate.
+
+## Next hard direction
+
+Goal29 should not be another milestone wrapper.
+
+Goal29 should improve real hardware readiness by preserving Goal28’s online SceneState path while attacking the real remaining gaps:
+- broader route-heldout robustness,
+- dynamic-risk supervision,
+- stronger traversability/free-space labels,
+- replay-compatible watchdog/recovery/safety envelope,
+- direct RGB-D/RGB-IR student quality,
+- action-conditioned future risk prediction,
+- non-collapsed learned candidate scoring across more scenes.
+
+Do not claim robot-brain success unless the eval says it.
