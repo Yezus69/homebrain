@@ -118,6 +118,11 @@ def _summarize_events(events: list[Event]) -> JsonDict:
     unsafe_selected_values = [_unsafe_selected_value(event) for event in decisions]
     cmd_vel_non_null_count = sum(1 for event in outputs if event.cmd_vel is not None)
     cmd_vel_proposals = [_cmd_vel_proposal(event) for event in outputs]
+    safety_envelopes = [
+        event.debug.get("replay_safety_envelope")
+        for event in decisions
+        if isinstance(event.debug, dict) and isinstance(event.debug.get("replay_safety_envelope"), dict)
+    ]
     control_safe = any(_event_or_candidate_flag(event, "control_safe") for event in outputs)
     replay_only = bool(outputs) and all(_debug_flag(event, "replay_only") for event in outputs)
     not_executed = bool(outputs) and all(_debug_flag(event, "not_executed") for event in outputs)
@@ -167,6 +172,26 @@ def _summarize_events(events: list[Event]) -> JsonDict:
         "cmd_vel_non_null_count": int(cmd_vel_non_null_count),
         "cmd_vel_proposal_count": len(cmd_vel_proposals),
         "cmd_vel_proposal_nonzero_count": sum(1 for item in cmd_vel_proposals if _proposal_nonzero(item)),
+        "cmd_vel_executed_count": 0,
+        "command_envelope_violation_count": sum(
+            int(item.get("command_envelope_violation_count", 0))
+            for item in safety_envelopes
+            if isinstance(item.get("command_envelope_violation_count", 0), int)
+        ),
+        "watchdog_state_count": len(safety_envelopes),
+        "stale_sensor_stop_count": _safety_count(safety_envelopes, "stale_sensor_stop"),
+        "high_uncertainty_stop_count": _safety_count(safety_envelopes, "high_uncertainty_stop"),
+        "high_risk_stop_count": _safety_count(safety_envelopes, "high_predicted_risk_stop"),
+        "invalid_candidate_rejection_count": sum(
+            int(item.get("invalid_candidate_rejection_count", 0))
+            for item in safety_envelopes
+            if isinstance(item.get("invalid_candidate_rejection_count", 0), int)
+        ),
+        "recovery_selected_fraction": _recovery_fraction(safety_envelopes),
+        "recovery_executed_count": 0,
+        "stop_reason_counts": _stop_reason_counts(safety_envelopes),
+        "hardware_transport_enabled": False,
+        "hardware_validated": False,
         "route_progress_proxy_mean": _mean(
             [
                 item.get("linear_velocity_mps")
@@ -533,6 +558,32 @@ def _proposal_nonzero(proposal: JsonDict | None) -> bool:
         and not isinstance(angular, bool)
         and abs(float(angular)) > 1.0e-6
     )
+
+
+def _safety_count(records: list[Any], key: str) -> int:
+    return sum(1 for record in records if isinstance(record, dict) and record.get(key) is True)
+
+
+def _recovery_fraction(records: list[Any]) -> float:
+    if not records:
+        return 0.0
+    count = sum(
+        1
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("bounded_recovery_proposal"), dict)
+    )
+    return float(count / len(records))
+
+
+def _stop_reason_counts(records: list[Any]) -> JsonDict:
+    counter: Counter[str] = Counter()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        reason = record.get("stop_reason")
+        if isinstance(reason, str) and reason:
+            counter[reason] += 1
+    return dict(sorted(counter.items()))
 
 
 def _max_coverage_value(records: list[Any], key: str) -> int:

@@ -35,6 +35,9 @@ DEFAULT_CMD_VEL_LIMITS = {
     "max_linear_velocity_mps": 0.25,
     "max_angular_velocity_radps": 1.0,
 }
+STALE_SENSOR_STOP_THRESHOLD_S = 1.0
+HIGH_UNCERTAINTY_STOP_THRESHOLD = 0.85
+HIGH_PREDICTED_RISK_STOP_THRESHOLD = 0.75
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,7 @@ def decide_trajectory(
     patch_features: np.ndarray | None = None,
     sensor_mask: np.ndarray | None = None,
     policy_bev_source: str,
+    sensor_age_s: float | None = None,
     coverage_memory_reset: bool = False,
     future_rollout_selection_mode: str = "argmin",
     selection_history: list[str] | None = None,
@@ -113,6 +117,10 @@ def decide_trajectory(
     bev.validate()
     if not candidates:
         raise ValueError("at least one candidate is required")
+    stop_index = _stop_candidate_index(candidates)
+    if stop_index is None:
+        raise ValueError("runtime trajectory decisions must include a stop candidate")
+    invalid_candidate_ids = _invalid_candidate_ids(candidates)
 
     coverage_before = coverage_memory.to_dict()
     coverage_memory.align_with_pose_delta(pose_delta)
@@ -162,7 +170,15 @@ def decide_trajectory(
             ),
             "future_rollout_candidate_new_area_gain": np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32),
             "future_rollout_candidate_progress": np.asarray(future_scores["candidate_progress"], dtype=np.float32),
-        "future_rollout_candidate_lower_is_better_score": lower_score,
+            "future_rollout_candidate_future_risk": np.asarray(
+                future_scores.get("candidate_future_risk", future_scores.get("candidate_future_collision")),
+                dtype=np.float32,
+            ),
+            "future_rollout_candidate_horizon_future_risk": np.asarray(
+                future_scores.get("candidate_horizon_future_risk", np.zeros((len(candidates), 0), dtype=np.float32)),
+                dtype=np.float32,
+            ),
+            "future_rollout_candidate_lower_is_better_score": lower_score,
             "future_rollout_candidate_learned_safe_mask": _learned_safe_mask(future_scores).astype(np.float32),
             "future_rollout_candidate_scene_safe_mask": np.asarray(
                 [
@@ -173,6 +189,10 @@ def decide_trajectory(
             ),
             "future_rollout_guided_total_scores": guided_scores.astype(np.float32),
             "future_rollout_future_bev_prob": np.asarray(future_scores["future_bev_prob"], dtype=np.float32),
+            "future_rollout_future_risk_prob": np.asarray(
+                future_scores.get("future_risk_prob", np.zeros((0, 0, 0), dtype=np.float32)),
+                dtype=np.float32,
+            ),
             "future_rollout_future_uncertainty_grid": np.asarray(
                 future_scores["future_uncertainty_grid"],
                 dtype=np.float32,
@@ -224,6 +244,19 @@ def decide_trajectory(
         scorer_name = TRANSPARENT_TRAJECTORY_SCORER_SOURCE
         scorer_mode = "transparent"
 
+    selected_before_safety = selected_candidate_id
+    safety_envelope = _runtime_safety_envelope(
+        bev=bev,
+        candidates=candidates,
+        selected_candidate_id=selected_candidate_id,
+        future_scores=future_scores,
+        invalid_candidate_ids=invalid_candidate_ids,
+        sensor_age_s=sensor_age_s,
+    )
+    if bool(safety_envelope["force_stop"]):
+        selected_candidate_id = candidates[stop_index].id
+        _mark_selected_candidate_records(candidate_records, selected_candidate_id)
+    _annotate_candidate_rejections(candidate_records, invalid_candidate_ids)
     selected_index = _selected_candidate_index(candidates, selected_candidate_id)
     cmd_vel_proposal = _bounded_cmd_vel_proposal(candidates[selected_index])
     coverage_memory.update_current_frame(bev)
@@ -274,7 +307,10 @@ def decide_trajectory(
         "policy_bev_source": policy_bev_source,
         "selected_candidate_id": selected_candidate_id,
         "selected_candidate_index": selected_index,
+        "selected_candidate_id_before_safety_envelope": selected_before_safety,
         "selected_candidate_metrics": selected_metrics,
+        "replay_safety_envelope": safety_envelope,
+        "stop_reason": safety_envelope["stop_reason"] if selected_candidate_id == candidates[stop_index].id else None,
         "transparent_decision": transparent_decision.to_dict(),
         "risky_candidate_fraction": risky_candidate_fraction(transparent_decision),
         "coverage_memory": coverage_after_update,
@@ -293,7 +329,10 @@ def decide_trajectory(
         "control_safe": False,
         "product_training_approved": False,
         "cmd_vel_emitted": False,
+        "cmd_vel_executed": False,
         "raw_pwm_emitted": False,
+        "hardware_validated": False,
+        "hardware_transport_enabled": False,
     }
     if learned_scorer is not None:
         debug.update(
@@ -424,6 +463,7 @@ def _future_rollout_candidate_score_records(
 ) -> list[JsonDict]:
     collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
     future_collision = np.asarray(future_scores.get("candidate_future_collision", collision), dtype=np.float32)
+    future_risk = np.asarray(future_scores.get("candidate_future_risk", future_collision), dtype=np.float32)
     unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
     unknown = np.asarray(future_scores["candidate_unknown_exposure"], dtype=np.float32)
     gain = np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32)
@@ -441,6 +481,7 @@ def _future_rollout_candidate_score_records(
                     "candidate_id": candidate.id,
                     "future_collision_probability": round(float(collision[index]), 6),
                     "future_collision_only_probability": round(float(future_collision[index]), 6),
+                    "future_risk_probability": round(float(future_risk[index]), 6),
                     "unsafe_now_probability": round(float(unsafe_now[index]), 6),
                     "future_unknown_exposure": round(float(unknown[index]), 6),
                     "future_new_area_gain": round(float(gain[index]), 6),
@@ -471,6 +512,171 @@ def _validate_future_candidate_ids(
     expected = [candidate.id for candidate in candidates]
     if scored_ids != expected:
         raise ValueError(f"Future BEV rollout candidate ids do not match runtime candidates: {scored_ids} != {expected}")
+
+
+def _stop_candidate_index(candidates: list[CandidateTrajectory]) -> int | None:
+    for index, candidate in enumerate(candidates):
+        if candidate.id == "stop":
+            return index
+    return None
+
+
+def _invalid_candidate_ids(candidates: list[CandidateTrajectory]) -> set[str]:
+    invalid: set[str] = set()
+    for candidate in candidates:
+        linear = candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0)
+        angular = candidate.cmd_vel_proxy.get("angular_velocity_radps", 0.0)
+        if not candidate.footprint_cells:
+            invalid.add(candidate.id)
+        elif not _finite_number(linear) or not _finite_number(angular):
+            invalid.add(candidate.id)
+    return invalid
+
+
+def _runtime_safety_envelope(
+    *,
+    bev: LocalBev,
+    candidates: list[CandidateTrajectory],
+    selected_candidate_id: str,
+    future_scores: dict[str, np.ndarray | list[str] | str] | None,
+    invalid_candidate_ids: set[str],
+    sensor_age_s: float | None,
+) -> JsonDict:
+    selected_index = _selected_candidate_index(candidates, selected_candidate_id)
+    selected_candidate = candidates[selected_index]
+    stale_sensor_stop = sensor_age_s is not None and _finite_number(sensor_age_s) and float(sensor_age_s) > STALE_SENSOR_STOP_THRESHOLD_S
+    selected_uncertainty = _candidate_uncertainty(bev, selected_candidate)
+    high_uncertainty_stop = selected_candidate.id != "stop" and selected_uncertainty >= HIGH_UNCERTAINTY_STOP_THRESHOLD
+    predicted_risk = _candidate_predicted_risk(future_scores, selected_index)
+    high_predicted_risk_stop = selected_candidate.id != "stop" and predicted_risk >= HIGH_PREDICTED_RISK_STOP_THRESHOLD
+    invalid_selected = selected_candidate.id in invalid_candidate_ids
+    stop_reason = None
+    if stale_sensor_stop:
+        stop_reason = "replay_safety_stale_sensor_stop"
+    elif invalid_selected:
+        stop_reason = "replay_safety_invalid_candidate_stop"
+    elif high_uncertainty_stop:
+        stop_reason = "replay_safety_high_uncertainty_stop"
+    elif high_predicted_risk_stop:
+        stop_reason = "replay_safety_high_predicted_risk_stop"
+    force_stop = stop_reason is not None
+    return {
+        "schema_version": "homebrain.runtime_replay_safety_envelope.v0",
+        "stop_candidate_available": True,
+        "force_stop": bool(force_stop),
+        "stop_reason": stop_reason,
+        "selected_candidate_id_before_envelope": selected_candidate_id,
+        "invalid_candidate_rejection_count": len(invalid_candidate_ids),
+        "invalid_candidate_ids": sorted(invalid_candidate_ids),
+        "stale_sensor_stop": bool(stale_sensor_stop),
+        "high_uncertainty_stop": bool(high_uncertainty_stop),
+        "high_predicted_risk_stop": bool(high_predicted_risk_stop),
+        "selected_candidate_uncertainty": round(float(selected_uncertainty), 6),
+        "selected_candidate_predicted_risk": round(float(predicted_risk), 6),
+        "command_envelope_violation_count": _command_envelope_violation_count(candidates),
+        "bounded_recovery_proposal": _bounded_recovery_proposal(
+            candidates,
+            future_scores=future_scores,
+            invalid_candidate_ids=invalid_candidate_ids,
+        )
+        if force_stop
+        else None,
+        "recovery_executed": False,
+        "replay_only": True,
+        "not_executed": True,
+        "control_safe": False,
+        "raw_pwm_emitted": False,
+        "hardware_validated": False,
+    }
+
+
+def _candidate_uncertainty(bev: LocalBev, candidate: CandidateTrajectory) -> float:
+    if bev.uncertainty is not None:
+        uncertainty = np.clip(np.asarray(bev.uncertainty, dtype=np.float32), 0.0, 1.0)
+    elif bev.confidence is not None:
+        uncertainty = 1.0 - np.clip(np.asarray(bev.confidence, dtype=np.float32), 0.0, 1.0)
+    else:
+        uncertainty = np.clip(np.asarray(bev.unknown, dtype=np.float32), 0.0, 1.0)
+    cells = candidate.footprint_cells
+    if not cells:
+        return 1.0
+    values = []
+    for row, col in cells:
+        if 0 <= row < uncertainty.shape[0] and 0 <= col < uncertainty.shape[1]:
+            values.append(float(uncertainty[row, col]))
+        else:
+            values.append(1.0)
+    return float(np.mean(values)) if values else 1.0
+
+
+def _candidate_predicted_risk(
+    future_scores: dict[str, np.ndarray | list[str] | str] | None,
+    selected_index: int,
+) -> float:
+    if future_scores is None:
+        return 0.0
+    values: list[float] = []
+    for key in ("candidate_collision", "candidate_future_collision", "candidate_future_risk"):
+        if key not in future_scores:
+            continue
+        array = np.asarray(future_scores[key], dtype=np.float32).reshape(-1)
+        if 0 <= selected_index < array.shape[0]:
+            values.append(float(array[selected_index]))
+    return max(values) if values else 0.0
+
+
+def _command_envelope_violation_count(candidates: list[CandidateTrajectory]) -> int:
+    count = 0
+    for candidate in candidates:
+        linear = candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0)
+        angular = candidate.cmd_vel_proxy.get("angular_velocity_radps", 0.0)
+        if not _finite_number(linear) or not _finite_number(angular):
+            count += 1
+            continue
+        if abs(float(linear)) > float(DEFAULT_CMD_VEL_LIMITS["max_linear_velocity_mps"]):
+            count += 1
+        elif abs(float(angular)) > float(DEFAULT_CMD_VEL_LIMITS["max_angular_velocity_radps"]):
+            count += 1
+    return count
+
+
+def _bounded_recovery_proposal(
+    candidates: list[CandidateTrajectory],
+    *,
+    future_scores: dict[str, np.ndarray | list[str] | str] | None,
+    invalid_candidate_ids: set[str],
+) -> JsonDict | None:
+    for index, candidate in enumerate(candidates):
+        angular = candidate.cmd_vel_proxy.get("angular_velocity_radps", 0.0)
+        linear = candidate.cmd_vel_proxy.get("linear_velocity_mps", 0.0)
+        if candidate.id in invalid_candidate_ids or not _finite_number(angular) or not _finite_number(linear):
+            continue
+        if abs(float(linear)) > 1.0e-6 or abs(float(angular)) < 1.0e-6:
+            continue
+        if _candidate_predicted_risk(future_scores, index) >= HIGH_PREDICTED_RISK_STOP_THRESHOLD:
+            continue
+        proposal = _bounded_cmd_vel_proposal(candidate)
+        proposal["source"] = "bounded_recovery_candidate_cmd_vel_proxy"
+        proposal["recovery_executed"] = False
+        return proposal
+    return None
+
+
+def _mark_selected_candidate_records(records: list[JsonDict], selected_candidate_id: str) -> None:
+    for record in records:
+        candidate_id = str(record.get("id", record.get("trajectory_id", "")))
+        for field in ("trajectory_score", "transparent_trajectory_score", "future_rollout_trajectory_score"):
+            score = record.get(field)
+            if isinstance(score, dict):
+                score["selected_by_runtime_policy"] = candidate_id == selected_candidate_id
+
+
+def _annotate_candidate_rejections(records: list[JsonDict], invalid_candidate_ids: set[str]) -> None:
+    for record in records:
+        candidate_id = str(record.get("id", record.get("trajectory_id", "")))
+        rejected = candidate_id in invalid_candidate_ids
+        record["runtime_candidate_valid"] = not rejected
+        record["runtime_rejection_reason"] = "invalid_candidate" if rejected else None
 
 
 def _select_future_rollout_candidate(
@@ -505,6 +711,7 @@ def _select_future_rollout_candidate(
 
     transparent_scores = np.asarray([score.total_score for score in transparent_decision.scores], dtype=np.float32)
     collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
+    future_risk = np.asarray(future_scores.get("candidate_future_risk", collision), dtype=np.float32)
     unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
     unknown = np.asarray(future_scores["candidate_unknown_exposure"], dtype=np.float32)
     gain = np.asarray(future_scores["candidate_new_area_gain"], dtype=np.float32)
@@ -525,6 +732,7 @@ def _select_future_rollout_candidate(
         transparent_scores
         + 0.20 * future_norm
         + 0.75 * collision
+        + 0.75 * future_risk
         + 0.50 * unsafe_now
         + 0.08 * unknown
         - 0.05 * gain
@@ -532,7 +740,7 @@ def _select_future_rollout_candidate(
         + repeated
         + nonprogress
     ).astype(np.float32)
-    hard_unsafe = (collision >= 0.5) | (unsafe_now >= 0.5)
+    hard_unsafe = (collision >= 0.5) | (future_risk >= 0.5) | (unsafe_now >= 0.5)
     guided = guided + hard_unsafe.astype(np.float32) * np.float32(100.0)
     return int(np.argmin(guided)), guided
 
@@ -551,8 +759,14 @@ def _normalise_scores(values: np.ndarray) -> np.ndarray:
 def _learned_safe_mask(future_scores: dict[str, np.ndarray | list[str] | str]) -> np.ndarray:
     collision = np.asarray(future_scores["candidate_collision"], dtype=np.float32)
     future_collision = np.asarray(future_scores.get("candidate_future_collision", collision), dtype=np.float32)
+    future_risk = np.asarray(future_scores.get("candidate_future_risk", future_collision), dtype=np.float32)
     unsafe_now = np.asarray(future_scores.get("candidate_unsafe_now", np.zeros_like(collision)), dtype=np.float32)
-    return (collision < np.float32(0.5)) & (future_collision < np.float32(0.5)) & (unsafe_now < np.float32(0.5))
+    return (
+        (collision < np.float32(0.5))
+        & (future_collision < np.float32(0.5))
+        & (future_risk < np.float32(0.5))
+        & (unsafe_now < np.float32(0.5))
+    )
 
 
 def _recent_selection_penalty(candidates: list[CandidateTrajectory], history: list[str]) -> np.ndarray:
@@ -644,6 +858,10 @@ def _clip_float(value: object, lower: float, upper: float) -> float:
     if not np.isfinite(number):
         number = 0.0
     return float(np.clip(number, lower, upper))
+
+
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and bool(np.isfinite(float(value)))
 
 
 def metadata_float(metadata: dict[str, Any], key: str, default: float) -> float:

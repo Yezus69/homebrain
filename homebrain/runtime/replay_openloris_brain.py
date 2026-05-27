@@ -129,6 +129,8 @@ def run_openloris_runtime_replay(
             "cmd_vel_proposal_only": True,
             "cmd_vel_executed": False,
             "raw_pwm_emitted": False,
+            "hardware_validated": False,
+            "hardware_transport_enabled": False,
             "route_metadata": {
                 "source_type": route_metadata.get("source_type"),
                 "sequence": route_metadata.get("sequence"),

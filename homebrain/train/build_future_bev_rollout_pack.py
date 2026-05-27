@@ -15,6 +15,7 @@ from homebrain.train.future_bev_rollout_dataset import (
     DEFAULT_FUTURE_HORIZONS_S,
     FUTURE_BEV_CHANNELS,
     FUTURE_DERIVED_CHANNELS,
+    FUTURE_RISK_CHANNELS,
     FUTURE_ROLLOUT_EXAMPLE_SCHEMA_VERSION,
     FUTURE_ROLLOUT_PACK_SCHEMA_VERSION,
     ROLLOUT_PROVENANCE_FLAGS,
@@ -209,7 +210,9 @@ def build_future_bev_rollout_pack(
         "robot_radius_m": round(float(robot_radius_m or 0.18), 6),
         "horizons_s": [round(float(value), 6) for value in horizons_s],
         "future_bev_channels": list(FUTURE_BEV_CHANNELS),
+        "future_risk_channels": list(FUTURE_RISK_CHANNELS),
         "future_derived_channels": list(FUTURE_DERIVED_CHANNELS),
+        "history_steps": 1,
         "candidate_count": len(candidate_ids),
         "candidate_ids": candidate_ids,
         "candidate_hash": candidate_hash_value,
@@ -219,7 +222,7 @@ def build_future_bev_rollout_pack(
             "warp_mode": "nearest_se2_grid_sample",
             "candidate_label_source": (
                 "fixed_candidate_footprints_over_current_bev_and_warped_future_bev_with_"
-                "separate_unsafe_now_and_future_collision"
+                "separate_unsafe_now_future_collision_and_future_risk"
             ),
             "uses_model_predictions_as_labels": False,
             "weak_label": True,

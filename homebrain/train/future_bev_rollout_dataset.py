@@ -20,6 +20,7 @@ from homebrain.train.spatial_dataset import BEV_OUTPUT_CHANNELS, DINOFeatureStor
 FUTURE_ROLLOUT_PACK_SCHEMA_VERSION = "homebrain.future_bev_rollout_pack.v1"
 FUTURE_ROLLOUT_EXAMPLE_SCHEMA_VERSION = "homebrain.future_bev_rollout_example.v1"
 FUTURE_BEV_CHANNELS: tuple[str, ...] = ("free", "occupied", "unknown")
+FUTURE_RISK_CHANNELS: tuple[str, ...] = ("risk",)
 FUTURE_DERIVED_CHANNELS: tuple[str, ...] = (
     "newly_observed",
     "persistent_obstacle",
@@ -33,6 +34,7 @@ ROLLOUT_PROVENANCE_FLAGS: JsonDict = {
     "weak_label": True,
     "product_training_approved": False,
     "raw_pwm_emitted": False,
+    "hardware_validated": False,
 }
 
 
@@ -102,6 +104,7 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
         self.horizons_s = tuple(float(value) for value in self.manifest.get("horizons_s", DEFAULT_FUTURE_HORIZONS_S))
         self.candidate_ids = tuple(str(value) for value in self.manifest.get("candidate_ids", []))
         self.feature_shape = self._first_feature_shape()
+        self.history_steps = max(1, int(self.manifest.get("history_steps", 1)))
         self.sensor_dim = 4
 
     def __len__(self) -> int:
@@ -124,6 +127,13 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
             ],
             axis=0,
         ).astype(np.float32)
+        memory_bev = _memory_bev_from_example(example, current_bev)
+        uncertainty_map = _uncertainty_map_from_example(example, current_bev)
+        bev_history = _history_stack_from_example(
+            example,
+            current_bev=current_bev,
+            history_steps=self.history_steps,
+        )
         future_bev = np.stack(
             [
                 np.asarray(example["future_free"], dtype=np.float32),
@@ -132,6 +142,7 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
             ],
             axis=1,
         ).astype(np.float32)
+        future_risk = _future_risk_from_example(example, fallback=future_bev[:, 1])
         derived = np.stack(
             [
                 np.asarray(example["newly_observed"], dtype=np.float32),
@@ -142,11 +153,15 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
         ).astype(np.float32)
         return {
             "current_bev": torch.from_numpy(current_bev),
+            "memory_bev": torch.from_numpy(memory_bev),
+            "bev_history": torch.from_numpy(bev_history),
+            "uncertainty_map": torch.from_numpy(uncertainty_map[None, ...].astype(np.float32)),
             "features": torch.from_numpy(np.transpose(features, (2, 0, 1)).copy()),
             "cls_feature": torch.from_numpy(cls_feature.copy()),
             "feature_mask": torch.from_numpy(feature_mask),
             "sensor_mask": torch.from_numpy(np.asarray(example["sensor_mask"], dtype=np.float32)),
             "future_bev": torch.from_numpy(future_bev),
+            "future_risk": torch.from_numpy(future_risk[:, None, :, :].astype(np.float32)),
             "future_derived": torch.from_numpy(derived),
             "future_valid_mask": torch.from_numpy(np.asarray(example["future_valid_mask"], dtype=np.float32)[:, None, :, :]),
             "horizon_valid": torch.from_numpy(np.asarray(example["horizon_valid"], dtype=np.float32)),
@@ -163,6 +178,12 @@ class FutureBEVRolloutDataset(Dataset[dict[str, Any]]):
             ),
             "candidate_new_area_gain": torch.from_numpy(np.asarray(example["candidate_new_area_gain"], dtype=np.float32)),
             "candidate_progress": torch.from_numpy(np.asarray(example["candidate_progress"], dtype=np.float32)),
+            "candidate_horizon_future_risk": torch.from_numpy(
+                _candidate_horizon_future_risk_from_example(example, len(self.horizons_s))
+            ),
+            "candidate_footprint_masks": torch.from_numpy(
+                _candidate_footprint_masks_from_example(example, len(self.candidate_ids), self.grid_shape)
+            ),
             "candidate_oracle_cost": torch.from_numpy(
                 _candidate_oracle_cost_from_example(example).astype(np.float32)
             ),
@@ -263,6 +284,7 @@ def build_future_rollout_targets_for_frame(
     future_free: list[np.ndarray] = []
     future_occupied: list[np.ndarray] = []
     future_unknown: list[np.ndarray] = []
+    future_risk: list[np.ndarray] = []
     future_valid: list[np.ndarray] = []
     newly_observed: list[np.ndarray] = []
     persistent_obstacle: list[np.ndarray] = []
@@ -285,7 +307,8 @@ def build_future_rollout_targets_for_frame(
             reason = "future_pose_missing"
         else:
             target_example = load_example_npz(target.example_path)
-            target_bev = _bev_stack(target_example)[:3]
+            target_bev_full = _bev_stack(target_example)
+            target_bev = target_bev_full[[0, 1, 2, 4]]
             current_to_future = _relative_delta(frame.pose_sample.pose, target.pose_sample.pose, pose_frame=frame.pose_sample.pose_frame)
             future_to_current = _relative_delta(target.pose_sample.pose, frame.pose_sample.pose, pose_frame=frame.pose_sample.pose_frame)
             warped, valid_mask = warp_future_bev_to_current(
@@ -297,6 +320,7 @@ def build_future_rollout_targets_for_frame(
                 "free": warped[0],
                 "occupied": warped[1],
                 "unknown": warped[2],
+                "risk": warped[3],
                 "valid": valid_mask,
                 "pose_delta_to_future": current_to_future,
                 "pose_delta_future_to_current": future_to_current,
@@ -307,6 +331,7 @@ def build_future_rollout_targets_for_frame(
         future_free.append(future["free"])
         future_occupied.append(future["occupied"])
         future_unknown.append(future["unknown"])
+        future_risk.append(future.get("risk", future["occupied"]))
         future_valid.append(future["valid"])
         observed_future = np.clip(future["free"] + future["occupied"], 0.0, 1.0)
         new = ((current_unknown >= 0.5) & (observed_future >= 0.5) & (future["valid"] > 0.5)).astype(np.float32)
@@ -328,6 +353,7 @@ def build_future_rollout_targets_for_frame(
     stacked_free = np.stack(future_free, axis=0).astype(np.float32)
     stacked_occupied = np.stack(future_occupied, axis=0).astype(np.float32)
     stacked_unknown = np.stack(future_unknown, axis=0).astype(np.float32)
+    stacked_risk = np.stack(future_risk, axis=0).astype(np.float32)
     stacked_valid = np.stack(future_valid, axis=0).astype(np.float32)
     stacked_new = np.stack(newly_observed, axis=0).astype(np.float32)
     stacked_persistent = np.stack(persistent_obstacle, axis=0).astype(np.float32)
@@ -341,11 +367,14 @@ def build_future_rollout_targets_for_frame(
         current_traversable=current_bev[3],
         future_occupied=stacked_occupied,
         future_unknown=stacked_unknown,
+        future_risk=stacked_risk,
         newly_observed=stacked_new,
         future_free=stacked_free,
         horizon_valid=np.asarray(horizon_valid, dtype=np.float32),
     )
     feature_arrays = _feature_arrays(frame.record, feature_store)
+    confidence = np.asarray(current["bev_confidence"], dtype=np.float32)
+    uncertainty_map = np.clip(1.0 - confidence, 0.0, 1.0).astype(np.float32)
     arrays: dict[str, np.ndarray] = {
         "schema_version": np.asarray(FUTURE_ROLLOUT_EXAMPLE_SCHEMA_VERSION),
         "frame_id": np.asarray(frame.frame_id, dtype=np.int64),
@@ -363,7 +392,14 @@ def build_future_rollout_targets_for_frame(
         "current_bev_unknown": current_bev[2].astype(np.float32),
         "current_bev_traversable": current_bev[3].astype(np.float32),
         "current_bev_risky": current_bev[4].astype(np.float32),
-        "current_bev_confidence": np.asarray(current["bev_confidence"], dtype=np.float32),
+        "current_bev_confidence": confidence,
+        "memory_bev_free": current_bev[0].astype(np.float32),
+        "memory_bev_occupied": current_bev[1].astype(np.float32),
+        "memory_bev_unknown": current_bev[2].astype(np.float32),
+        "memory_bev_traversable": current_bev[3].astype(np.float32),
+        "memory_bev_risky": current_bev[4].astype(np.float32),
+        "uncertainty_map": uncertainty_map,
+        "bev_history": current_bev[None, ...].astype(np.float32),
         "sensor_mask": sensor_mask,
         "horizons_s": np.asarray(horizons_s, dtype=np.float32),
         "horizon_valid": np.asarray(horizon_valid, dtype=np.float32),
@@ -373,11 +409,13 @@ def build_future_rollout_targets_for_frame(
         "future_free": stacked_free,
         "future_occupied": stacked_occupied,
         "future_unknown": stacked_unknown,
+        "future_risk": stacked_risk,
         "future_valid_mask": stacked_valid,
         "newly_observed": stacked_new,
         "persistent_obstacle": stacked_persistent,
         "cleared_or_changed": stacked_changed,
         "candidate_ids": np.asarray([candidate.id for candidate in candidates]),
+        "candidate_footprint_masks": _candidate_footprint_masks(candidates, height, width),
         **candidate_labels,
         "replay_only": np.asarray(True, dtype=np.bool_),
         "not_executed": np.asarray(True, dtype=np.bool_),
@@ -444,6 +482,7 @@ def candidate_outcome_labels(
     newly_observed: np.ndarray,
     future_free: np.ndarray,
     horizon_valid: np.ndarray,
+    future_risk: np.ndarray | None = None,
     current_occupied: np.ndarray | None = None,
     current_risky: np.ndarray | None = None,
     current_unknown: np.ndarray | None = None,
@@ -453,6 +492,7 @@ def candidate_outcome_labels(
     horizons, height, width = future_occupied.shape
     valid_horizons = np.asarray(horizon_valid, dtype=np.float32) > 0.0
     any_valid = bool(np.any(valid_horizons))
+    future_risk = _optional_future_stack(future_risk, horizons, height, width, fallback=future_occupied)
     max_forward = max((max((pose.x_m for pose in candidate.poses), default=0.0) for candidate in candidates), default=1.0)
     max_forward = max(float(max_forward), 1.0e-6)
     max_turn = max(
@@ -473,6 +513,7 @@ def candidate_outcome_labels(
     progress: list[float] = []
     oracle_cost: list[float] = []
     valid_mask: list[float] = []
+    horizon_future_risk: list[np.ndarray] = []
     for candidate in candidates:
         cells = tuple(candidate.footprint_cells)
         if not cells:
@@ -484,9 +525,18 @@ def candidate_outcome_labels(
             progress.append(0.0)
             oracle_cost.append(0.0)
             valid_mask.append(0.0)
+            horizon_future_risk.append(np.zeros((horizons,), dtype=np.float32))
             continue
         label_cells = _candidate_label_cells(candidate, height, width)
         occupied_values = _cells_over_horizons(future_occupied, cells, default=1.0)[valid_horizons]
+        risk_by_horizon = _candidate_horizon_risk_values(
+            candidate=candidate,
+            future_occupied=future_occupied,
+            future_risk=future_risk,
+            height=height,
+            width=width,
+        )
+        risk_values = risk_by_horizon[valid_horizons]
         unknown_values = _cells_over_horizons(future_unknown, label_cells, default=1.0)[valid_horizons]
         new_values = _cells_over_horizons(newly_observed, label_cells, default=0.0)[valid_horizons]
         free_values = _cells_over_horizons(future_free, label_cells, default=0.0)[valid_horizons]
@@ -498,7 +548,7 @@ def candidate_outcome_labels(
         terminal = candidate.poses[-1] if candidate.poses else None
         forward_norm = 0.0 if terminal is None else max(0.0, float(terminal.x_m)) / max_forward
         turn_norm = 0.0 if terminal is None else abs(float(terminal.yaw_rad)) / max_turn
-        future_collision_value = _risk_value(occupied_values) if any_valid else 0.0
+        future_collision_value = max(_risk_value(occupied_values), _risk_value(risk_values)) if any_valid else 0.0
         current_occupied_risk = _risk_value(current_occupied_values)
         current_risky_risk = _risk_value(current_risky_values)
         current_unknown_mean = _mean_array(current_unknown_values)
@@ -537,6 +587,7 @@ def candidate_outcome_labels(
         progress.append(float(np.clip(progress_value, 0.0, 1.0)))
         oracle_cost.append(float(cost_value))
         valid_mask.append(1.0)
+        horizon_future_risk.append(risk_by_horizon.astype(np.float32))
     return {
         "candidate_collision": np.asarray(collision, dtype=np.float32),
         "candidate_future_collision": np.asarray(future_collision, dtype=np.float32),
@@ -544,6 +595,7 @@ def candidate_outcome_labels(
         "candidate_unknown_exposure": np.asarray(unknown_exposure, dtype=np.float32),
         "candidate_new_area_gain": np.asarray(new_area_gain, dtype=np.float32),
         "candidate_progress": np.asarray(progress, dtype=np.float32),
+        "candidate_horizon_future_risk": np.asarray(horizon_future_risk, dtype=np.float32),
         "candidate_oracle_cost": np.asarray(oracle_cost, dtype=np.float32),
         "candidate_valid_mask": np.asarray(valid_mask, dtype=np.float32),
     }
@@ -774,6 +826,86 @@ def _feature_tensors_from_example(example: dict[str, np.ndarray]) -> tuple[np.nd
     return features, cls, mask
 
 
+def _memory_bev_from_example(example: dict[str, np.ndarray], current_bev: np.ndarray) -> np.ndarray:
+    names = (
+        "memory_bev_free",
+        "memory_bev_occupied",
+        "memory_bev_unknown",
+        "memory_bev_traversable",
+        "memory_bev_risky",
+    )
+    if all(name in example for name in names):
+        memory = np.stack([np.asarray(example[name], dtype=np.float32) for name in names], axis=0)
+        if memory.shape == current_bev.shape:
+            return np.clip(memory, 0.0, 1.0).astype(np.float32)
+    return current_bev.copy()
+
+
+def _uncertainty_map_from_example(example: dict[str, np.ndarray], current_bev: np.ndarray) -> np.ndarray:
+    if "uncertainty_map" in example:
+        uncertainty = np.asarray(example["uncertainty_map"], dtype=np.float32)
+        if uncertainty.shape == current_bev.shape[-2:]:
+            return np.clip(uncertainty, 0.0, 1.0).astype(np.float32)
+    if "current_bev_confidence" in example:
+        confidence = np.asarray(example["current_bev_confidence"], dtype=np.float32)
+        if confidence.shape == current_bev.shape[-2:]:
+            return np.clip(1.0 - confidence, 0.0, 1.0).astype(np.float32)
+    return np.clip(current_bev[2], 0.0, 1.0).astype(np.float32)
+
+
+def _history_stack_from_example(
+    example: dict[str, np.ndarray],
+    *,
+    current_bev: np.ndarray,
+    history_steps: int,
+) -> np.ndarray:
+    if "bev_history" in example:
+        history = np.asarray(example["bev_history"], dtype=np.float32)
+        if history.ndim == 4 and history.shape[1:] == current_bev.shape:
+            return _fit_history_steps(history, history_steps)
+    return np.repeat(current_bev[None, ...], history_steps, axis=0).astype(np.float32)
+
+
+def _fit_history_steps(history: np.ndarray, history_steps: int) -> np.ndarray:
+    steps = max(1, int(history_steps))
+    clipped = np.clip(np.asarray(history, dtype=np.float32), 0.0, 1.0)
+    if clipped.shape[0] == steps:
+        return clipped.astype(np.float32)
+    if clipped.shape[0] > steps:
+        return clipped[-steps:].astype(np.float32)
+    pad = np.repeat(clipped[:1], steps - clipped.shape[0], axis=0)
+    return np.concatenate([pad, clipped], axis=0).astype(np.float32)
+
+
+def _future_risk_from_example(example: dict[str, np.ndarray], *, fallback: np.ndarray) -> np.ndarray:
+    if "future_risk" in example:
+        risk = np.asarray(example["future_risk"], dtype=np.float32)
+        if risk.shape == fallback.shape:
+            return np.clip(risk, 0.0, 1.0).astype(np.float32)
+    return np.clip(np.asarray(fallback, dtype=np.float32), 0.0, 1.0).astype(np.float32)
+
+
+def _candidate_horizon_future_risk_from_example(example: dict[str, np.ndarray], horizon_count: int) -> np.ndarray:
+    if "candidate_horizon_future_risk" in example:
+        values = np.asarray(example["candidate_horizon_future_risk"], dtype=np.float32)
+        if values.ndim == 2 and values.shape[1] == horizon_count:
+            return np.clip(values, 0.0, 1.0).astype(np.float32)
+    collision = np.asarray(example.get("candidate_future_collision", example["candidate_collision"]), dtype=np.float32)
+    return np.repeat(collision[:, None], horizon_count, axis=1).astype(np.float32)
+
+
+def _candidate_footprint_masks_from_example(
+    example: dict[str, np.ndarray],
+    candidate_count: int,
+    grid_shape: tuple[int, int],
+) -> np.ndarray:
+    if "candidate_footprint_masks" in example:
+        masks = np.asarray(example["candidate_footprint_masks"], dtype=np.float32)
+        if masks.shape == (candidate_count, *grid_shape):
+            return np.clip(masks, 0.0, 1.0).astype(np.float32)
+    return np.zeros((candidate_count, *grid_shape), dtype=np.float32)
+
+
 def _empty_future(height: int, width: int) -> dict[str, Any]:
     zeros = np.zeros((height, width), dtype=np.float32)
     unknown = np.ones((height, width), dtype=np.float32)
@@ -781,6 +913,7 @@ def _empty_future(height: int, width: int) -> dict[str, Any]:
         "free": zeros.copy(),
         "occupied": zeros.copy(),
         "unknown": unknown,
+        "risk": zeros.copy(),
         "valid": zeros.copy(),
         "pose_delta_to_future": (0.0, 0.0, 0.0),
         "pose_delta_future_to_current": (0.0, 0.0, 0.0),
@@ -816,6 +949,52 @@ def _candidate_label_cells(candidate: CandidateTrajectory, height: int, width: i
     if angular > 0.0 and linear < 1.0e-6:
         cells = set(_dilate_cells(tuple(cells), height, width, radius_cells=2))
     return tuple(sorted(cells))
+
+
+def _candidate_footprint_masks(
+    candidates: list[CandidateTrajectory],
+    height: int,
+    width: int,
+) -> np.ndarray:
+    masks = np.zeros((len(candidates), height, width), dtype=np.float32)
+    for candidate_index, candidate in enumerate(candidates):
+        for row, col in candidate.footprint_cells:
+            if 0 <= row < height and 0 <= col < width:
+                masks[candidate_index, row, col] = 1.0
+    return masks
+
+
+def _optional_future_stack(
+    values: np.ndarray | None,
+    horizons: int,
+    height: int,
+    width: int,
+    *,
+    fallback: np.ndarray,
+) -> np.ndarray:
+    if values is None:
+        return np.asarray(fallback, dtype=np.float32)
+    array = np.asarray(values, dtype=np.float32)
+    if array.shape != (horizons, height, width):
+        return np.asarray(fallback, dtype=np.float32)
+    return np.clip(array, 0.0, 1.0).astype(np.float32)
+
+
+def _candidate_horizon_risk_values(
+    *,
+    candidate: CandidateTrajectory,
+    future_occupied: np.ndarray,
+    future_risk: np.ndarray,
+    height: int,
+    width: int,
+) -> np.ndarray:
+    cells = tuple(candidate.footprint_cells)
+    if not cells:
+        return np.zeros((future_occupied.shape[0],), dtype=np.float32)
+    occupied = _cells_over_horizons(future_occupied, cells, default=1.0)
+    risk = _cells_over_horizons(future_risk, cells, default=1.0)
+    combined = np.maximum(occupied, risk)
+    return np.asarray([_risk_value(combined[horizon]) for horizon in range(combined.shape[0])], dtype=np.float32)
 
 
 def _dilate_cells(

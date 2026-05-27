@@ -56,6 +56,7 @@ def eval_future_bev_rollout_v1(
         "control_safe": False,
         "product_training_approved": False,
         "raw_pwm_emitted": False,
+        "hardware_validated": False,
     }
     write_json(out_path, metrics, pretty=True)
     return metrics

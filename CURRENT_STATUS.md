@@ -16,7 +16,9 @@ It currently has:
 - online `SceneState` and BEV memory,
 - direct RGB-D runtime student feature path,
 - fixed candidate trajectories,
-- FutureBEV-based replay candidate scoring,
+- action-conditioned FutureBEV/future-risk replay candidate scoring,
+- deterministic Goal29 dynamic-risk fixture pack and report path,
+- replay-only safety envelope stop/recovery reasons,
 - route-heldout replay reports and visual artifacts.
 
 It does not control real hardware.
@@ -26,36 +28,35 @@ It does not control real hardware.
 Latest accepted baseline:
 
 ```text
-Goal28 caveat repair
+Goal29 action-conditioned fixture slice
 ```
 
 Accepted evidence:
 
 ```text
-accepted_goal28_scene_brain=true
-accepted_goal28_caveat_repair=true
-runtime_routes=3
-runtime_scenes=corridor,office,market
-runtime_policy_source=future_rollout
-future_rollout_selection_mode=safe_argmin
-student_feature_source=direct_rgbd
-runtime_feature_source=direct_rgbd
-v1_policy_bev_source=scene
-pose_warp_source=odom_plus_visual_correction
-teacher_runtime_dependency=false
-future_or_groundtruth_runtime_dependency=false
-route_pose_leakage_ablation_fraction=0.0
+accepted_goal29_action_conditioned_fixture=true
+fixtures=moving_obstacle_crossing_path,static_obstacle_in_known_free_space,unknown_corridor,high_uncertainty_near_footprint,future_unsafe_candidate
+gates_improved=Gate F,Gate H
+future_risk_auc_or_proxy=0.8235512979706741
+candidate_risk_ranking_accuracy=0.7371428571428572
+candidate_risk_ranking_accuracy_baseline_delta=0.13714285714285723
+learned_selection_oracle_match_fraction=1.0
+learned_selection_unsafe_selected_rate=0.0
+dominant_action_fraction=0.6
+selected_candidate_entropy=0.9502705392332347
+route_heldout_goal29_available=false
 raw_pwm_emitted=false
 control_safe=false
+hardware_validated=false
 ```
 
 Primary artifact:
 
 ```text
-runs/goal28_caveat_repair_three_scene_market_v1/milestone_report.json
+runs/goal29_action_conditioned_fixture_v0/goal29_report.json
 ```
 
-Goal28 is replay-only public-data evidence. It is not product deployment and not hardware validation.
+Goal29 is replay-only deterministic fixture evidence. It is not route-heldout success, product deployment, or hardware validation.
 
 ## Current blockers
 
@@ -64,7 +65,7 @@ HomeBrain is still blocked by:
 - no real robot hardware loop,
 - no synchronized owned RGB/IR/IMU/wheel/command logs,
 - no real controller/watchdog/recovery/docking/safety gate,
-- weak dynamic-risk supervision,
+- dynamic-risk supervision only proven on deterministic fixtures,
 - weak traversability/free-space labels,
 - limited public-route diversity,
 - narrow route-heldout robustness,
@@ -75,12 +76,12 @@ HomeBrain is still blocked by:
 Next target:
 
 ```text
-Goal29: action-conditioned dynamic-risk world model and replay hardware-safety envelope
+Route-heldout Goal29 hardening after the accepted deterministic fixture slice
 ```
 
-Goal29 should preserve Goal28’s online `Brain.step(...)` and `SceneState` path while improving at least one of:
+The next step should preserve the accepted Goal29 fixture path while improving at least one of:
 
-- dynamic-risk supervision,
+- route-heldout dynamic-risk supervision,
 - traversability/free-space labels,
 - action-conditioned future BEV/risk prediction,
 - learned candidate trajectory scoring,
@@ -88,7 +89,7 @@ Goal29 should preserve Goal28’s online `Brain.step(...)` and `SceneState` path
 - replay watchdog/stop/recovery behavior,
 - direct runtime student quality.
 
-Goal29 should not be another wrapper milestone. It should improve measured robot-brain behavior under the gates in `EVALS.md`.
+Do not count deterministic fixtures as route-heldout robustness. The accepted fixture report improves Gate F/H, but Gate E still needs stronger copy-forward-beating evidence on route or richer dynamic-risk labels.
 
 ## Required safety status
 
