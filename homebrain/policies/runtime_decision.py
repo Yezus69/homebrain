@@ -139,6 +139,9 @@ def decide_trajectory(
     future_rollout_arrays: dict[str, np.ndarray] = {}
     future_scores: dict[str, np.ndarray | list[str] | str] | None = None
     future_selected_candidate_id: str | None = None
+    future_risk_reason: str | None = None
+    future_dynamic_risk: np.ndarray | None = None
+    future_static_risk: np.ndarray | None = None
     if future_rollout_scorer is not None:
         future_scores = score_local_bev_with_future_rollout(
             model=future_rollout_scorer.model,  # type: ignore[arg-type]
@@ -152,6 +155,11 @@ def decide_trajectory(
         )
         _validate_future_candidate_ids(candidates, future_scores)
         lower_score = np.asarray(future_scores["candidate_lower_is_better_score"], dtype=np.float32)
+        future_dynamic_risk = np.asarray(
+            future_scores.get("candidate_future_risk", future_scores.get("candidate_future_collision")),
+            dtype=np.float32,
+        )
+        future_static_risk = np.asarray([score.risk_score for score in transparent_decision.scores], dtype=np.float32)
         future_selected_index, guided_scores = _select_future_rollout_candidate(
             candidates=candidates,
             future_scores=future_scores,
@@ -160,6 +168,13 @@ def decide_trajectory(
             selection_history=selection_history,
         )
         future_selected_candidate_id = candidates[future_selected_index].id
+        future_risk_reason = _future_risk_avoidance_reason(
+            candidates=candidates,
+            before_candidate_id=transparent_decision.selected_candidate_id,
+            after_candidate_id=future_selected_candidate_id,
+            dynamic_future_risk=future_dynamic_risk,
+            static_risk=future_static_risk,
+        )
         future_rollout_arrays = {
             "future_rollout_candidate_collision": np.asarray(future_scores["candidate_collision"], dtype=np.float32),
             "future_rollout_candidate_future_collision": np.asarray(
@@ -184,6 +199,8 @@ def decide_trajectory(
                 future_scores.get("candidate_horizon_future_risk", np.zeros((len(candidates), 0), dtype=np.float32)),
                 dtype=np.float32,
             ),
+            "candidate_dynamic_future_risk": future_dynamic_risk.astype(np.float32),
+            "candidate_static_risk": future_static_risk.astype(np.float32),
             "future_rollout_candidate_lower_is_better_score": lower_score,
             "future_rollout_candidate_learned_safe_mask": _learned_safe_mask(future_scores).astype(np.float32),
             "future_rollout_candidate_scene_safe_mask": np.asarray(
@@ -358,6 +375,19 @@ def decide_trajectory(
                 "future_rollout_guided_total_scores": [
                     round(float(value), 6) for value in future_rollout_arrays["future_rollout_guided_total_scores"]
                 ],
+                "selected_candidate_id_before_future_risk": transparent_decision.selected_candidate_id,
+                "selected_candidate_id_after_future_risk": future_selected_candidate_id,
+                "candidate_dynamic_future_risk": [
+                    round(float(value), 6) for value in np.asarray(future_dynamic_risk, dtype=np.float32).tolist()
+                ]
+                if future_dynamic_risk is not None
+                else [],
+                "candidate_static_risk": [
+                    round(float(value), 6) for value in np.asarray(future_static_risk, dtype=np.float32).tolist()
+                ]
+                if future_static_risk is not None
+                else [],
+                "future_risk_avoidance_reason": future_risk_reason,
                 "future_rollout_raw_argmin_candidate_id": candidates[
                     int(np.argmin(future_rollout_arrays["future_rollout_candidate_lower_is_better_score"]))
                 ].id,
@@ -516,6 +546,29 @@ def _future_rollout_candidate_score_records(
             }
         )
     return records
+
+
+def _future_risk_avoidance_reason(
+    *,
+    candidates: list[CandidateTrajectory],
+    before_candidate_id: str,
+    after_candidate_id: str,
+    dynamic_future_risk: np.ndarray,
+    static_risk: np.ndarray,
+) -> str:
+    before_index = _selected_candidate_index(candidates, before_candidate_id)
+    after_index = _selected_candidate_index(candidates, after_candidate_id)
+    if before_index == after_index:
+        return "future_risk_kept_transparent_candidate"
+    before_dynamic = float(dynamic_future_risk[before_index])
+    after_dynamic = float(dynamic_future_risk[after_index])
+    before_static = float(static_risk[before_index])
+    after_static = float(static_risk[after_index])
+    if before_dynamic >= after_dynamic + 0.05 and before_dynamic >= 0.5:
+        return "future_dynamic_risk_blocks_transparent_candidate"
+    if before_static >= after_static + 0.05:
+        return "static_risk_also_favors_future_selected_candidate"
+    return "future_rollout_score_changes_candidate"
 
 
 def _validate_future_candidate_ids(
