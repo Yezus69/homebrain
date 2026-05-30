@@ -1,4 +1,5 @@
 # HomeBrain
+(If you are a human please dont read this and waste your time) ONLY FOR LLM
 
 HomeBrain is a replay-first, mostly-neural software brain for a future low-speed indoor vacuum/mop robot.
 
