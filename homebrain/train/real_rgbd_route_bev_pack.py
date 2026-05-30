@@ -16,7 +16,13 @@ from homebrain.data.tum_rgbd_route import (
     route_split_map,
 )
 from homebrain.messages.schema import JsonDict
-from homebrain.teachers.rgbd_bev_teacher import RGBDBEVLabels, RGBDBEVTeacherConfig, build_rgbd_bev_labels, load_depth_for_route_frame
+from homebrain.teachers.rgbd_bev_teacher import (
+    RGBDBEVLabels,
+    RGBDBEVTeacherConfig,
+    build_rgbd_bev_labels,
+    load_depth_for_route_frame,
+    warp_bev_by_pose_delta,
+)
 
 REAL_RGBD_BEV_PACK_SCHEMA_VERSION = "homebrain.real_rgbd_route_bev_pack.v0"
 REAL_RGBD_EXAMPLE_SCHEMA_VERSION = "homebrain.real_rgbd_route_bev_example.v0"
@@ -38,6 +44,11 @@ TEACHER_ONLY_FIELDS: tuple[str, ...] = (
     "target_current_bev_risky",
     "target_uncertainty_map",
     "target_dynamic_residual_risk",
+    "target_metric_depth",
+    "target_metric_depth_valid_mask",
+    "target_dynamic_occupancy",
+    "target_bev_flow_xy",
+    "target_bev_flow_valid_mask",
     "pose_delta_next_teacher_only",
 )
 
@@ -110,8 +121,35 @@ def build_real_rgbd_route_bev_pack(
                 route_dynamic_frames[route.route_id] += 1
             dynamic_positive_cells += dynamic_count
             total_cells += int(labels.dynamic_residual_risk.size)
-            example_path = _write_example(output, frame, labels, split=split, pose_delta_prev=prev_delta, pose_delta_next=next_delta)
-            examples.append(_example_record(output, frame, labels, example_path, split=split, pose_delta_prev=prev_delta, pose_delta_next=next_delta))
+            flow_xy, flow_mask = _bev_flow_label(
+                labels=labels,
+                previous_labels=previous_kept[1] if previous_kept is not None else None,
+                pose_delta_prev=prev_delta,
+                meters_per_cell=meters_per_cell,
+            )
+            example_path = _write_example(
+                output,
+                frame,
+                labels,
+                depth_m=depth,
+                flow_xy=flow_xy,
+                flow_valid_mask=flow_mask,
+                split=split,
+                pose_delta_prev=prev_delta,
+                pose_delta_next=next_delta,
+            )
+            examples.append(
+                _example_record(
+                    output,
+                    frame,
+                    labels,
+                    example_path,
+                    flow_valid_mask=flow_mask,
+                    split=split,
+                    pose_delta_prev=prev_delta,
+                    pose_delta_next=next_delta,
+                )
+            )
             previous_kept = (frame, labels)
 
     train_ids = sorted([route.route_id for route in routes if splits[route.route_id] == "train"])
@@ -160,6 +198,9 @@ def _write_example(
     frame: RouteFrame,
     labels: RGBDBEVLabels,
     *,
+    depth_m: np.ndarray,
+    flow_xy: np.ndarray,
+    flow_valid_mask: np.ndarray,
     split: str,
     pose_delta_prev: tuple[float, float, float] | None,
     pose_delta_next: tuple[float, float, float] | None,
@@ -179,12 +220,18 @@ def _write_example(
         "sensor_mask": np.asarray([1.0, 1.0 if frame.depth_path is not None else 0.0, 1.0 if pose_delta_prev is not None else 0.0, 0.0], dtype=np.float32),
         "previous_action": np.zeros((2,), dtype=np.float32),
         "weak_label": np.asarray([True], dtype=np.bool_),
+        "weak_label_new_goal31_heads": np.asarray([True], dtype=np.bool_),
         "product_training_approved": np.asarray([False], dtype=np.bool_),
         "replay_only": np.asarray([True], dtype=np.bool_),
         "not_executed": np.asarray([True], dtype=np.bool_),
         "control_safe": np.asarray([False], dtype=np.bool_),
         "raw_pwm_emitted": np.asarray([False], dtype=np.bool_),
         "hardware_validated": np.asarray([False], dtype=np.bool_),
+        "target_metric_depth": np.asarray(depth_m, dtype=np.float32),
+        "target_metric_depth_valid_mask": (np.isfinite(depth_m) & (depth_m > np.float32(0.0))).astype(np.float32),
+        "target_dynamic_occupancy": labels.dynamic_residual_risk.astype(np.float32),
+        "target_bev_flow_xy": flow_xy.astype(np.float32),
+        "target_bev_flow_valid_mask": flow_valid_mask.astype(np.float32),
         **labels.arrays(),
     }
     write_deterministic_npz(path, arrays)
@@ -197,6 +244,7 @@ def _example_record(
     labels: RGBDBEVLabels,
     example_path: Path,
     *,
+    flow_valid_mask: np.ndarray,
     split: str,
     pose_delta_prev: tuple[float, float, float] | None,
     pose_delta_next: tuple[float, float, float] | None,
@@ -216,10 +264,49 @@ def _example_record(
         "runtime_allowed_fields": list(RUNTIME_ALLOWED_FIELDS),
         "teacher_only_fields": list(TEACHER_ONLY_FIELDS),
         "weak_label": True,
+        "weak_label_new_goal31_heads": True,
         "product_training_approved": False,
         "dynamic_positive": bool(np.count_nonzero(labels.dynamic_residual_risk > 0.5) > 0),
         "target_dynamic_residual_risk_positive_cells": int(np.count_nonzero(labels.dynamic_residual_risk > 0.5)),
+        "target_dynamic_occupancy_positive_cells": int(np.count_nonzero(labels.dynamic_residual_risk > 0.5)),
+        "target_bev_flow_valid_cells": int(np.count_nonzero(flow_valid_mask > 0.0)),
     }
+
+
+def _bev_flow_label(
+    *,
+    labels: RGBDBEVLabels,
+    previous_labels: RGBDBEVLabels | None,
+    pose_delta_prev: tuple[float, float, float] | None,
+    meters_per_cell: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    shape = labels.current_bev_occupied.shape
+    flow = np.zeros((2, *shape), dtype=np.float32)
+    if previous_labels is None or pose_delta_prev is None:
+        return flow, np.zeros(shape, dtype=np.float32)
+    previous_occupied = warp_bev_by_pose_delta(
+        previous_labels.current_bev_occupied,
+        pose_delta_prev,
+        meters_per_cell=meters_per_cell,
+    )
+    residual = np.abs(labels.current_bev_occupied.astype(np.float32) - previous_occupied.astype(np.float32))
+    moving = (labels.dynamic_residual_risk > 0.05) | (residual > 0.5)
+    previous_center = _weighted_center(previous_occupied * moving)
+    current_center = _weighted_center(labels.current_bev_occupied * moving)
+    if previous_center is None or current_center is None or not np.any(moving):
+        return flow, moving.astype(np.float32)
+    flow[0, moving] = np.float32(current_center[1] - previous_center[1])
+    flow[1, moving] = np.float32(current_center[0] - previous_center[0])
+    return flow, moving.astype(np.float32)
+
+
+def _weighted_center(grid: np.ndarray) -> tuple[float, float] | None:
+    weight = np.clip(np.asarray(grid, dtype=np.float32), 0.0, 1.0)
+    total = float(weight.sum())
+    if total <= 1.0e-6:
+        return None
+    rows, cols = np.indices(weight.shape, dtype=np.float32)
+    return (float((rows * weight).sum() / total), float((cols * weight).sum() / total))
 
 
 def _next_pose_delta(frames: list[RouteFrame], index: int) -> tuple[float, float, float] | None:

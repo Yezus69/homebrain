@@ -64,6 +64,7 @@ class RealRGBDRouteBEVDataset(Dataset[dict[str, Any]]):
         rgb = _load_rgb_chw(Path(str(record["rgb_path"])), image_size=self.image_size)
         depth = _load_depth_chw(record, image_size=self.image_size)
         targets = np.stack([np.asarray(arrays[name], dtype=np.float32) for name in TARGET_NAMES], axis=0)
+        depth_target, depth_valid = _target_metric_depth(arrays, image_size=self.image_size)
         item = {
             "rgb": torch.from_numpy(rgb),
             "depth": torch.from_numpy(depth),
@@ -73,6 +74,19 @@ class RealRGBDRouteBEVDataset(Dataset[dict[str, Any]]):
             "targets": torch.from_numpy(targets),
             "uncertainty": torch.from_numpy(np.asarray(arrays["target_uncertainty_map"], dtype=np.float32)[None, ...]),
             "dynamic": torch.from_numpy(np.asarray(arrays["target_dynamic_residual_risk"], dtype=np.float32)[None, ...]),
+            "metric_depth": torch.from_numpy(depth_target),
+            "metric_depth_valid": torch.from_numpy(depth_valid),
+            "dynamic_occupancy": torch.from_numpy(
+                np.asarray(arrays.get("target_dynamic_occupancy", arrays["target_dynamic_residual_risk"]), dtype=np.float32)[None, ...]
+            ),
+            "bev_flow_xy": torch.from_numpy(
+                np.asarray(arrays.get("target_bev_flow_xy", np.zeros((2, *self.bev_shape), dtype=np.float32)), dtype=np.float32)
+            ),
+            "bev_flow_valid": torch.from_numpy(
+                np.asarray(arrays.get("target_bev_flow_valid_mask", np.zeros(self.bev_shape, dtype=np.float32)), dtype=np.float32)[None, ...]
+            ),
+            "pose_delta_next": torch.from_numpy(np.asarray(arrays.get("pose_delta_next_teacher_only", np.zeros((3,), dtype=np.float32)), dtype=np.float32)),
+            "pose_delta_next_mask": torch.from_numpy(np.asarray(arrays.get("pose_delta_next_teacher_only_mask", np.zeros((1,), dtype=np.float32)), dtype=np.float32)),
             "route_id": str(record.get("route_id", "")),
             "split": str(record.get("split", "")),
         }
@@ -258,6 +272,17 @@ def _load_depth_chw(record: JsonDict, *, image_size: tuple[int, int]) -> np.ndar
     scale = float(intrinsics.get("depth_scale", 5000.0))
     depth = read_depth_png_m(depth_path, scale=scale)
     return _resize_hwc(depth[:, :, None].astype(np.float32), image_size).transpose(2, 0, 1).astype(np.float32)
+
+
+def _target_metric_depth(arrays: dict[str, np.ndarray], *, image_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    if "target_metric_depth" not in arrays:
+        width, height = image_size
+        return np.zeros((1, height, width), dtype=np.float32), np.zeros((1, height, width), dtype=np.float32)
+    depth = np.asarray(arrays["target_metric_depth"], dtype=np.float32)
+    valid = np.asarray(arrays.get("target_metric_depth_valid_mask", np.isfinite(depth) & (depth > 0.0)), dtype=np.float32)
+    depth_r = _resize_hwc(depth[:, :, None], image_size).transpose(2, 0, 1).astype(np.float32)
+    valid_r = _resize_hwc(valid[:, :, None], image_size).transpose(2, 0, 1).astype(np.float32)
+    return depth_r, (valid_r > 0.5).astype(np.float32)
 
 
 def _resize_hwc(array: np.ndarray, image_size: tuple[int, int]) -> np.ndarray:

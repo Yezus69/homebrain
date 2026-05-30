@@ -7,3 +7,4 @@ DIRECT_BEV_STUDENT_V0_CHECKPOINT_VERSION = "homebrain.direct_bev_student_v0.chec
 COUNTERFACTUAL_DYNAMIC_BEV_WORLD_MODEL_V0_CHECKPOINT_VERSION = (
     "homebrain.counterfactual_dynamic_bev_world_model_v0.checkpoint.v0"
 )
+HOMEBRAIN_NET_V0_CHECKPOINT_VERSION = "homebrain.homebrain_net_v0.checkpoint.v0"

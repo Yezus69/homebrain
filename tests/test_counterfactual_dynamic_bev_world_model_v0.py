@@ -28,8 +28,10 @@ def test_model_forward_cpu_tiny_tensors() -> None:
             robot_radius_m=0.05,
         )
     )
+    bev_history = torch.zeros((1, 2, 7, 8, 8), dtype=torch.float32)
+    bev_history[:, -1, 1, 2:4, 2:4] = 0.85
     outputs = model(
-        torch.zeros((1, 2, 7, 8, 8), dtype=torch.float32),
+        bev_history,
         torch.zeros((1, 2, 3), dtype=torch.float32),
         torch.zeros((1, 3, 4, 3), dtype=torch.float32),
         previous_action_history=torch.zeros((1, 2, 2), dtype=torch.float32),
@@ -40,6 +42,8 @@ def test_model_forward_cpu_tiny_tensors() -> None:
     assert outputs["candidate_risk_logits"].shape == (1, 3)
     assert outputs["candidate_score"].shape == (1, 3)
     assert torch.isfinite(outputs["candidate_score"]).all()
+    future_occupied = torch.sigmoid(outputs["future_occupied_logits"])
+    assert torch.all(future_occupied >= bev_history[:, -1:, 1] - 1.0e-6)
 
 
 def test_training_smoke_writes_checkpoint_metadata_and_loss_report(tmp_path: Path) -> None:

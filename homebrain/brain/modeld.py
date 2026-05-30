@@ -24,6 +24,7 @@ from homebrain.brain.spatial_memory_v1 import (
     SpatialMemoryState,
     load_checkpoint as load_v1_checkpoint,
 )
+from homebrain.brain.homebrain_net_v0 import HOMEBRAIN_NET_V0_SOURCE, load_checkpoint as load_homebrain_net_v0_checkpoint
 from homebrain.data.spatial_dataset import write_deterministic_npz
 from homebrain.messages.schema import BrainOutputEvent, Event, FrameEvent, OdomEvent, PoseEvent, event_identity
 from homebrain.policies.candidate_trajectories import generate_default_candidates
@@ -49,6 +50,7 @@ V1_POSE_WARP_SOURCES = (
     "odom_plus_visual_correction",
     "none",
 )
+HOMEBRAIN_NET_V0_POSE_WARP_SOURCES = ("odom", "predicted_pose", "odom_plus_visual_correction", "none")
 V1_POLICY_BEV_SOURCES = ("current", "memory", "scene")
 RUNTIME_FEATURE_SOURCES = ("dino", "direct_rgbd")
 
@@ -436,6 +438,15 @@ class DirectRGBDFeatureStore:
         return depth_valid_observation_mask(self._load_depth(frame), bev_shape=bev_shape)
 
 
+class RuntimeRGBDFrameStore:
+    def __init__(self, log_dir: str | Path) -> None:
+        self.log_dir = Path(log_dir)
+        self.depth_by_key = load_depth_refs(self.log_dir)
+
+    def load_rgbd_for_frame(self, frame: FrameEvent) -> tuple[np.ndarray, np.ndarray | None]:
+        return load_rgb_image(self.log_dir / frame.data_ref), load_depth_for_frame(self.log_dir, frame, self.depth_by_key)
+
+
 class Brain:
     """Online-style runtime owner for SpatialMemoryNetV1 replay ticks.
 
@@ -515,7 +526,8 @@ class Brain:
         else:
             self.pose_estimate = _integrate_pose_estimate(self.pose_estimate, pose_delta_to_current)
 
-        output, artifact, state, predicted_pose_delta, scene_state = _spatial_v1_output_for_frame(
+        output_fn = _homebrain_net_v0_output_for_frame if _is_homebrain_net_v0(self.model) else _spatial_v1_output_for_frame
+        output, artifact, state, predicted_pose_delta, scene_state = output_fn(
             model=self.model,
             frame=frame,
             feature_store=self.feature_store,
@@ -748,6 +760,19 @@ def spatial_model_outputs(
             runtime_feature_source=runtime_feature_source,
             future_rollout_selection_mode=future_rollout_selection_mode,
         )
+    if _checkpoint_model_name(checkpoint) == "HomeBrainNetV0":
+        return _homebrain_net_v0_model_outputs(
+            events,
+            log_dir=log_dir,
+            out_dir=out_dir,
+            checkpoint=checkpoint,
+            trajectory_scorer_checkpoint=trajectory_scorer_checkpoint,
+            future_rollout_checkpoint=future_rollout_checkpoint,
+            device_name=device_name,
+            pose_warp_source=v1_pose_warp_source,
+            policy_bev_source=v1_policy_bev_source,
+            future_rollout_selection_mode=future_rollout_selection_mode,
+        )
 
     device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
     model, payload = load_checkpoint(checkpoint, map_location=device)
@@ -948,6 +973,105 @@ def _spatial_v1_model_outputs(
             brain_outputs[-1].debug["online_scene_state_final_artifact"] = final_relative
             if isinstance(brain_outputs[-1].debug.get("scene_state"), dict):
                 brain_outputs[-1].debug["scene_state"]["scene_state_final_artifact"] = final_relative
+    return brain_outputs, artifact_files
+
+
+def _homebrain_net_v0_model_outputs(
+    events: Iterable[Event],
+    *,
+    log_dir: str | Path,
+    out_dir: str | Path,
+    checkpoint: str | Path,
+    trajectory_scorer_checkpoint: str | Path | None = None,
+    future_rollout_checkpoint: str | Path | None = None,
+    device_name: str | None = None,
+    pose_warp_source: str = "odom",
+    policy_bev_source: str = "memory",
+    future_rollout_selection_mode: str = "guided_transparent",
+) -> tuple[list[BrainOutputEvent], list[str]]:
+    if pose_warp_source not in V1_POSE_WARP_SOURCES:
+        raise ValueError(f"v1_pose_warp_source must be one of {V1_POSE_WARP_SOURCES}")
+    if pose_warp_source not in HOMEBRAIN_NET_V0_POSE_WARP_SOURCES:
+        raise ValueError(
+            "HomeBrainNetV0 runtime forbids route ground-truth pose sources; "
+            f"pose_warp_source must be one of {HOMEBRAIN_NET_V0_POSE_WARP_SOURCES}"
+        )
+    if policy_bev_source not in V1_POLICY_BEV_SOURCES:
+        raise ValueError(f"v1_policy_bev_source must be one of {V1_POLICY_BEV_SOURCES}")
+    ordered_events = list(events)
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model, payload = load_homebrain_net_v0_checkpoint(checkpoint, map_location=device)
+    model.to(device)
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    output_root = Path(out_dir)
+    frames = [event for event in ordered_events if isinstance(event, FrameEvent)]
+    start_timestamp_ns = min((frame.timestamp_ns for frame in frames), default=0)
+    trajectory_scorer = (
+        load_runtime_trajectory_scorer(trajectory_scorer_checkpoint, device=device)
+        if trajectory_scorer_checkpoint is not None
+        else None
+    )
+    future_rollout_scorer = (
+        load_runtime_future_rollout_scorer(future_rollout_checkpoint, device=device)
+        if future_rollout_checkpoint is not None
+        else None
+    )
+    trajectory_metadata = future_rollout_scorer.metadata if future_rollout_scorer is not None else trajectory_scorer.metadata if trajectory_scorer is not None else metadata
+    meters_per_cell = metadata_float(trajectory_metadata, "meters_per_cell", metadata_float(metadata, "meters_per_cell", 0.05))
+    robot_radius_m = metadata_float(trajectory_metadata, "robot_radius_m", metadata_float(metadata, "robot_radius_m", 0.18))
+    brain = Brain(
+        model=model,
+        feature_store=RuntimeRGBDFrameStore(log_dir),
+        output_root=output_root,
+        checkpoint=Path(checkpoint),
+        feature_dir=None,
+        runtime_feature_source="direct_rgbd",
+        start_timestamp_ns=start_timestamp_ns,
+        pose_warp_source_requested=pose_warp_source,
+        policy_bev_source=policy_bev_source,
+        trajectory_scorer=trajectory_scorer,
+        future_rollout_scorer=future_rollout_scorer,
+        trajectory_candidates=generate_default_candidates(grid_shape=model.config.bev_shape, meters_per_cell=meters_per_cell, robot_radius_m=robot_radius_m),
+        meters_per_cell=meters_per_cell,
+        device=device,
+        future_rollout_selection_mode=future_rollout_selection_mode,
+    )
+    brain_outputs: list[BrainOutputEvent] = []
+    artifact_files: list[str] = []
+    route_pose_deltas = _route_pose_deltas(frames, ordered_events, pose_warp_source=pose_warp_source)
+    for frame in frames:
+        reset = brain.should_reset(frame)
+        selected_pose_delta: torch.Tensor | None = None
+        selected_pose_source = "sequence_reset" if reset else "none"
+        route_pose_available = False
+        if not reset and pose_warp_source in {"odom", "odom_or_route_pose", "route_pose", "route_pose_ablation", "odom_plus_visual_correction"}:
+            route_delta = route_pose_deltas.get(event_identity(frame))
+            if route_delta is not None:
+                route_tensor = torch.tensor(route_delta.delta, dtype=torch.float32)
+                selected_pose_delta = _odom_plus_visual_pose_correction(route_tensor, brain.previous_predicted_pose_delta) if pose_warp_source == "odom_plus_visual_correction" else route_tensor
+                selected_pose_source = route_delta.source
+                route_pose_available = True
+            else:
+                selected_pose_source = f"{pose_warp_source}_missing"
+        elif not reset and pose_warp_source == "predicted_pose":
+            selected_pose_delta = brain.previous_predicted_pose_delta
+            selected_pose_source = "predicted_pose" if selected_pose_delta is not None else "predicted_pose_missing"
+            route_pose_available = selected_pose_delta is not None
+        output, artifact = brain.step(
+            frame,
+            pose_delta_to_current=selected_pose_delta,
+            pose_warp_source=selected_pose_source,
+            route_pose_delta_available=route_pose_available,
+            predicted_pose_warp_ablation=pose_warp_source == "predicted_pose",
+            route_pose_leakage_ablation=pose_warp_source in {"route_pose", "route_pose_ablation"} or selected_pose_source == "route_pose",
+            reset_memory=reset,
+        )
+        brain_outputs.append(output)
+        artifact_files.append(artifact)
+    if brain.scene_state is not None:
+        final_relative = "brain_outputs/scene_state_online/scene_state_final.npz"
+        brain.scene_state.write_npz(output_root / final_relative)
+        artifact_files.append(final_relative)
     return brain_outputs, artifact_files
 
 
@@ -1359,6 +1483,193 @@ def _spatial_v1_output_for_frame(
     )
 
 
+def _homebrain_net_v0_output_for_frame(
+    *,
+    model: torch.nn.Module,
+    frame: FrameEvent,
+    feature_store: RuntimeRGBDFrameStore,
+    output_root: Path,
+    checkpoint: Path,
+    feature_dir: Path | None,
+    runtime_feature_source: str,
+    start_timestamp_ns: int,
+    pose_delta_to_current: torch.Tensor | None,
+    pose_warp_source: str,
+    pose_warp_source_requested: str,
+    route_pose_delta_available: bool,
+    predicted_pose_warp_ablation: bool,
+    route_pose_leakage_ablation: bool,
+    reset_memory: bool,
+    state: SpatialMemoryState | None,
+    trajectory_scorer: RuntimeTrajectoryScorer | None,
+    future_rollout_scorer: RuntimeFutureRolloutScorer | None,
+    trajectory_candidates: list,
+    trajectory_coverage: CoverageMemory,
+    policy_bev_source: str,
+    device: torch.device,
+    future_rollout_selection_mode: str = "guided_transparent",
+    selection_history: list[str] | None = None,
+    scene_state: SceneState | None = None,
+    pose_estimate: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    step_index: int = 0,
+    meters_per_cell: float = 0.05,
+) -> tuple[BrainOutputEvent, str, SpatialMemoryState, torch.Tensor, SceneState]:
+    rgb, depth = feature_store.load_rgbd_for_frame(frame)
+    rgb_tensor = torch.from_numpy(np.transpose(rgb.astype(np.float32) / np.float32(255.0), (2, 0, 1))[None]).to(device)
+    depth_tensor = torch.from_numpy(depth[None, None].astype(np.float32)).to(device) if depth is not None else None
+    sensor_mask = torch.zeros((1, int(model.config.sensor_mask_dim)), dtype=torch.float32, device=device)
+    sensor_mask[:, 0] = 1.0
+    if int(model.config.sensor_mask_dim) > 1:
+        sensor_mask[:, 1] = 1.0 if depth is not None else 0.0
+    if int(model.config.sensor_mask_dim) > 2:
+        sensor_mask[:, 2] = 1.0 if pose_delta_to_current is not None else 0.0
+    pose_to_current = pose_delta_to_current.view(1, 3).to(device) if pose_delta_to_current is not None else None
+    pose_mask = torch.ones((1, 1), dtype=torch.float32, device=device) if pose_delta_to_current is not None else None
+    observation = depth_valid_observation_mask(depth, bev_shape=tuple(model.config.bev_shape)) if depth is not None else None
+    observation_mask = torch.from_numpy(observation[None, None].astype(np.float32)).to(device) if observation is not None else None
+    candidate_tensor = _candidate_trajectory_tensor(trajectory_candidates, device=device)
+    model.eval()
+    with torch.no_grad():
+        outputs = model(
+            rgb_tensor,
+            depth=depth_tensor,
+            sensor_mask=sensor_mask,
+            pose_delta_prev=pose_to_current,
+            memory_state=state,
+            pose_delta_to_current=pose_to_current,
+            pose_delta_to_current_mask=pose_mask,
+            observation_mask=observation_mask,
+            force_reset=torch.tensor([reset_memory], dtype=torch.bool, device=device),
+            candidate_trajectories=candidate_tensor,
+            enabled_heads={"pose", "bev_occupancy", "metric_depth", "dynamic", "memory", "world_model"},
+        )
+    current_prob = torch.sigmoid(outputs["bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
+    memory_prob = torch.sigmoid(outputs["fused_memory_bev_logits"])[0].detach().cpu().numpy().astype(np.float32)
+    uncertainty_grid = outputs["uncertainty_grid"][0, 0].detach().cpu().numpy().astype(np.float32)
+    pose_delta = tuple(float(value) for value in outputs["pose_delta"][0].detach().cpu().numpy())
+    next_pose_delta = outputs["pose_delta"][0].detach()
+    next_state = outputs["memory_state"].detach()
+    relative_artifact = f"brain_outputs/homebrain_net_v0/{frame.camera_id}_{frame.frame_id:06d}.npz"
+    artifact_path = output_root / relative_artifact
+    current_stack = current_prob[:5].astype(np.float32)
+    memory_stack = memory_prob[:5].astype(np.float32)
+    if scene_state is None:
+        scene_state = SceneState.create(local_shape=tuple(memory_stack.shape[1:]), meters_per_cell=meters_per_cell, pose_estimate=pose_estimate)
+    scene_context_stack = scene_state.update_from_local(
+        pose_estimate=pose_estimate,
+        current_bev=current_stack,
+        memory_bev=memory_stack,
+        uncertainty=uncertainty_grid,
+    )
+    policy_prob = scene_context_stack if policy_bev_source == "scene" else memory_stack if policy_bev_source == "memory" else current_stack
+    local_bev = LocalBev(
+        free=policy_prob[0],
+        occupied=policy_prob[1],
+        unknown=policy_prob[2],
+        traversable=policy_prob[3],
+        risky=np.maximum(policy_prob[4], torch.sigmoid(outputs["dynamic_occupancy_logits"])[0, 0].detach().cpu().numpy()).astype(np.float32),
+        confidence=(np.float32(1.0) - uncertainty_grid).astype(np.float32),
+        uncertainty=uncertainty_grid,
+        source=f"homebrain_net_v0_{policy_bev_source}_bev",
+    )
+    coverage_pose_delta = tuple(float(value) for value in pose_delta_to_current.detach().cpu().numpy()) if pose_delta_to_current is not None else None
+    decision = decide_trajectory(
+        bev=local_bev,
+        candidates=trajectory_candidates,
+        coverage_memory=trajectory_coverage,
+        pose_delta=coverage_pose_delta,  # type: ignore[arg-type]
+        learned_scorer=trajectory_scorer,
+        future_rollout_scorer=future_rollout_scorer,
+        patch_features=None,
+        sensor_mask=sensor_mask.detach().cpu().numpy()[0],
+        memory_bev=scene_context_stack if policy_bev_source == "scene" else memory_stack,
+        bev_history=scene_state.history_for_rollout(int(model.config.history_frames)),
+        uncertainty_map=uncertainty_grid,
+        policy_bev_source=policy_bev_source,
+        coverage_memory_reset=reset_memory,
+        future_rollout_selection_mode=future_rollout_selection_mode,
+        selection_history=selection_history,
+    )
+    world_arrays = _homebrain_world_artifact_arrays(outputs)
+    arrays = {
+        "current_bev_logits": outputs["bev_logits"][0].detach().cpu().numpy().astype(np.float32),
+        "memory_bev_logits": outputs["fused_memory_bev_logits"][0].detach().cpu().numpy().astype(np.float32),
+        "current_bev_free_prob": current_prob[0],
+        "current_bev_occupied_prob": current_prob[1],
+        "current_bev_unknown_prob": current_prob[2],
+        "current_bev_traversable_prob": current_prob[3],
+        "current_bev_risky_prob": current_prob[4],
+        "memory_bev_free_prob": memory_prob[0],
+        "memory_bev_occupied_prob": memory_prob[1],
+        "memory_bev_unknown_prob": memory_prob[2],
+        "memory_bev_traversable_prob": memory_prob[3],
+        "memory_bev_risky_prob": memory_prob[4],
+        "dynamic_occupancy_prob": torch.sigmoid(outputs["dynamic_occupancy_logits"])[0, 0].detach().cpu().numpy().astype(np.float32),
+        "bev_flow_xy": outputs["bev_flow_xy"][0].detach().cpu().numpy().astype(np.float32),
+        "metric_depth_m": outputs["metric_depth_m"][0, 0].detach().cpu().numpy().astype(np.float32),
+        "uncertainty_grid": uncertainty_grid,
+        "scene_state_online": np.asarray([True], dtype=np.bool_),
+        "scene_map_created_only_posthoc": np.asarray([False], dtype=np.bool_),
+        **world_arrays,
+        **decision.artifact_arrays,
+    }
+    scene_state.record_decision(
+        selected_trajectory_id=decision.selected_candidate_id,
+        local_bev_ref=relative_artifact,
+        policy_bev_source=policy_bev_source,
+        candidates=trajectory_candidates,
+        future_arrays=decision.artifact_arrays,
+        step_index=step_index,
+    )
+    write_deterministic_npz(artifact_path, arrays)
+    uncertainty_scalar = float(np.mean(uncertainty_grid))
+    input_id = event_identity(frame)
+    return (
+        BrainOutputEvent(
+            timestamp_ns=frame.timestamp_ns,
+            sequence_id=frame.sequence_id,
+            source=HOMEBRAIN_NET_V0_SOURCE,
+            input_event_ids=[input_id],
+            pose_delta=pose_delta,  # type: ignore[arg-type]
+            pose_confidence=max(0.0, min(1.0, 1.0 - uncertainty_scalar)),
+            local_bev_ref=relative_artifact,
+            candidate_trajectories=decision.candidate_trajectories,
+            selected_trajectory_id=decision.selected_candidate_id,
+            cmd_vel=None,
+            uncertainty=uncertainty_scalar,
+            stop_reason="homebrain_net_v0_replay_only_trajectory_decision_not_executed",
+            debug={
+                "mock": False,
+                "model": HOMEBRAIN_NET_V0_SOURCE,
+                "checkpoint": checkpoint.as_posix(),
+                "runtime_feature_source": runtime_feature_source,
+                "heavy_teacher_runtime_dependency": False,
+                "no_future_labels_used_at_runtime": True,
+                "no_teacher_fields_at_runtime": True,
+                "route_pose_leakage_ablation": bool(route_pose_leakage_ablation),
+                "predicted_pose_warp_ablation": bool(predicted_pose_warp_ablation),
+                "pose_warp_source_requested": pose_warp_source_requested,
+                "pose_warp_source": pose_warp_source,
+                "pose_warp_source_available": bool(route_pose_delta_available),
+                "scene_state_online": True,
+                "representation_pretraining_only": True,
+                "control_safe": False,
+                "replay_only": True,
+                "not_executed": True,
+                "raw_pwm_emitted": False,
+                "hardware_validated": False,
+                "cmd_vel_emitted": False,
+                "input_frame_id": frame.frame_id,
+                **decision.debug,
+            },
+        ),
+        relative_artifact,
+        next_state,
+        next_pose_delta,
+        scene_state,
+    )
+
+
 def _route_pose_deltas(
     frames: list[FrameEvent],
     events: Iterable[Event],
@@ -1530,6 +1841,44 @@ def _future_horizon_count_from_artifact(relative_artifact: str, output_root: Pat
             return int(future.shape[0]) if future.ndim >= 1 else 0
     except Exception:  # noqa: BLE001
         return 0
+
+
+def _is_homebrain_net_v0(model: torch.nn.Module) -> bool:
+    return model.__class__.__name__ == "HomeBrainNetV0" or str(getattr(model, "config", object()).__class__.__name__) == "HomeBrainNetV0Config"
+
+
+def _candidate_trajectory_tensor(candidates: list[Any], *, device: torch.device) -> torch.Tensor:
+    max_points = max((len(getattr(candidate, "poses", ())) for candidate in candidates), default=1)
+    out = np.zeros((1, len(candidates), max_points, 3), dtype=np.float32)
+    for candidate_index, candidate in enumerate(candidates):
+        poses = list(getattr(candidate, "poses", ()))
+        for pose_index in range(max_points):
+            pose = poses[min(pose_index, len(poses) - 1)] if poses else None
+            if pose is not None:
+                out[0, candidate_index, pose_index] = [pose.x_m, pose.y_m, pose.yaw_rad]
+    return torch.from_numpy(out).to(device)
+
+
+def _homebrain_world_artifact_arrays(outputs: dict[str, Any]) -> dict[str, np.ndarray]:
+    keys = {
+        "future_occupied_logits": "homebrain_future_occupied_prob",
+        "future_free_logits": "homebrain_future_free_prob",
+        "future_unknown_logits": "homebrain_future_unknown_prob",
+        "future_risky_logits": "homebrain_future_risky_prob",
+        "future_dynamic_risk_logits": "homebrain_future_dynamic_risk_prob",
+        "future_uncertainty_logits": "homebrain_future_uncertainty_prob",
+    }
+    arrays = {
+        target: torch.sigmoid(outputs[source])[0].detach().cpu().numpy().astype(np.float32)
+        for source, target in keys.items()
+        if source in outputs
+    }
+    if "future_flow_xy" in outputs:
+        arrays["homebrain_future_flow_xy"] = outputs["future_flow_xy"][0].detach().cpu().numpy().astype(np.float32)
+    for source in ("candidate_score", "candidate_risk_logits", "candidate_dynamic_risk_logits", "candidate_unknown_exposure_logits"):
+        if source in outputs:
+            arrays[f"homebrain_{source}"] = outputs[source][0].detach().cpu().numpy().astype(np.float32)
+    return arrays
 
 
 def _load_runtime_rgb(path: Path) -> np.ndarray:

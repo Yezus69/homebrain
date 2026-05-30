@@ -196,6 +196,10 @@ class CounterfactualDynamicBEVWorldModelV0(nn.Module):
             dim=1,
         )
         future = future_residual + _prob_to_logit(base).unsqueeze(1)
+        current_occupied = current[:, 1].unsqueeze(1).clamp(0.0, 1.0)
+        occupied_prob = torch.maximum(torch.sigmoid(future[:, :, 0]), current_occupied)
+        future = future.clone()
+        future[:, :, 0] = _prob_to_logit(occupied_prob.clamp(1.0e-4, 1.0 - 1.0e-4))
         flow = self.flow_head(latent).view(batch, horizon_count, 2, height, width)
         masks = candidate_masks_from_trajectories(
             candidate_trajectories,

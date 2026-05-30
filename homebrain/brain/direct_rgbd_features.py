@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from homebrain.datasets.openloris_scene import OPENLORIS_DEPTH_SCALE, OPENLORIS_ROUTE_ASSOCIATIONS_FILE
+from homebrain.datasets.bonn_rgbd import BONN_RGBD_ROUTE_ASSOCIATIONS_FILE
 from homebrain.datasets.tum_rgbd import TUM_RGBD_ROUTE_ASSOCIATIONS_FILE, read_depth_png_m
 from homebrain.messages.schema import Event, FrameEvent, JsonDict
 from homebrain.replay.segment_log import load_manifest, read_events
@@ -173,7 +174,7 @@ def load_depth_refs(log_dir: str | Path) -> dict[tuple[str, str, int], DepthRef]
     frames = data.get("frames")
     if not isinstance(frames, list):
         return {}
-    default_intrinsics = data.get("intrinsics") if isinstance(data.get("intrinsics"), dict) else {}
+    default_intrinsics = data.get("intrinsics") if isinstance(data.get("intrinsics"), dict) else {"depth_scale": data.get("depth_scale", OPENLORIS_DEPTH_SCALE)}
     refs: dict[tuple[str, str, int], DepthRef] = {}
     for record in frames:
         if not isinstance(record, dict):
@@ -398,7 +399,7 @@ def resize_nearest_float(array: np.ndarray, shape: tuple[int, int]) -> np.ndarra
 
 
 def _association_path(root: Path) -> Path | None:
-    for name in (OPENLORIS_ROUTE_ASSOCIATIONS_FILE, TUM_RGBD_ROUTE_ASSOCIATIONS_FILE):
+    for name in (OPENLORIS_ROUTE_ASSOCIATIONS_FILE, TUM_RGBD_ROUTE_ASSOCIATIONS_FILE, BONN_RGBD_ROUTE_ASSOCIATIONS_FILE):
         path = root / name
         if path.exists():
             return path
