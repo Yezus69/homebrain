@@ -9,19 +9,23 @@ import numpy as np
 from homebrain.data.spatial_dataset import DETERMINISTIC_CREATED_AT_UTC, json_sha256, read_json, write_deterministic_npz, write_json
 from homebrain.data.tum_rgbd_route import (
     RouteFrame,
-    RouteSequence,
     discover_tum_rgbd_routes,
     load_tum_rgbd_sequence,
     pose_delta,
     route_split_map,
 )
 from homebrain.messages.schema import JsonDict
+from homebrain.train.hazard_bev_pack import discover_hazard_bev_sources, load_hazard_bev_lookup
+from homebrain.train.real_rgbd_route_bev_pack_utils import (
+    bev_flow_label as _bev_flow_label,
+    next_pose_delta as _next_pose_delta,
+    pack_acceptance_reasons as _pack_acceptance_reasons,
+)
 from homebrain.teachers.rgbd_bev_teacher import (
     RGBDBEVLabels,
     RGBDBEVTeacherConfig,
     build_rgbd_bev_labels,
     load_depth_for_route_frame,
-    warp_bev_by_pose_delta,
 )
 
 REAL_RGBD_BEV_PACK_SCHEMA_VERSION = "homebrain.real_rgbd_route_bev_pack.v0"
@@ -49,6 +53,10 @@ TEACHER_ONLY_FIELDS: tuple[str, ...] = (
     "target_dynamic_occupancy",
     "target_bev_flow_xy",
     "target_bev_flow_valid_mask",
+    "target_bev_hazard",
+    "target_bev_hazard_valid_mask",
+    "bev_hazard",
+    "hazard_valid_mask",
     "pose_delta_next_teacher_only",
 )
 
@@ -63,9 +71,13 @@ def build_real_rgbd_route_bev_pack(
     frame_stride: int = 5,
     grid_shape: tuple[int, int] = (64, 64),
     meters_per_cell: float = 0.05,
+    hazard_bev_root: str | Path | None = None,
+    max_frames_per_route: int | None = None,
 ) -> Path:
     if frame_stride <= 0:
         raise ValueError("frame_stride must be positive")
+    if max_frames_per_route is not None and max_frames_per_route < 1:
+        raise ValueError("max_frames_per_route must be at least 1 when supplied")
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
     route_dirs = discover_tum_rgbd_routes(input_root)
@@ -76,6 +88,7 @@ def build_real_rgbd_route_bev_pack(
             grid_shape=grid_shape,
             meters_per_cell=meters_per_cell,
             frame_stride=frame_stride,
+            max_frames_per_route=max_frames_per_route,
         )
         manifest.update(
             {
@@ -94,6 +107,9 @@ def build_real_rgbd_route_bev_pack(
     ]
     splits = route_split_map(routes, train_routes=train_routes, val_routes=val_routes)
     config = RGBDBEVTeacherConfig(grid_shape=grid_shape, meters_per_cell=meters_per_cell)
+    hazard_sources = discover_hazard_bev_sources(routes, hazard_bev_root=hazard_bev_root)
+    hazard_lookup, hazard_summary = load_hazard_bev_lookup(hazard_sources, grid_shape=grid_shape)
+    has_hazard_channel = bool(hazard_summary.get("has_hazard_channel", False))
     examples: list[JsonDict] = []
     source_frame_count = sum(int(route.source_manifest["frame_count"]) for route in routes)
     route_dynamic_frames: dict[str, int] = {route.route_id: 0 for route in routes}
@@ -101,7 +117,10 @@ def build_real_rgbd_route_bev_pack(
     total_cells = 0
     for route in routes:
         previous_kept: tuple[RouteFrame, RGBDBEVLabels] | None = None
-        kept_frames = list(route.frames)[::frame_stride]
+        source_frames = list(route.frames)
+        if max_frames_per_route is not None:
+            source_frames = source_frames[:max_frames_per_route]
+        kept_frames = source_frames[::frame_stride]
         for kept_index, frame in enumerate(kept_frames):
             depth = load_depth_for_route_frame(frame)
             if depth is None:
@@ -127,6 +146,12 @@ def build_real_rgbd_route_bev_pack(
                 pose_delta_prev=prev_delta,
                 meters_per_cell=meters_per_cell,
             )
+            hazard = hazard_lookup.get((route.route_id, frame.frame_index))
+            if hazard is None and has_hazard_channel:
+                hazard = (
+                    np.zeros(grid_shape, dtype=np.float32),
+                    np.zeros(grid_shape, dtype=np.float32),
+                )
             example_path = _write_example(
                 output,
                 frame,
@@ -134,6 +159,7 @@ def build_real_rgbd_route_bev_pack(
                 depth_m=depth,
                 flow_xy=flow_xy,
                 flow_valid_mask=flow_mask,
+                hazard=hazard,
                 split=split,
                 pose_delta_prev=prev_delta,
                 pose_delta_next=next_delta,
@@ -145,6 +171,7 @@ def build_real_rgbd_route_bev_pack(
                     labels,
                     example_path,
                     flow_valid_mask=flow_mask,
+                    hazard=hazard,
                     split=split,
                     pose_delta_prev=prev_delta,
                     pose_delta_next=next_delta,
@@ -166,6 +193,7 @@ def build_real_rgbd_route_bev_pack(
         grid_shape=grid_shape,
         meters_per_cell=meters_per_cell,
         frame_stride=frame_stride,
+        max_frames_per_route=max_frames_per_route,
     )
     manifest.update(
         {
@@ -177,6 +205,7 @@ def build_real_rgbd_route_bev_pack(
             "used_example_count": int(len(examples)),
             "dynamic_positive_cell_fraction": float(dynamic_positive_cells / max(total_cells, 1)),
             "dynamic_positive_frame_count_by_route": route_dynamic_frames,
+            **hazard_summary,
             "heldout_route_ids": val_ids,
             "train_route_ids": train_ids,
             "route_held_out_split_basis": "route_id",
@@ -201,6 +230,7 @@ def _write_example(
     depth_m: np.ndarray,
     flow_xy: np.ndarray,
     flow_valid_mask: np.ndarray,
+    hazard: tuple[np.ndarray, np.ndarray] | None,
     split: str,
     pose_delta_prev: tuple[float, float, float] | None,
     pose_delta_next: tuple[float, float, float] | None,
@@ -234,6 +264,16 @@ def _write_example(
         "target_bev_flow_valid_mask": flow_valid_mask.astype(np.float32),
         **labels.arrays(),
     }
+    if hazard is not None:
+        hazard_grid, hazard_valid = hazard
+        arrays.update(
+            {
+                "target_bev_hazard": np.asarray(hazard_grid, dtype=np.float32),
+                "target_bev_hazard_valid_mask": np.asarray(hazard_valid, dtype=np.float32),
+                "bev_hazard": np.asarray(hazard_grid, dtype=np.float32),
+                "hazard_valid_mask": np.asarray(hazard_valid, dtype=np.float32),
+            }
+        )
     write_deterministic_npz(path, arrays)
     return path
 
@@ -245,10 +285,13 @@ def _example_record(
     example_path: Path,
     *,
     flow_valid_mask: np.ndarray,
+    hazard: tuple[np.ndarray, np.ndarray] | None,
     split: str,
     pose_delta_prev: tuple[float, float, float] | None,
     pose_delta_next: tuple[float, float, float] | None,
 ) -> JsonDict:
+    hazard_grid = hazard[0] if hazard is not None else None
+    hazard_valid = hazard[1] if hazard is not None else None
     return {
         "schema_version": REAL_RGBD_EXAMPLE_SCHEMA_VERSION,
         "example_path": example_path.relative_to(output).as_posix(),
@@ -267,71 +310,13 @@ def _example_record(
         "weak_label_new_goal31_heads": True,
         "product_training_approved": False,
         "dynamic_positive": bool(np.count_nonzero(labels.dynamic_residual_risk > 0.5) > 0),
+        "hazard_positive": bool(hazard_grid is not None and np.count_nonzero(hazard_grid > 0.5) > 0),
         "target_dynamic_residual_risk_positive_cells": int(np.count_nonzero(labels.dynamic_residual_risk > 0.5)),
         "target_dynamic_occupancy_positive_cells": int(np.count_nonzero(labels.dynamic_residual_risk > 0.5)),
         "target_bev_flow_valid_cells": int(np.count_nonzero(flow_valid_mask > 0.0)),
+        "target_bev_hazard_positive_cells": int(np.count_nonzero(hazard_grid > 0.5)) if hazard_grid is not None else 0,
+        "target_bev_hazard_valid_cells": int(np.count_nonzero(hazard_valid > 0.0)) if hazard_valid is not None else 0,
     }
-
-
-def _bev_flow_label(
-    *,
-    labels: RGBDBEVLabels,
-    previous_labels: RGBDBEVLabels | None,
-    pose_delta_prev: tuple[float, float, float] | None,
-    meters_per_cell: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    shape = labels.current_bev_occupied.shape
-    flow = np.zeros((2, *shape), dtype=np.float32)
-    if previous_labels is None or pose_delta_prev is None:
-        return flow, np.zeros(shape, dtype=np.float32)
-    previous_occupied = warp_bev_by_pose_delta(
-        previous_labels.current_bev_occupied,
-        pose_delta_prev,
-        meters_per_cell=meters_per_cell,
-    )
-    residual = np.abs(labels.current_bev_occupied.astype(np.float32) - previous_occupied.astype(np.float32))
-    moving = (labels.dynamic_residual_risk > 0.05) | (residual > 0.5)
-    previous_center = _weighted_center(previous_occupied * moving)
-    current_center = _weighted_center(labels.current_bev_occupied * moving)
-    if previous_center is None or current_center is None or not np.any(moving):
-        return flow, moving.astype(np.float32)
-    flow[0, moving] = np.float32(current_center[1] - previous_center[1])
-    flow[1, moving] = np.float32(current_center[0] - previous_center[0])
-    return flow, moving.astype(np.float32)
-
-
-def _weighted_center(grid: np.ndarray) -> tuple[float, float] | None:
-    weight = np.clip(np.asarray(grid, dtype=np.float32), 0.0, 1.0)
-    total = float(weight.sum())
-    if total <= 1.0e-6:
-        return None
-    rows, cols = np.indices(weight.shape, dtype=np.float32)
-    return (float((rows * weight).sum() / total), float((cols * weight).sum() / total))
-
-
-def _next_pose_delta(frames: list[RouteFrame], index: int) -> tuple[float, float, float] | None:
-    if index + 1 >= len(frames):
-        return None
-    return pose_delta(frames[index].pose, frames[index + 1].pose)
-
-
-def _pack_acceptance_reasons(
-    *,
-    route_count: int,
-    val_route_ids: list[str],
-    route_dynamic_frames: dict[str, int],
-    train_ids: list[str],
-) -> list[str]:
-    reasons: list[str] = []
-    if route_count < 3:
-        reasons.append("real_source_route_count_lt_3")
-    if not val_route_ids:
-        reasons.append("no_heldout_val_route")
-    if any(route_id in train_ids for route_id in val_route_ids):
-        reasons.append("train_val_route_overlap")
-    if sum(route_dynamic_frames.get(route_id, 0) for route_id in val_route_ids) <= 0:
-        reasons.append("heldout_val_route_has_zero_dynamic_positive_frames")
-    return reasons
 
 
 def _base_manifest(
@@ -341,6 +326,7 @@ def _base_manifest(
     grid_shape: tuple[int, int],
     meters_per_cell: float,
     frame_stride: int,
+    max_frames_per_route: int | None,
 ) -> JsonDict:
     return {
         "schema_version": REAL_RGBD_BEV_PACK_SCHEMA_VERSION,
@@ -355,6 +341,7 @@ def _base_manifest(
         "grid_shape": [int(grid_shape[0]), int(grid_shape[1])],
         "meters_per_cell": float(meters_per_cell),
         "frame_stride": int(frame_stride),
+        "max_frames_per_route": int(max_frames_per_route) if max_frames_per_route is not None else None,
         "runtime_allowed_fields": list(RUNTIME_ALLOWED_FIELDS),
         "teacher_only_fields": list(TEACHER_ONLY_FIELDS),
         "weak_label": True,
@@ -364,6 +351,14 @@ def _base_manifest(
         "control_safe": False,
         "raw_pwm_emitted": False,
         "hardware_validated": False,
+        "has_hazard_channel": False,
+        "hazard_source_model": None,
+        "hazard_license_review_status": None,
+        "hazard_positive_frame_count": 0,
+        "hazard_positive_cell_fraction": 0.0,
+        "hazard_weak_label": True,
+        "hazard_source_mock_used": False,
+        "hazard_source_synthetic_used": False,
     }
 
 
@@ -395,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--frame-stride", type=int, default=5, help="Use every Nth frame from each real route.")
     parser.add_argument("--grid-shape", type=_parse_grid_shape, default=(64, 64), help="BEV grid as HxW, for example 64x64.")
     parser.add_argument("--meters-per-cell", type=float, default=0.05, help="BEV meters per cell.")
+    parser.add_argument("--hazard-bev-root", default=None, help="Optional hazard BEV root or per-route hazard BEV parent.")
+    parser.add_argument("--max-frames-per-route", type=int, default=None, help="Optional cap before stride for each route.")
     args = parser.parse_args(argv)
     build_real_rgbd_route_bev_pack(
         dataset=args.dataset,
@@ -405,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         frame_stride=args.frame_stride,
         grid_shape=args.grid_shape,
         meters_per_cell=args.meters_per_cell,
+        hazard_bev_root=args.hazard_bev_root,
+        max_frames_per_route=args.max_frames_per_route,
     )
     return 0
 

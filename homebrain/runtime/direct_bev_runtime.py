@@ -64,6 +64,7 @@ def predict_local_bev_from_rgbd(
         )
     arrays = {
         "bev_prob": torch.sigmoid(outputs["bev_logits"])[0].detach().cpu().numpy().astype(np.float32),
+        "bev_hazard_prob": torch.sigmoid(outputs["hazard_logits"])[0, 0].detach().cpu().numpy().astype(np.float32),
         "uncertainty_prob": torch.sigmoid(outputs["uncertainty_logits"])[0, 0].detach().cpu().numpy().astype(np.float32),
         "dynamic_risk_prob": torch.sigmoid(outputs["dynamic_risk_logits"])[0, 0].detach().cpu().numpy().astype(np.float32),
         "compact_features": outputs["compact_features"][0].detach().cpu().numpy().astype(np.float32),
@@ -104,10 +105,12 @@ def direct_bev_to_local_bev(
         bev = torch.sigmoid(prediction)[0].detach().cpu().numpy().astype(np.float32)
         uncertainty = None
         dynamic = None
+        hazard = None
     else:
         bev = np.asarray(prediction["bev_prob"], dtype=np.float32)
         uncertainty = np.asarray(prediction.get("uncertainty_prob"), dtype=np.float32) if "uncertainty_prob" in prediction else None
         dynamic = np.asarray(prediction.get("dynamic_risk_prob"), dtype=np.float32) if "dynamic_risk_prob" in prediction else None
+        hazard = np.asarray(prediction.get("bev_hazard_prob"), dtype=np.float32) if "bev_hazard_prob" in prediction else None
     if bev.shape[0] != len(DIRECT_BEV_CHANNELS):
         raise ValueError("DirectBEV prediction must have five BEV channels")
     risky = np.maximum(bev[4], dynamic).astype(np.float32) if dynamic is not None else bev[4].astype(np.float32)
@@ -117,6 +120,7 @@ def direct_bev_to_local_bev(
         unknown=np.clip(bev[2], 0.0, 1.0).astype(np.float32),
         traversable=np.clip(bev[3], 0.0, 1.0).astype(np.float32),
         risky=np.clip(risky, 0.0, 1.0).astype(np.float32),
+        hazard=np.clip(hazard, 0.0, 1.0).astype(np.float32) if hazard is not None else None,
         confidence=(1.0 - np.clip(uncertainty, 0.0, 1.0)).astype(np.float32) if uncertainty is not None else None,
         uncertainty=np.clip(uncertainty, 0.0, 1.0).astype(np.float32) if uncertainty is not None else None,
         source=source,

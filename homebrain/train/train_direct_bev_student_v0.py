@@ -52,6 +52,7 @@ class RealRGBDRouteBEVDataset(Dataset[dict[str, Any]]):
         if not isinstance(grid, list) or len(grid) != 2:
             raise ValueError("pack manifest must include grid_shape")
         self.bev_shape = (int(grid[0]), int(grid[1]))
+        self.has_hazard_channel = bool(self.manifest.get("has_hazard_channel", False))
 
     def __len__(self) -> int:
         return len(self.records)
@@ -74,6 +75,15 @@ class RealRGBDRouteBEVDataset(Dataset[dict[str, Any]]):
             "targets": torch.from_numpy(targets),
             "uncertainty": torch.from_numpy(np.asarray(arrays["target_uncertainty_map"], dtype=np.float32)[None, ...]),
             "dynamic": torch.from_numpy(np.asarray(arrays["target_dynamic_residual_risk"], dtype=np.float32)[None, ...]),
+            "hazard": torch.from_numpy(
+                np.asarray(arrays.get("target_bev_hazard", np.zeros(self.bev_shape, dtype=np.float32)), dtype=np.float32)[None, ...]
+            ),
+            "hazard_valid": torch.from_numpy(
+                np.asarray(
+                    arrays.get("target_bev_hazard_valid_mask", np.zeros(self.bev_shape, dtype=np.float32)),
+                    dtype=np.float32,
+                )[None, ...]
+            ),
             "metric_depth": torch.from_numpy(depth_target),
             "metric_depth_valid": torch.from_numpy(depth_valid),
             "dynamic_occupancy": torch.from_numpy(
@@ -144,6 +154,8 @@ def train_direct_bev_student_v0(
                 targets=batch["targets"].to(device),
                 uncertainty=batch["uncertainty"].to(device),
                 dynamic=batch["dynamic"].to(device),
+                hazard=batch["hazard"].to(device) if train_set.has_hazard_channel else None,
+                hazard_valid=batch["hazard_valid"].to(device) if train_set.has_hazard_channel else None,
             )
         scaler.scale(loss).backward()
         scaler.step(optimizer)
@@ -157,7 +169,13 @@ def train_direct_bev_student_v0(
 
     output = Path(out_dir)
     output.mkdir(parents=True, exist_ok=True)
-    metrics: JsonDict = {"training_steps": int(max_steps), "history": history, "final": history[-1] if history else {}}
+    hazard_trained = bool(manifest.get("has_hazard_channel") is True and int(manifest.get("hazard_positive_frame_count", 0) or 0) > 0)
+    metrics: JsonDict = {
+        "training_steps": int(max_steps),
+        "history": history,
+        "final": history[-1] if history else {},
+        "hazard_positive_frame_count": int(manifest.get("hazard_positive_frame_count", 0) or 0),
+    }
     metadata: JsonDict = {
         "source_dataset_name": manifest.get("dataset_name"),
         "train_route_ids": manifest.get("train_route_ids", []),
@@ -165,6 +183,8 @@ def train_direct_bev_student_v0(
         "pack_manifest_sha256": json_sha256({key: value for key, value in manifest.items() if key != "manifest_sha256"}),
         "model_config": model.config.to_dict(),
         "input_modality_flags": {"rgb": True, "depth": True, "pose_delta_prev": True, "previous_action": True},
+        "hazard_head": True,
+        "hazard_trained": hazard_trained,
         "no_future_labels_used": True,
         "no_teacher_fields_at_runtime": True,
         "replay_only": True,
@@ -186,6 +206,8 @@ def direct_bev_loss(
     targets: torch.Tensor,
     uncertainty: torch.Tensor,
     dynamic: torch.Tensor,
+    hazard: torch.Tensor | None = None,
+    hazard_valid: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, JsonDict]:
     bev_logits = outputs["bev_logits"]
     bce = F.binary_cross_entropy_with_logits(bev_logits, targets)
@@ -196,12 +218,24 @@ def direct_bev_loss(
     neg = (dynamic.numel() - dynamic.sum()).detach().clamp_min(1.0)
     pos_weight = torch.clamp(neg / pos, 1.0, 40.0).to(dynamic_logits.device)
     dynamic_loss = F.binary_cross_entropy_with_logits(dynamic_logits, dynamic, pos_weight=pos_weight)
-    loss = bce + dice + 0.5 * uncertainty_loss + 1.5 * dynamic_loss
+    hazard_bce = torch.zeros((), dtype=bev_logits.dtype, device=bev_logits.device)
+    hazard_dice = torch.zeros((), dtype=bev_logits.dtype, device=bev_logits.device)
+    if hazard is not None and hazard_valid is not None and torch.sum(hazard_valid) > 0:
+        hazard_logits = outputs["hazard_logits"]
+        hazard_target = hazard.to(device=hazard_logits.device, dtype=hazard_logits.dtype).clamp(0.0, 1.0)
+        valid = hazard_valid.to(device=hazard_logits.device, dtype=hazard_logits.dtype).clamp(0.0, 1.0)
+        hazard_bce = _masked_bce_with_logits(hazard_logits, hazard_target, valid)
+        hazard_dice = _masked_dice_loss(torch.sigmoid(hazard_logits), hazard_target, valid)
+    hazard_total = hazard_bce + hazard_dice
+    loss = bce + dice + 0.5 * uncertainty_loss + 1.5 * dynamic_loss + 3.0 * hazard_total
     return loss, {
         "bev_bce": float(bce.detach().cpu()),
         "bev_dice": float(dice.detach().cpu()),
         "uncertainty_loss": float(uncertainty_loss.detach().cpu()),
         "dynamic_loss": float(dynamic_loss.detach().cpu()),
+        "loss_hazard_bce": float(hazard_bce.detach().cpu()),
+        "loss_hazard_dice": float(hazard_dice.detach().cpu()),
+        "loss_hazard_total": float(hazard_total.detach().cpu()),
     }
 
 
@@ -229,6 +263,8 @@ def _quick_validate(
                 targets=batch["targets"].to(device),
                 uncertainty=batch["uncertainty"].to(device),
                 dynamic=batch["dynamic"].to(device),
+                hazard=batch["hazard"].to(device) if dataset.has_hazard_channel else None,
+                hazard_valid=batch["hazard_valid"].to(device) if dataset.has_hazard_channel else None,
             )
             losses.append(float(loss.detach().cpu()))
             if index >= 3:
@@ -241,6 +277,25 @@ def _dice_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     target_f = target.flatten(2)
     intersection = (pred_f * target_f).sum(dim=2)
     denom = pred_f.sum(dim=2) + target_f.sum(dim=2)
+    dice = (2.0 * intersection + 1.0) / (denom + 1.0)
+    return 1.0 - dice.mean()
+
+
+def _masked_bce_with_logits(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    per_cell = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    positive = (target * mask).sum().detach()
+    if float(positive.cpu()) > 0.0:
+        negative = (mask.sum() - positive).detach().clamp_min(1.0)
+        pos_weight = torch.clamp(negative / positive.clamp_min(1.0), 1.0, 80.0)
+        per_cell = F.binary_cross_entropy_with_logits(logits, target, pos_weight=pos_weight, reduction="none")
+    return (per_cell * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def _masked_dice_loss(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    pred_f = (pred * mask).flatten(1)
+    target_f = (target * mask).flatten(1)
+    intersection = (pred_f * target_f).sum(dim=1)
+    denom = pred_f.sum(dim=1) + target_f.sum(dim=1)
     dice = (2.0 * intersection + 1.0) / (denom + 1.0)
     return 1.0 - dice.mean()
 

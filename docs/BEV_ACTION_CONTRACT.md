@@ -11,6 +11,7 @@ Each action-audited BEV frame uses a 2D local grid with these channels:
 - `bev_unknown`: probability or binary mask for unobserved or untrusted cells.
 - `bev_traversable`: optional derived probability for cells a robot-sized footprint may traverse.
 - `bev_risky`: optional derived probability for cells that should penalize candidate motion.
+- `bev_hazard`: optional weak semantic floor-hazard probability for free-but-unsafe cells such as cables, chargers, socks, small toys, pet waste, spills, or rug fringes.
 - `bev_confidence`: optional label confidence. Low confidence does not make a frame control-safe.
 
 All channels are interpreted as replay/eval data only unless a later hardware log explicitly provides robot-frame action truth. `control_safe=false` remains mandatory for current artifacts.
@@ -41,9 +42,12 @@ The robot footprint is a disk in grid cells. A frame is structurally bad for act
 
 - `occupied`
 - `risky`
+- `hazard`
 - `unknown`
 - `low_free`
 - `empty_or_out_of_grid`
+
+`bev_hazard` is deliberately not an occupancy channel. A cable or sock on the floor may remain `bev_free=1`, `bev_obstacle=0`, and `bev_unknown=0` while `bev_hazard>0`; candidate scoring should treat that as do-not-traverse risk without degrading free-space/occupancy metrics.
 
 Blocked maps can still be valid action supervision if the robot footprint is sane and the blockage is a real scene condition that should select `stop`.
 
@@ -57,5 +61,9 @@ Every BEV/action artifact must carry or derive:
 - `robot_frame_truth`: the frame is true in the robot action frame, or a controlled robot-frame proxy.
 - `robot_frame_truth_candidate`: the dataset contains enough pose/transform evidence to attempt robot-frame action review.
 - `control_safe`: always `false` for current replay artifacts.
+- `weak_label`: `true` for semantic hazard labels from offline teachers.
+- `trainable_for`: semantic hazard projections must use `hazard_pretrain_only`.
 
 DA3/phone BEVs and TUM/public RGB-D labels are not automatically robot-frame action truth. Public robot-mounted BEVs are also not automatically action truth: only frames with true robot-frame transforms and passing robot-center/footprint/corridor/candidate sanity may set `action_supervision_ok=true`. They may be marked geometry-only for action learning even when their geometry labels are structurally valid.
+
+Offline semantic hazard teachers may project image masks to `bev_hazard` through reviewed camera-to-base ground-plane geometry, but those artifacts remain weak replay labels with `control_safe=false`. Runtime may consume only the student-predicted `bev_hazard`; teacher boxes, masks, and open-vocabulary detector outputs are forbidden at the control tick.

@@ -1,0 +1,59 @@
+{
+  "classes": {
+    "cable": {
+      "prompts": ["cable", "power cord", "charging cable on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 1.0
+    },
+    "power_cord": {
+      "prompts": ["power cord on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 1.0
+    },
+    "charging_cable": {
+      "prompts": ["charging cable on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 1.0
+    },
+    "phone_charger": {
+      "prompts": ["phone charger on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 0.9
+    },
+    "sock": {
+      "prompts": ["sock on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 0.8
+    },
+    "shoe": {
+      "prompts": ["shoe on floor"],
+      "min_confidence": 0.4,
+      "risk_weight": 0.9
+    },
+    "small_toy": {
+      "prompts": ["small toy on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 0.9
+    },
+    "pet_waste": {
+      "prompts": ["pet waste on floor"],
+      "min_confidence": 0.3,
+      "risk_weight": 1.0
+    },
+    "liquid_spill": {
+      "prompts": ["liquid spill on floor"],
+      "min_confidence": 0.3,
+      "risk_weight": 1.0
+    },
+    "rug_fringe": {
+      "prompts": ["rug fringe on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 0.7
+    },
+    "cloth_on_floor": {
+      "prompts": ["cloth on floor"],
+      "min_confidence": 0.35,
+      "risk_weight": 0.8
+    }
+  }
+}

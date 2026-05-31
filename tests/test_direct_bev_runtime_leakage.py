@@ -55,6 +55,7 @@ def test_direct_bev_runtime_outputs_replay_safe_local_bev_and_scores_candidates(
     )
 
     result["local_bev"].validate()
+    assert "bev_hazard_prob" in result["arrays"]
     assert result["debug"]["direct_bev_teacher_fields_used_at_runtime"] is False
     assert result["debug"]["direct_bev_future_labels_used_at_runtime"] is False
     assert result["debug"]["replay_only"] is True

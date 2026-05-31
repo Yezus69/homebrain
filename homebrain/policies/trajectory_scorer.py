@@ -19,6 +19,7 @@ class LocalBev:
     unknown: np.ndarray
     traversable: np.ndarray | None = None
     risky: np.ndarray | None = None
+    hazard: np.ndarray | None = None
     confidence: np.ndarray | None = None
     uncertainty: np.ndarray | None = None
     source: str = "unknown"
@@ -36,6 +37,7 @@ class LocalBev:
             ("unknown", self.unknown),
             ("traversable", self.traversable),
             ("risky", self.risky),
+            ("hazard", self.hazard),
             ("confidence", self.confidence),
             ("uncertainty", self.uncertainty),
         ):
@@ -49,6 +51,7 @@ class CandidateScore:
     risk_score: float
     unknown_penalty: float
     uncertainty_penalty: float
+    hazard_exposure: float
     coverage_gain_proxy: float
     smoothness_penalty: float
     total_score: float
@@ -60,6 +63,7 @@ class CandidateScore:
             "risk_score": round(float(self.risk_score), 6),
             "unknown_penalty": round(float(self.unknown_penalty), 6),
             "uncertainty_penalty": round(float(self.uncertainty_penalty), 6),
+            "hazard_exposure": round(float(self.hazard_exposure), 6),
             "coverage_gain_proxy": round(float(self.coverage_gain_proxy), 6),
             "smoothness_penalty": round(float(self.smoothness_penalty), 6),
             "total_score": round(float(self.total_score), 6),
@@ -133,11 +137,12 @@ class CoverageMemory:
         bev.validate()
         traversable = _as_probability(bev.traversable) if bev.traversable is not None else _as_probability(bev.free)
         risky = _as_probability(bev.risky) if bev.risky is not None else _as_probability(bev.occupied)
+        hazard = _as_probability(bev.hazard) if bev.hazard is not None else 0.0
         free = _as_probability(bev.free)
         occupied = _as_probability(bev.occupied)
         unknown = _as_probability(bev.unknown)
         confidence = _as_probability(bev.confidence) if bev.confidence is not None else None
-        observed = (free >= 0.5) | (occupied >= 0.5) | (traversable >= 0.5) | (risky >= 0.5)
+        observed = (free >= 0.5) | (occupied >= 0.5) | (traversable >= 0.5) | (risky >= 0.5) | (hazard >= 0.5)
         if confidence is not None:
             observed |= (confidence >= 0.2) & (unknown < 0.5)
         covered = (free >= 0.5) | (traversable >= 0.5)
@@ -200,6 +205,7 @@ def _raw_score_candidate(
 ) -> CandidateScore:
     cells = candidate.footprint_cells
     occupied = np.maximum(_as_probability(bev.occupied), _as_probability(bev.risky) if bev.risky is not None else 0.0)
+    hazard = _as_probability(bev.hazard) if bev.hazard is not None else np.zeros_like(occupied, dtype=np.float32)
     traversable = _as_probability(bev.traversable) if bev.traversable is not None else _as_probability(bev.free)
     free = np.maximum(_as_probability(bev.free), traversable)
     unknown = _as_probability(bev.unknown)
@@ -211,16 +217,19 @@ def _raw_score_candidate(
         uncertainty = unknown
 
     occupied_values = _cell_values(occupied, cells, default=1.0)
+    hazard_values = _cell_values(hazard, cells, default=1.0)
     unknown_values = _cell_values(unknown, cells, default=1.0)
     uncertainty_values = _cell_values(uncertainty, cells, default=1.0)
     risk_score = max(float(np.max(occupied_values)), float(np.mean(occupied_values)))
+    hazard_exposure = max(float(np.max(hazard_values)), float(np.mean(hazard_values)))
     unknown_penalty = float(np.mean(unknown_values))
     uncertainty_penalty = float(np.mean(uncertainty_values))
     coverage_gain = _coverage_gain_proxy(candidate, free=free, coverage_memory=coverage_memory)
     smoothness = _smoothness_penalty(candidate)
-    risky = risk_score >= RISKY_CANDIDATE_THRESHOLD
+    risky = max(risk_score, hazard_exposure) >= RISKY_CANDIDATE_THRESHOLD
     total = (
         12.0 * risk_score
+        + 8.0 * hazard_exposure
         + 1.6 * unknown_penalty
         + 0.8 * uncertainty_penalty
         + 0.25 * smoothness
@@ -234,6 +243,7 @@ def _raw_score_candidate(
         risk_score=risk_score,
         unknown_penalty=unknown_penalty,
         uncertainty_penalty=uncertainty_penalty,
+        hazard_exposure=hazard_exposure,
         coverage_gain_proxy=coverage_gain,
         smoothness_penalty=smoothness,
         total_score=total,
@@ -250,6 +260,7 @@ def _adjust_stop_score(score: CandidateScore, *, all_motion_candidates_risky: bo
         risk_score=score.risk_score,
         unknown_penalty=score.unknown_penalty,
         uncertainty_penalty=score.uncertainty_penalty,
+        hazard_exposure=score.hazard_exposure,
         coverage_gain_proxy=score.coverage_gain_proxy,
         smoothness_penalty=score.smoothness_penalty,
         total_score=score.total_score + stop_delta,
@@ -336,4 +347,3 @@ def _shift_mask(mask: np.ndarray, *, row_shift: int, col_shift: int) -> np.ndarr
         src_col_start:src_col_end,
     ]
     return shifted
-

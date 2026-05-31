@@ -21,6 +21,7 @@ def test_direct_bev_student_v0_cpu_smoke_and_checkpoint_roundtrip(tmp_path) -> N
     )
 
     assert outputs["bev_logits"].shape == (2, 5, 16, 16)
+    assert outputs["hazard_logits"].shape == (2, 1, 16, 16)
     assert outputs["uncertainty_logits"].shape == (2, 1, 16, 16)
     assert outputs["dynamic_risk_logits"].shape == (2, 1, 16, 16)
     assert outputs["compact_features"].shape == (2, 4, 16, 16)

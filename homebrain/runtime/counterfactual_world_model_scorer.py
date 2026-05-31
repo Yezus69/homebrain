@@ -132,6 +132,9 @@ def score_candidates_with_world_model(
     risk = np.asarray(future["candidate_risk"], dtype=np.float32).reshape(-1)
     dynamic = np.asarray(future["candidate_dynamic_risk"], dtype=np.float32).reshape(-1)
     unknown = np.asarray(future["candidate_unknown_exposure"], dtype=np.float32).reshape(-1)
+    hazard = _candidate_hazard_exposure(candidates=candidates, local_bev_history=local_bev_history, count=scores.size)
+    scores = (scores + np.float32(4.0) * hazard).astype(np.float32)
+    risk = np.maximum(risk, hazard).astype(np.float32)
     records = [
         {
             "candidate_id": candidate_id,
@@ -139,6 +142,7 @@ def score_candidates_with_world_model(
             "candidate_risk_probability": round(float(risk[index]), 6),
             "candidate_dynamic_risk_probability": round(float(dynamic[index]), 6),
             "candidate_unknown_exposure_probability": round(float(unknown[index]), 6),
+            "candidate_hazard_exposure": round(float(hazard[index]), 6),
             "lower_is_better": True,
             **RUNTIME_SAFETY_DEBUG,
         }
@@ -150,6 +154,7 @@ def score_candidates_with_world_model(
         "candidate_risk": risk,
         "candidate_dynamic_risk": dynamic,
         "candidate_unknown_exposure": unknown,
+        "candidate_hazard_exposure": hazard,
         "selected_candidate_index": selected_index,
         "selected_candidate_id": candidate_ids[selected_index] if candidate_ids else None,
         "candidate_records": records,
@@ -158,6 +163,7 @@ def score_candidates_with_world_model(
             "future_dynamic_risk": future["future_dynamic_risk"],
             "future_uncertainty": future["future_uncertainty"],
             "future_flow_xy": future["future_flow_xy"],
+            "current_predicted_bev_hazard": _latest_hazard_map(local_bev_history),
         },
         "replay_only_decision_debug_artifact": {
             "trajectory_scorer": "counterfactual_dynamic_bev_world_model_v0",
@@ -231,6 +237,39 @@ def _trajectory_array(
     return out
 
 
+def _candidate_hazard_exposure(
+    *,
+    candidates: list[CandidateTrajectory] | None,
+    local_bev_history: list[LocalBev] | np.ndarray | None,
+    count: int,
+) -> np.ndarray:
+    hazard = _latest_hazard_map(local_bev_history)
+    if candidates is None or hazard is None:
+        return np.zeros((count,), dtype=np.float32)
+    exposures = np.zeros((len(candidates),), dtype=np.float32)
+    for index, candidate in enumerate(candidates):
+        values = _cell_values(hazard, candidate.footprint_cells, default=1.0)
+        exposures[index] = np.float32(max(float(np.max(values)), float(np.mean(values))))
+    if exposures.shape[0] == count:
+        return exposures.astype(np.float32)
+    out = np.zeros((count,), dtype=np.float32)
+    width = min(count, exposures.shape[0])
+    out[:width] = exposures[:width]
+    return out
+
+
+def _latest_hazard_map(local_bev_history: list[LocalBev] | np.ndarray | None) -> np.ndarray | None:
+    if isinstance(local_bev_history, list) and local_bev_history:
+        hazard = local_bev_history[-1].hazard
+        if hazard is not None:
+            return np.clip(np.asarray(hazard, dtype=np.float32), 0.0, 1.0)
+    if isinstance(local_bev_history, np.ndarray):
+        history = np.asarray(local_bev_history, dtype=np.float32)
+        if history.ndim == 4 and history.shape[1] > 7:
+            return np.clip(history[-1, 7], 0.0, 1.0).astype(np.float32)
+    return None
+
+
 def _fit_history_channels(history: np.ndarray, channels: int) -> np.ndarray:
     array = np.asarray(history, dtype=np.float32)
     if array.ndim == 3:
@@ -253,6 +292,20 @@ def _local_bev_stack(bev: LocalBev) -> np.ndarray:
     risky = np.asarray(bev.risky, dtype=np.float32) if bev.risky is not None else occupied
     uncertainty = np.asarray(bev.uncertainty, dtype=np.float32) if bev.uncertainty is not None else unknown
     return np.stack([free, occupied, unknown, traversable, risky, risky, uncertainty], axis=0).astype(np.float32)
+
+
+def _cell_values(array: np.ndarray, cells: tuple[tuple[int, int], ...], *, default: float) -> np.ndarray:
+    if not cells:
+        return np.asarray([default], dtype=np.float32)
+    values: list[float] = []
+    for row, col in cells:
+        if 0 <= row < array.shape[0] and 0 <= col < array.shape[1]:
+            values.append(float(array[row, col]))
+        else:
+            values.append(default)
+    if not values:
+        values.append(default)
+    return np.asarray(values, dtype=np.float32)
 
 
 def _outputs_to_numpy(outputs: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:

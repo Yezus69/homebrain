@@ -38,6 +38,10 @@ DINO_ARTIFACT_KINDS: tuple[str, ...] = (
     "patch_features",
     "cls_feature",
 )
+HAZARD_ARTIFACT_KINDS: tuple[str, ...] = (
+    "hazard_masks",
+    "hazard_confidence",
+)
 
 EXPECTED_DTYPES: dict[str, str] = {
     "depth": "float32",
@@ -54,6 +58,8 @@ EXPECTED_DTYPES: dict[str, str] = {
     "bev_preview": "float32",
     "patch_features": "float32",
     "cls_feature": "float32",
+    "hazard_masks": "float32",
+    "hazard_confidence": "float32",
 }
 
 
@@ -414,7 +420,7 @@ def _expected_record_shape(
     width: int,
     height: int,
 ) -> tuple[int, ...]:
-    if kind in DINO_ARTIFACT_KINDS:
+    if kind in DINO_ARTIFACT_KINDS or kind in HAZARD_ARTIFACT_KINDS:
         raw_shape = artifact_record.get("shape")
         if not isinstance(raw_shape, list) or not all(isinstance(value, int) for value in raw_shape):
             raise ValueError(f"{kind} artifact record is missing a concrete shape")

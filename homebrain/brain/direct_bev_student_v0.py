@@ -49,6 +49,8 @@ class DirectBEVStudentV0Config:
             "use_depth": bool(self.use_depth),
             "compact_feature_channels": int(self.compact_feature_channels),
             "output_channels": list(DIRECT_BEV_CHANNELS),
+            "hazard_head": True,
+            "hazard_output_channel": "bev_hazard",
             "runtime_inputs": [
                 "current_rgb",
                 "optional_current_depth",
@@ -62,6 +64,9 @@ class DirectBEVStudentV0Config:
                 "future_labels",
                 "candidate_oracle_cost",
                 "teacher_masks",
+                "hazard_masks",
+                "hazard_boxes",
+                "open_vocab_detector",
                 "ground_truth_global_trajectory",
                 "future_frames",
             ],
@@ -114,6 +119,7 @@ class DirectBEVStudentV0(nn.Module):
             nn.GELU(),
         )
         self.bev_head = nn.Conv2d(hidden * 2, len(DIRECT_BEV_CHANNELS), kernel_size=1)
+        self.hazard_head = nn.Conv2d(hidden * 2, 1, kernel_size=1)
         self.uncertainty_head = nn.Conv2d(hidden * 2, 1, kernel_size=1)
         self.dynamic_risk_head = nn.Conv2d(hidden * 2, 1, kernel_size=1)
         self.feature_head = nn.Conv2d(hidden * 2, int(config.compact_feature_channels), kernel_size=1)
@@ -150,6 +156,7 @@ class DirectBEVStudentV0(nn.Module):
         )
         return {
             "bev_logits": self.bev_head(bev_latent),
+            "hazard_logits": self.hazard_head(bev_latent),
             "uncertainty_logits": self.uncertainty_head(bev_latent),
             "dynamic_risk_logits": self.dynamic_risk_head(bev_latent),
             "compact_features": self.feature_head(bev_latent),
@@ -196,7 +203,11 @@ def load_checkpoint(
             f"expected {DIRECT_BEV_STUDENT_V0_CHECKPOINT_VERSION!r}"
         )
     model = DirectBEVStudentV0(DirectBEVStudentV0Config.from_dict(payload["model_config"]))
-    model.load_state_dict(payload["state_dict"])
+    missing, unexpected = model.load_state_dict(payload["state_dict"], strict=False)
+    unexpected_keys = [key for key in unexpected if not key.startswith("hazard_head.")]
+    missing_keys = [key for key in missing if not key.startswith("hazard_head.")]
+    if unexpected_keys or missing_keys:
+        raise ValueError(f"checkpoint state_dict mismatch: missing={missing_keys}, unexpected={unexpected_keys}")
     model.eval()
     return model, payload
 

@@ -19,7 +19,9 @@ def read_json_object(path: str | Path) -> JsonDict:
 def write_json_object(path: str | Path, data: JsonDict) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(deterministic_json(data) + "\n", encoding="utf-8", newline="\n")
+    with target.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(deterministic_json(data))
+        handle.write("\n")
 
 
 def load_array(path: str | Path) -> np.ndarray:
